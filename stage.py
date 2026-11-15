@@ -226,6 +226,7 @@ HTML = r"""
     <button class="photo" type="button" hidden aria-label="Open the listing photo"><img alt=""></button>
     <div class="liveview" hidden><iframe title="3D model of this car" allow="autoplay; fullscreen; xr-spatial-tracking" referrerpolicy="no-referrer"></iframe></div>
     <div class="liveshadow"></div>
+    <div class="pick3d" hidden></div>
     <div class="progress" hidden></div>
     <div class="empty" hidden></div>
   </section>
@@ -320,7 +321,8 @@ button.opt{cursor:pointer}
 .stage{--studio:#1b1d21}
 .live-blend .bg{background:var(--studio)}
 .live-blend .zone{z-index:auto}
-.stage.live-blend .liveview{z-index:2;right:auto;transform:none;pointer-events:none;-webkit-mask-image:none;mask-image:none}
+/* the edges still dissolve: a model's own cast shadow can run past the frame, and must fade out, not stop at a line */
+.stage.live-blend .liveview{z-index:2;right:auto;transform:none}
 .live-blend .shade{z-index:3}
 .live-blend :is(.top,.head,.verdict,.rail,.tabs,.dock),.live-blend .zone>:is(.photo,.progress,.empty){z-index:4}
 .liveshadow{display:none;position:absolute;z-index:3;border-radius:50%;opacity:0;transition:opacity .7s;
@@ -329,13 +331,29 @@ button.opt{cursor:pointer}
 .live-blend .liveshadow{display:block}
 .live-blend .liveview.ready~.liveshadow{opacity:1}
 .liveview.ready{opacity:1}
+@media (min-width:900px){.pick3d{padding:0 40px;align-items:center}.pick3d .p-head,.pick3d .p-row{width:min(1010px,100%)}.pick3d .skitem{flex-basis:190px}}
 .liveview[hidden]{display:none}
 .liveview iframe{display:block;width:100%;height:100%;border:0;background:transparent}
 /* without the viewer API it stays an honest framed window */
 .liveview.plain{inset:4px 12px;border-radius:18px;border:1px solid rgba(255,255,255,.2);background:#0d0e11;-webkit-mask-image:none;mask-image:none}
 .live3d .zone::before{content:"Loading the 3D model";position:absolute;inset:0;display:grid;place-items:center;font:500 13px var(--sans);color:var(--dim)}
-.live3d .gl{opacity:0!important}
-.live3d:not(.live-blend) .gl{pointer-events:none}
+.live3d .gl,.picking .gl{opacity:0!important;pointer-events:none}
+/* while a new car is being worked out, the old car's live view steps aside */
+.stage.busy .liveview{visibility:hidden}
+.stage.busy .liveshadow,.stage.busy .pick3d{display:none}
+/* no model picked yet: the choices sit where the car will go */
+.pick3d{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;gap:8px;padding:0 20px}
+.pick3d[hidden]{display:none}
+.pick3d .p-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font:600 10.5px var(--sans);letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+.pick3d .p-head button{font:500 12px var(--sans);letter-spacing:0;text-transform:none;color:var(--mute);text-decoration:underline;text-underline-offset:3px}
+.pick3d .p-row{display:flex;gap:10px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px;scroll-snap-type:x proximity}
+.pick3d .p-row::-webkit-scrollbar{display:none}
+.pick3d .skitem{flex:0 0 148px;scroll-snap-align:start;background:rgba(20,21,25,.72)}
+.pick3d .skitem img,.pick3d .skitem .noimg{aspect-ratio:16/9}
+.pick3d .skitem b{-webkit-line-clamp:1;padding-top:6px;font-size:12px}
+.pick3d .skitem span:last-child{padding-bottom:7px}
+.pick3d .p-note{font:400 13px/1.4 var(--sans);color:var(--mute);text-align:center}
+.picking .zone{min-height:176px}
 .live3d .zone{min-height:190px}
 .photo img{width:100%;height:100%;object-fit:cover;display:block}
 .credit{margin:7px 6px 0;text-align:center;font:400 9.5px/1.3 var(--sans);color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -587,7 +605,7 @@ function create(root) {
   const S = { d: {}, offer: {}, busy: false, shot: "", tab: "", outbox: [], waiting: false, remember: true };
   const el = { garage: $(".garage"), head: $(".head"), verdict: $(".verdict"), rail: $(".rail"), legend: $(".legend"), track: $(".track"), nums: $(".nums"),
     tabs: $(".tabs"), dock: $(".dockbar"), pop: $(".pop"), sheet: $(".sheet"), sheetTabs: $(".sheet-tabs"), sheetBody: $(".sheet-body"),
-    scrim: $(".scrim"), light: $(".lightbox"), toast: $(".toast"), photo: $(".photo"), progress: $(".progress"), empty: $(".empty"), live: $(".liveview"), shadow: $(".liveshadow"), zone: $(".zone"), gl: $(".gl") };
+    scrim: $(".scrim"), light: $(".lightbox"), toast: $(".toast"), photo: $(".photo"), progress: $(".progress"), empty: $(".empty"), live: $(".liveview"), shadow: $(".liveshadow"), zone: $(".zone"), picker: $(".pick3d") };
 
   /* one message to Python at a time: each one makes the app run again */
   const post = (name, value) => { S.outbox.push([name, value]); pump(); };
@@ -883,11 +901,13 @@ function create(root) {
   const SK_SLOT = "dealsheet.sketchfab";
   const skApi = () => root.dataset.skfb || "https://api.sketchfab.com";
   const skSite = () => root.dataset.skfbSite || "https://sketchfab.com";
-  /* The live model plays in Sketchfab's viewer, and the page runs that viewer through its API: the backdrop is set
-     to the studio's own colour, the car is framed at the size and height the built-in car is drawn at, and a
-     drag turns it the same way. The viewer's picture is opaque, so the studio around it is that one flat colour. */
+  /* The live model plays in Sketchfab's viewer. Its picture is opaque, so the studio around it is one flat
+     colour, the same one the viewer is told to use. The page frames the car the way the studio camera would
+     (same lens, same distance in car lengths, same height) and turns it slowly while nobody is touching it.
+     Touch and mouse go to the viewer itself: when the camera is not where the page last put it, the person
+     is moving it, and the page waits until they have stopped. */
   const LIVE_BG = [27, 29, 33];            /* --studio in the stylesheet: the two must be the same colour */
-  const live = { api: null, cam: null, geo: null, az: 0, vel: 0, held: 0, down: null, sent: "", loop: 0, last: 0 };
+  const live = { api: null, base: null, o: null, cmd: null, geo: null, fov: 0, userAt: 0, away: false, holdUntil: 0, timer: 0, last: 0 };
   const stillLife = matchMedia("(prefers-reduced-motion:reduce)").matches;
   let liveKey = "", skLib = null;
   S.paintLive = () => paintLive();
@@ -898,70 +918,92 @@ function create(root) {
     s.onerror = () => { skLib = null; fail(new Error("blocked")); };
     document.head.appendChild(s);
   }));
-  /* where the built-in car sits and how big it is drawn (the studio camera has a 30 degree lens) */
+  /* where the studio draws a car and how big: its camera has a 30 degree lens and sits D metres away */
   function liveGeo() {
-    const R = root.getBoundingClientRect(), Z = el.zone.getBoundingClientRect(), zw = Math.max(Z.width, 10), zh = Math.max(Z.height, 10);
+    const R = root.getBoundingClientRect(), Z = el.zone.getBoundingClientRect(), zw = Math.max(Z.width, 10), zh = Math.max(Z.height, 10), H = Math.max(R.height, 10);
     let perUnit = Math.min(zw / 6.7, zh / 2.75), cx = zw / 2;
     if (el.photo.offsetWidth) {                                  /* the listing photo beside the car: make room for it */
       const edge = el.photo.getBoundingClientRect().left - Z.left - 18;
       if (cx + perUnit * 3.1 > edge && edge > 200) { perUnit = Math.min(perUnit, edge / 6.7); cx = edge / 2; }
     }
-    const D = Math.max(R.height, 10) / (2 * Math.tan(Math.PI / 12) * perUnit), L = 4.5 * perUnit;
-    return { zh, cx, perUnit, L, elev: Math.atan((D * 0.17 + 0.5 - 0.72) / D), w: Math.min(Math.max(L * 1.3, 300), zw) };
+    const D = H / (2 * Math.tan(Math.PI / 12) * perUnit), L = 4.5 * perUnit;
+    return { zh, cx, perUnit, L, D, elev: Math.atan((D * 0.17 + 0.5 - 0.72) / D), fov: 2 * Math.atan(Math.tan(Math.PI / 12) * zh / H) * 180 / Math.PI, w: Math.min(Math.max(L * 1.3, 300), zw) };
+  }
+  /* put the viewer's camera on its circle around the car. Sketchfab scenes have z up. */
+  function livePlace(seconds) {
+    const o = live.o, flat = o.R * Math.cos(o.elev);
+    live.cmd = [o.T[0] + flat * Math.cos(o.az), o.T[1] + flat * Math.sin(o.az), o.T[2] + o.R * Math.sin(o.elev)];
+    try { live.api.setCameraLookAt(live.cmd, o.T, seconds || 0); } catch (e) {}
+    if (seconds) live.holdUntil = performance.now() + seconds * 1000 + 400;
+  }
+  /* back to the studio's framing, seen from whatever side the car is on now */
+  function liveReset(seconds) {
+    const g = live.geo, b = live.base; if (!g || !b || !live.o) return;
+    if (Math.abs(g.fov - live.fov) > 0.01) { live.fov = g.fov; try { live.api.setFov(g.fov, () => {}); } catch (e) {} }
+    Object.assign(live.o, { T: b.T.slice(), R: g.D * b.carLength / 4.5, elev: g.elev });
+    livePlace(seconds);
   }
   function liveLayout() {
     if (!root.classList.contains("live-blend")) return;
     const g = live.geo = liveGeo(), sw = g.L * 1.12, sh = g.L * 0.2;
     el.live.style.left = (g.cx - g.w / 2) + "px"; el.live.style.width = g.w + "px";
     el.shadow.style.cssText = `left:${g.cx - sw / 2}px;top:${g.zh / 2 + 0.72 * g.perUnit * Math.cos(g.elev) + g.L * 0.012 - sh / 2}px;width:${sw}px;height:${sh}px`;
-    live.sent = "";
+    if (live.o) liveReset(0);
   }
-  /* point the viewer's camera: it circles the car at the studio camera's height. Sketchfab scenes have z up. */
-  function liveAim() {
-    const c = live.cam, g = live.geo; if (!c || !g || !live.api) return;
-    const R = c.R0 * 0.84 * g.zh / g.L, az = c.az0 - live.az, key = az.toFixed(4) + "|" + R.toFixed(3) + "|" + g.elev.toFixed(4);
-    if (key === live.sent) return;
-    live.sent = key; const flat = R * Math.cos(g.elev);
-    try { live.api.setCameraLookAt([c.T[0] + flat * Math.cos(az), c.T[1] + flat * Math.sin(az), c.T[2] + R * Math.sin(g.elev)], c.T, 0); } catch (e) {}
-  }
-  function liveTick(now) {
-    if (!live.cam || !root.isConnected || !root.classList.contains("live-blend")) { live.loop = 0; return; }
-    live.loop = requestAnimationFrame(liveTick);
-    const dt = Math.min((now - (live.last || now)) / 1000, 0.05); live.last = now;
-    if (document.hidden) return;
-    if (!live.down) { live.az += live.vel; live.vel *= 0.93; if (!stillLife && now - live.held > 3500 && !S.busy) live.az += dt * 0.09; }
-    liveAim();
+  function liveTick() {
+    live.timer = 0;
+    const api = live.api, o = live.o;
+    if (!api || !o || !root.isConnected || !root.classList.contains("live-blend")) return;
+    const now = performance.now(), dt = Math.min((now - (live.last || now)) / 1000, 0.1), far = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+    const again = () => { if (live.api === api && !live.timer) live.timer = setTimeout(liveTick, 33); };
+    live.last = now;
+    if (document.hidden || S.busy || now < live.holdUntil) { again(); return; }
+    try {
+      api.getCameraLookAt((err, cam) => {
+        if (live.api !== api) return;
+        if (!err && cam && Array.isArray(cam.position) && Array.isArray(cam.target) && live.cmd) {
+          if (far(cam.position, live.cmd) > o.R * 0.002 || far(cam.target, o.T) > o.R * 0.002) {     /* the person is moving it */
+            live.userAt = now; live.away = true; live.cmd = cam.position.slice(); o.T = cam.target.slice();
+            o.az = Math.atan2(cam.position[1] - cam.target[1], cam.position[0] - cam.target[0]);
+          } else if (!stillLife && now - live.userAt > 3500) {
+            if (live.away) { live.away = false; liveReset(0.7); } else { o.az -= dt * 0.09; livePlace(0); }
+          }
+        }
+        again();
+      });
+    } catch (e) { again(); }
   }
   function liveStop() {
-    if (live.loop) cancelAnimationFrame(live.loop);
-    Object.assign(live, { api: null, cam: null, geo: null, sent: "", loop: 0, down: null, vel: 0 });
+    if (live.timer) clearTimeout(live.timer);
+    Object.assign(live, { api: null, base: null, o: null, cmd: null, geo: null, fov: 0, away: false, holdUntil: 0, timer: 0 });
     root.classList.remove("live-blend"); el.live.style.left = el.live.style.width = ""; el.shadow.removeAttribute("style");
   }
-  /* a drag on the studio turns the live car, as it turns the built-in one */
-  el.gl.addEventListener("pointerdown", (e) => { if (live.cam) live.down = { x: e.clientX }; });
-  el.gl.addEventListener("pointermove", (e) => { if (!live.cam || !live.down) return; const dx = e.clientX - live.down.x; live.down.x = e.clientX; live.vel = dx * 0.0065; live.az += live.vel; live.held = performance.now(); });
-  for (const name of ["pointerup", "pointercancel"]) el.gl.addEventListener(name, () => { live.down = null; });
   if (window.ResizeObserver) { const ro = new ResizeObserver(() => liveLayout()); ro.observe(root); ro.observe(el.zone); }
-  /* once the viewer has framed the whole car, read where its camera sits and take the camera over */
+  /* once the viewer has framed the whole car, read its camera and lens: they give the car's size in the model's own units */
   function settle(api, uid) {
     let last = "", tries = 0, done = false;
-    const finish = (cam) => {
+    const finish = (cam, lens) => {
       if (done || liveKey !== uid) return; done = true;
+      root.classList.add("live-blend"); live.geo = liveGeo();
       if (cam) {
-        const T = cam.target, d = cam.position.map((v, i) => v - T[i]);
-        Object.assign(live, { api, cam: { T, R0: Math.hypot(d[0], d[1], d[2]) || 1, az0: Math.atan2(d[1], d[0]) }, az: 0, vel: 0, held: performance.now(), last: 0 });
-        try { api.setUserInteraction(false, () => {}); } catch (e) {}
+        const T = cam.target.slice(), d = cam.position.map((v, i) => v - T[i]), far = Math.hypot(d[0], d[1], d[2]) || 1;
+        /* the viewer fits the car's bounding ball in its lens, and a car is about 1.77 ball radii long */
+        Object.assign(live, { api, base: { T, carLength: 1.773 * far * Math.sin((lens || 45) * Math.PI / 360) }, o: { T: T.slice(), R: far, elev: 0, az: Math.atan2(d[1], d[0]) }, fov: 0, userAt: 0, away: false, last: 0 });
       }
-      root.classList.add("live-blend"); liveLayout(); liveAim();
+      liveLayout();
       setTimeout(() => { if (liveKey === uid) el.live.classList.add("ready"); }, cam ? 260 : 0);
-      if (cam && !live.loop) live.loop = requestAnimationFrame(liveTick);
+      if (cam && !live.timer) live.timer = setTimeout(liveTick, 300);
     };
     const read = () => {
       if (done || liveKey !== uid) return;
       try {
         api.getCameraLookAt((err, cam) => {
           const ok = !err && cam && Array.isArray(cam.position) && Array.isArray(cam.target), pos = ok ? cam.position.map((v) => (+v).toFixed(3)).join() : "";
-          if ((ok && pos === last) || ++tries > 14) { finish(ok ? cam : null); return; }
+          if ((ok && pos === last) || ++tries > 14) {
+            if (!ok) { finish(null); return; }
+            try { api.getFov((e2, lens) => finish(cam, e2 ? 0 : +lens)); } catch (e) { finish(cam, 0); }
+            return;
+          }
           last = pos; setTimeout(read, 220);
         });
       } catch (e) { finish(null); }
@@ -998,9 +1040,45 @@ function create(root) {
     }).catch(plain);
     setTimeout(() => { if (liveKey === uid && !linked) plain(); }, 12000);     /* never leave it hidden */
   }
+  /* No model picked for this car yet: its choices from the model library sit where the car will go. */
+  const pick = { key: "", items: null, busy: false, failed: false };
+  async function findModels(q) {
+    const res = await fetch(`${skApi()}/v3/search?type=models&count=12&q=${encodeURIComponent(q)}`);
+    if (!res.ok) throw new Error("status " + res.status);
+    return ((await res.json()).results || []).filter((m) => m && m.uid).map((m) => {
+      const imgs = (((m.thumbnails || {}).images) || []).slice().sort((x, y) => (x.width || 0) - (y.width || 0));
+      const im = imgs.find((i) => (i.width || 0) >= 240) || imgs[imgs.length - 1] || {};
+      return { uid: String(m.uid), name: m.name || "Model", author: ((m.user || {}).displayName || (m.user || {}).username || "unknown artist"), thumb: safeUrl(im.url) || "", size: 0, down: !!m.isDownloadable, url: safeUrl(m.viewerUrl) || "" };
+    });
+  }
+  const modelTile = (m, cls) => `<button type="button" class="skitem${cls || ""}" data-uid="${esc(m.uid)}">${m.thumb ? `<img src="${esc(m.thumb)}" alt="" loading="lazy">` : '<span class="noimg"></span>'}<b>${esc(m.name)}</b><span>${esc(m.author)}${m.size ? " · " + mb(m.size) : ""}</span></button>`;
+  async function showModel(m) {
+    try { await store.set(modelSlot(), { embed: m.uid, name: m.name, author: m.author, url: m.url || skSite() + "/3d-models/" + m.uid, down: m.down }); }
+    catch (e) { toast("That choice could not be saved on this device.", true); return false; }
+    paintLive(); if (S.scene) S.scene.reload(S.d);
+    toast("Showing “" + m.name + "”. Drag it to look around."); return true;
+  }
+  function paintPicker(rec) {
+    const d = S.d, wanted = !!d.hasCar && !S.busy && !rec && !(d.model && d.model.url), q = d.find3d || d.title || "";
+    root.classList.toggle("picking", wanted); el.picker.hidden = !wanted;
+    if (!wanted) return;
+    const key = (d.modelKey || d.activeId || "") + "|" + q;
+    if (pick.key !== key) Object.assign(pick, { key, items: null, busy: false, failed: false });
+    if (!pick.items && !pick.busy && !pick.failed && q) {
+      pick.busy = true;
+      findModels(q).then((items) => { if (pick.key === key) pick.items = items; }, () => { if (pick.key === key) pick.failed = true; })
+        .then(() => { if (pick.key === key) { pick.busy = false; paintLive(); } });
+    }
+    const more = '<button type="button" class="p-more">Search or load a file</button>';
+    el.picker.innerHTML = pick.items && pick.items.length
+      ? `<div class="p-head"><span>Pick a 3D model of this car</span>${more}</div><div class="p-row">${pick.items.map((m) => modelTile(m)).join("")}</div>`
+      : `<div class="p-note">${pick.busy || (!pick.items && !pick.failed) ? "Looking for 3D models of this car" : pick.failed ? "The model library could not be reached." : "No 3D model of this car turned up."}${pick.busy ? "" : " " + more}</div>`;
+    el.picker.querySelectorAll(".skitem").forEach((b) => { b.onclick = () => { const m = (pick.items || []).find((x) => x.uid === b.dataset.uid); if (m) showModel(m); }; });
+    const btn = el.picker.querySelector(".p-more"); if (btn) btn.onclick = () => openSheet("model");
+  }
   async function paintLive() {
     const d = S.d; let rec = null;
-    try { if (d.hasCar && !S.busy) rec = await store.get(modelSlot()); } catch (e) {}
+    try { if (d.hasCar) rec = await store.get(modelSlot()); } catch (e) {}
     const frame = el.live.querySelector("iframe");
     if (rec && rec.embed) {
       el.live.hidden = false; root.classList.add("live3d");
@@ -1011,6 +1089,7 @@ function create(root) {
     } else if (liveKey || !el.live.hidden) {
       liveKey = ""; liveStop(); frame.removeAttribute("src"); el.live.hidden = true; el.live.classList.remove("plain", "ready"); root.classList.remove("live3d");
     }
+    paintPicker(d.hasCar && !S.busy ? rec : null);
   }
   const skToken = () => { try { return localStorage.getItem(SK_SLOT) || ""; } catch (e) { return ""; } };
   const mb = (n) => (n ? (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + " MB" : "");
@@ -1022,10 +1101,9 @@ function create(root) {
     const sk = S.skfb || (S.skfb = {});
     if (sk.key !== (d.modelKey || d.activeId)) Object.assign(sk, { key: d.modelKey || d.activeId, q: d.find3d || d.title || "", items: null, busy: false, ask: "", pulling: "" });
     const site = "https://sketchfab.com/search?features=downloadable&type=models&q=" + encodeURIComponent(sk.q || name);
-    const builtIn = d.model ? "the built-in concept coupe" : "a simple shape for this body type";
-    const card = (m) => `<button type="button" class="skitem${sk.pulling === m.uid ? " busy" : ""}" data-uid="${esc(m.uid)}">${m.thumb ? `<img src="${esc(m.thumb)}" alt="" loading="lazy">` : '<span class="noimg"></span>'}<b>${esc(m.name)}</b><span>${esc(m.author)}${m.size ? " · " + mb(m.size) : ""}</span></button>`;
+    const card = (m) => modelTile(m, sk.pulling === m.uid ? " busy" : "");
     const live = rec && rec.embed, mine = rec && rec.file;
-    el.sheetBody.innerHTML = `<div class="lead-line">${live ? "Showing a live 3D model" : mine ? "Showing your 3D model" : "Showing " + builtIn}</div>` +
+    el.sheetBody.innerHTML = `<div class="lead-line">${live ? "Showing a live 3D model" : mine ? "Showing your 3D model" : (d.model ? "Showing the built-in concept coupe" : "No 3D model picked yet")}</div>` +
       `<div class="lead-sub">${live ? "“" + esc(rec.name) + "” by " + esc(rec.author || "its artist") : mine ? esc(rec.name) + " · " + mb(rec.file.byteLength) : "Find a 3D model of the actual car and it takes the place of this one. No account needed."}</div>` +
       (live ? `<div><button type="button" class="btn ghost drop">Remove</button></div>` + (rec.down ? `<div class="tiny"><button type="button" class="textbtn skdown" data-uid="${esc(rec.embed)}">Have a Sketchfab account? Download it into the studio instead</button></div>` : "") : "") +
       (mine ? `<div><button type="button" class="btn ghost turn">Turn 90°</button> <button type="button" class="btn ghost drop">Remove</button></div>` +
@@ -1040,7 +1118,7 @@ function create(root) {
       `<div class="linkrow"><input type="url" class="linkbox linkurl" placeholder="or paste a link to a .glb file" inputmode="url"><button type="button" class="btn ghost loadlink">Load</button></div>` +
       `<div class="hintbox">Your choice is kept in this browser, on this device only. Nothing is uploaded to the app or stored in it, and it is used for every ${esc(name)} in your garage. Use models you have the right to use, and keep the artist's credit.</div>` +
       `<div class="tiny"><a href="${esc(site)}" target="_blank" rel="noopener">Open the full library ${ARROW}</a>${skToken() ? ' · <button type="button" class="textbtn skforget">Forget my Sketchfab token</button>' : ""}</div>` +
-      (d.canDetail ? `<h3>Built-in car</h3><div class="choice"><button type="button" class="btn ghost${d.detailed ? "" : " on"}" data-detail="0">Simple shape</button><button type="button" class="btn ghost${d.detailed ? " on" : ""}" data-detail="1">Concept coupe</button></div>` : "");
+      (d.canDetail ? `<h3>Built-in car</h3><div class="choice"><button type="button" class="btn ghost${d.detailed ? "" : " on"}" data-detail="0">None</button><button type="button" class="btn ghost${d.detailed ? " on" : ""}" data-detail="1">Concept coupe</button></div>` : "");
     const file = el.sheetBody.querySelector(".glb"), refresh = () => { renderModelTab(); paintLive(); if (S.scene) S.scene.reload(S.d); };
     const keep = async (buf, label, credit) => {
       if (buf.byteLength > 80 * 1048576) { toast("That model is over 80 MB, which is too heavy for a phone. Pick a smaller one.", true); return false; }
@@ -1055,14 +1133,7 @@ function create(root) {
       sk.q = el.sheetBody.querySelector(".skq").value.trim(); if (!sk.q || sk.busy) return;
       sk.busy = true; sk.items = null; renderModelTab();
       try {
-        const res = await fetch(`${skApi()}/v3/search?type=models&count=12&q=${encodeURIComponent(sk.q)}`);
-        if (!res.ok) throw new Error("status " + res.status);
-        const data = await res.json();
-        sk.items = (data.results || []).filter((m) => m && m.uid).map((m) => {
-          const imgs = (((m.thumbnails || {}).images) || []).slice().sort((x, y) => (x.width || 0) - (y.width || 0));
-          const im = imgs.find((i) => (i.width || 0) >= 240) || imgs[imgs.length - 1] || {};
-          return { uid: String(m.uid), name: m.name || "Model", author: ((m.user || {}).displayName || (m.user || {}).username || "unknown artist"), thumb: safeUrl(im.url) || "", size: 0, down: !!m.isDownloadable, url: safeUrl(m.viewerUrl) || "" };
-        });
+        sk.items = await findModels(sk.q);
       } catch (err) { sk.items = null; toast("The model library could not be reached. Check your connection and try again.", true); }
       sk.busy = false; renderModelTab();
     };
@@ -1093,8 +1164,7 @@ function create(root) {
     /* tap a result: it plays on the main screen in the library's own viewer */
     el.sheetBody.querySelectorAll(".skitem").forEach((b) => { b.onclick = async () => {
       const m = (sk.items || []).find((x) => x.uid === b.dataset.uid); if (!m) return;
-      try { await store.set(modelSlot(), { embed: m.uid, name: m.name, author: m.author, url: m.url || skSite() + "/3d-models/" + m.uid, down: m.down }); refresh(); closeSheet(); toast("Showing “" + m.name + "” live. Drag it to look around."); }
-      catch (e) { toast("That choice could not be saved on this device.", true); }
+      if (await showModel(m)) { renderModelTab(); closeSheet(); }
     }; });
     on(".skdown", () => pull(el.sheetBody.querySelector(".skdown").dataset.uid));
     on(".sksave", () => { const v = el.sheetBody.querySelector(".sktoken").value.trim(); if (v.length < 8) { toast("Paste your Sketchfab API token first.", true); return; } try { localStorage.setItem(SK_SLOT, v); } catch (e) {} const uid = sk.ask; sk.ask = ""; pull(uid); });
@@ -1591,7 +1661,8 @@ function makeScene(THREE, addons, root, S) {
     if (key === carKey && !force) return;
     const first = carKey === ""; carKey = key; showCredit(null);
     if (!d.hasCar) { for (const holder of [upright, mirrored]) while (holder.children.length) { const old = holder.children.pop(); if (holder === upright) dispose(old); } root.dataset.car = "none"; return; }
-    place(buildShape(d.paint || "#8a9099", d.shape), true); root.dataset.car = "shape";
+    for (const holder of [upright, mirrored]) while (holder.children.length) { const old = holder.children.pop(); if (holder === upright) dispose(old); }
+    root.dataset.car = "none";
     if (!first) angle = -0.62;
     if (!addons) return;
     store.get("glb:" + (d.modelKey || d.activeId || "")).catch(() => null).then((rec) => {

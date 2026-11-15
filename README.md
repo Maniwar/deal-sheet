@@ -17,10 +17,11 @@ what that car has been selling for and gives you a typical sale price, the comps
 
 ## What you see
 
-- **The car.** A 3D car in the listing's paint color that you can drag to spin: a simple shape of the
-  right body type (coupe, convertible, sedan, hatchback, wagon, SUV, pickup or van), or, for coupes,
-  a detailed concept coupe if you pick it (see Credits). Neither is a model of any maker's design.
-  To see the actual car in 3D, pick a model of it in the **3D model** tab (see below).
+- **The car.** Until you pick one, the place where the car goes shows 3D models of that car from
+  Sketchfab's public library (the app searches it for the car's name). Tap one and it becomes the
+  car on the main screen, for every car of that make and model in your garage. **Search or load a
+  file** opens the **3D model** tab for other searches, your own `.glb`, or the built-in concept
+  coupe (see Credits). The app does not draw a stand-in car of its own.
 - **The listing photo.** The listing's own picture sits beside the title on a phone and beside the
   car on a wide screen. Tap it to see it large. If the site would not give the app a picture, tap
   **Add photo**.
@@ -175,13 +176,14 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   The credit shows under the car whenever the model is on screen.
 - **three.js** and its glTF loader (MIT), **DM Sans** and **JetBrains Mono** (SIL Open Font License).
 
-**A 3D model of the actual car.** The app does not ship models of real cars. In the **3D model** tab,
-**Find models** searches Sketchfab's public library and shows the results in the app. Tap one and
-it plays on the main screen in Sketchfab's own viewer, with the artist's name on it: no account,
-and nothing is downloaded or stored in the app. The app runs that viewer through its API: the backdrop is set to the studio's own colour, the car is
-framed at the size and height the built-in car is drawn at, a drag turns it and it turns slowly on
-its own, and the page's shading and a ground shadow are laid over it. So the car sits in the page
-instead of in a window. (The viewer's picture cannot be made see-through on a free account, which
+**A 3D model of the actual car.** The app does not ship models of real cars. The picker on the
+main screen and **Find models** in the **3D model** tab search Sketchfab's public library and show
+the results in the app. Tap one and it plays on the main screen in Sketchfab's own viewer, with the
+artist's name on it: no account, and nothing is downloaded or stored in the app. The app sets that
+viewer's backdrop to the studio's own colour and frames the car the way the studio camera would
+(same lens, distance and height), turns it slowly while nobody is touching it, and lays the page's
+shading and a ground shadow over it. So the car sits in the page instead of in a window. Touch and
+mouse go to the viewer's own controls; when you let go, the app returns the car to its framing. (The viewer's picture cannot be made see-through on a free account, which
 is why the studio around a live car is one flat colour.) With a free Sketchfab account you can instead
 download a model into the studio (paste your API token once), or load a `.glb` file or link you
 already have. Your choice is kept in your browser on your device only and is used for every car of
