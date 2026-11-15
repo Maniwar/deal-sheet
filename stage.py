@@ -324,6 +324,8 @@ a{color:inherit}
 .chip{flex:none;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.04);font:500 12.5px var(--sans);color:var(--mute);white-space:nowrap;max-width:210px;overflow:hidden;text-overflow:ellipsis;transition:all .2s}
 .chip.on{color:var(--ink);border-color:rgba(255,255,255,.55);background:rgba(255,255,255,.12)}
 .chip.add{color:var(--ink);border-style:dashed}
+.chipx{flex:none;min-width:30px;height:30px;margin-left:-2px;align-self:center;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--mute);font:500 15px/1 var(--sans);transition:all .2s}
+.chipx.sure{padding:0 11px;color:var(--warn);border-color:rgba(245,184,74,.5);font-size:12px}
 .icon{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:var(--mute);border:1px solid var(--line);background:rgba(255,255,255,.04)}
 .icon svg{width:17px;height:17px}
 
@@ -714,7 +716,7 @@ function create(root) {
     if (!/^[0-9a-f]{16}$/.test(id)) { id = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join(""); try { localStorage.setItem("dealsheet.client", id); } catch (e) {} }
     return id;
   })();
-  const post = (name, value) => { if (["build", "more", "verify", "prefs"].includes(name) && value && typeof value === "object" && !Array.isArray(value)) value = { ...value, cid: CID }; S.outbox.push([name, value]); pump(); };
+  const post = (name, value) => { if (["build", "more", "verify", "prefs", "reoffer"].includes(name) && value && typeof value === "object" && !Array.isArray(value)) value = { ...value, cid: CID }; S.outbox.push([name, value]); pump(); };
   const pump = () => { if (S.waiting || !S.outbox.length || !S.send) return; const [name, value] = S.outbox.shift(); S.waiting = true; clearTimeout(S.waitTimer); S.waitTimer = setTimeout(() => { S.waiting = false; pump(); }, 4000); S.send(name, value); };
 
   let toastTimer = 0;
@@ -724,10 +726,27 @@ function create(root) {
 
   /* ---------- top bar ---------- */
   function paintTop(d) {
-    const chips = (d.garage || []).map((c) => `<button type="button" class="chip${c.active ? " on" : ""}" data-id="${esc(c.id)}">${esc(c.label)}</button>`).join("");
+    /* the car on screen carries a small cross: two taps take it out of the garage */
+    const chips = (d.garage || []).map((c) => `<button type="button" class="chip${c.active ? " on" : ""}" data-id="${esc(c.id)}">${esc(c.label)}</button>` +
+      (c.active && d.hasCar ? `<button type="button" class="chipx" data-drop="${esc(c.id)}" aria-label="Remove ${esc(c.label)} from the garage">×</button>` : "")).join("");
     el.garage.innerHTML = chips + '<button type="button" class="chip add" data-add="1">+ Add a car</button>';
+    /* keep the car on screen, and the cross that removes it, in view: the row scrolls sideways */
+    const on = el.garage.querySelector(".chip.on"), cross = el.garage.querySelector(".chipx") || on;
+    if (on) {
+      const left = on.offsetLeft - el.garage.offsetLeft, right = cross.offsetLeft - el.garage.offsetLeft + cross.offsetWidth, room = el.garage.clientWidth;
+      if (right > el.garage.scrollLeft + room) el.garage.scrollLeft = right - room + 6;
+      if (left < el.garage.scrollLeft) el.garage.scrollLeft = Math.max(0, left - 6);
+    }
   }
   el.garage.onclick = (e) => {
+    const x = e.target.closest(".chipx");
+    if (x) {
+      if (S.busy) return;
+      if (x.dataset.sure) { x.disabled = true; S.switching = "-"; post("remove", { id: x.dataset.drop, at: Date.now() }); return; }
+      x.dataset.sure = "1"; x.textContent = "Remove?"; x.classList.add("sure");
+      setTimeout(() => { if (x.isConnected) { delete x.dataset.sure; x.textContent = "×"; x.classList.remove("sure"); } }, 4000);
+      return;
+    }
     const b = e.target.closest(".chip"); if (!b || S.busy) return;
     if (b.dataset.add) { focusBar(); return; }
     if (!b.classList.contains("on")) { el.garage.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c === b)); S.switching = b.dataset.id; post("switch", b.dataset.id); }
@@ -982,6 +1001,9 @@ function create(root) {
       '<label class="fld wide"><span>Link</span><input class="linkbox" name="url" inputmode="url" placeholder="https://"></label><button type="submit" class="btn ghost">Add it</button></form></details>';
     if (S.tab === "case") {
       h += `<div class="lead-line">${esc(c.headline || "")}</div>${c.sub ? `<div class="lead-sub">${esc(c.sub)}</div>` : ""}`;
+      /* the offer follows the car's miles, price and history on its own; this runs it by hand, after comps change */
+      if ((d.comps || []).some((k) => k.use)) h += `<div><button type="button" class="btn ghost reoffer"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "offer" ? "Working it out" : (d.offer.open || d.offer.target) ? "Work out the offer again" : "Work out an offer"}</button></div>` +
+        liveLog(S.moreBusy === "offer") + '<div class="tiny">It runs by itself when you change the miles, the asking price or the history. Tap it after you change which sales are counted or find more.</div>';
       if ((c.reasons || []).length) h += "<h3>The evidence</h3>" + c.reasons.map((r, i) => `<div class="ev"><span class="n">${i + 1}</span><span class="t">${esc(r.text)}</span>${(r.links || []).filter((l) => safeUrl(l.url)).map((l) => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} ${ARROW}</a>`).join("")}</div>`).join("");
       h += "<h3>Options</h3>";
       const have = (c.options || []).length > 0;
@@ -1061,7 +1083,7 @@ function create(root) {
       S.remember = el.sheetBody.querySelector(".keykeep").checked; S.pendingKey = value; S.keyTried = true;
       go.disabled = true; go.textContent = "Connecting"; post("key", { value, saved: false });
     };
-    const again = (name, value, flag) => { if (name === "more" && !S.d.connected) { needKey(`.more[data-kind="${value.kind}"]`); return; } S.moreBusy = flag; S.busyAt = Date.now(); S.log = []; keep(); post(name, value); paintRefresh(); };
+    const again = (name, value, flag) => { if ((name === "more" || name === "reoffer") && !S.d.connected) { needKey(name === "more" ? `.more[data-kind="${value.kind}"]` : ".reoffer"); return; } S.moreBusy = flag; S.busyAt = Date.now(); S.log = []; keep(); post(name, value); paintRefresh(); };
     /* the offer message, written and edited right here */
     el.sheetBody.querySelectorAll("[data-chan]").forEach((b) => { b.onclick = () => { S.msgChannel = b.dataset.chan; keep(); }; });
     const msgbox = el.sheetBody.querySelector(".msgbox"), msgai = el.sheetBody.querySelector(".msgai"), msgplain = el.sheetBody.querySelector(".msgplain");
@@ -1097,7 +1119,7 @@ function create(root) {
     /* take this car out of the garage: a second tap confirms */
     const dropcar = el.sheetBody.querySelector(".dropcar");
     if (dropcar) dropcar.onclick = () => {
-      if (dropcar.dataset.sure) { dropcar.disabled = true; closeSheet(); post("remove", { id: S.d.activeId || "", at: Date.now() }); return; }
+      if (dropcar.dataset.sure) { dropcar.disabled = true; closeSheet(); S.switching = "-"; post("remove", { id: S.d.activeId || "", at: Date.now() }); return; }
       dropcar.dataset.sure = "1"; dropcar.textContent = "Tap again to remove it";
       setTimeout(() => { if (dropcar.isConnected) { delete dropcar.dataset.sure; dropcar.textContent = S.d.sample ? "Remove the sample car" : "Remove this car from the garage"; } }, 4000);
     };
@@ -1113,6 +1135,8 @@ function create(root) {
     el.sheetBody.querySelectorAll(".more").forEach((b) => { b.onclick = () => again("more", { kind: b.dataset.kind, at: Date.now() }, b.dataset.kind); });
     const verify = el.sheetBody.querySelector(".verify");
     if (verify) verify.onclick = () => again("verify", { at: Date.now() }, "verify");
+    const reoffer = el.sheetBody.querySelector(".reoffer");
+    if (reoffer) reoffer.onclick = () => again("reoffer", { at: Date.now() }, "offer");
     const optbox = el.sheetBody.querySelector(".optbox"), readopts = el.sheetBody.querySelector(".readopts");
     const more = el.sheetBody.querySelector(".optmore");
     if (more) more.onclick = () => { S.optOpen = true; const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; };

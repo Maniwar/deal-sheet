@@ -145,6 +145,15 @@ of the screen; a link beside it opens the Claude Console keys page
   finished and waiting. Results go to the car the work was started for, even when another car is
   on screen by then; the notice then starts with that car's name. One piece of long work runs at
   a time per browser.
+- **The offer follows the car.** Change the car's miles, asking price or history in Car details
+  and the offer is worked out again by itself from the comps you already have (one short request,
+  no new searches). The case has a **Work out the offer again** button for the other times: after
+  you change which sales are counted, or find more. The typical sale price stays the plain median
+  of the counted sales; the offer is where the miles are weighed against each comp's.
+- **Removing a car.** The car on screen carries a small cross beside its name in the row at the
+  top. Tap it, then tap **Remove?** to take the car out of the garage (Car details has the same
+  button). It is removed from this device too, so it does not come back. A search still running
+  for a removed car is left to finish and its results are dropped.
 
 Everything except the Claude features works without a key.
 

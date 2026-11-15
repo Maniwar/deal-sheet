@@ -870,12 +870,16 @@ def stage_event(name: str) -> None:
         ss["_more_request"] = value
     elif name == "verify":
         ss["_verify_request"] = value
+    elif name == "reoffer":
+        ss["_reoffer_request"] = value
     elif name == "photo":
         ss["_photo_request"] = value
-    elif name == "remove":                          # take the car on screen out of the garage
-        if (ss["garage"].get(ss["active"]) or {}).get("sample"):
+    elif name == "remove":                          # take a car out of the garage: the one the screen named, else the one on screen
+        named = str(value.get("id") or "") if isinstance(value, dict) else ""
+        gone = named if named in ss["garage"] else ss["active"]
+        if (ss["garage"].get(gone) or {}).get("sample"):
             ss["hide_sample"] = True
-        queue({"remove": ss["active"]})
+        queue({"remove": gone})
     elif name == "usecomp":
         ss["_usecomp_request"] = value
     elif name == "link":
@@ -914,7 +918,8 @@ def short_car(car: dict) -> str:
 
 
 def still_working(job) -> str:
-    what = {"build": "building a car", "verify": "checking the for-sale pages"}.get(job.kind, f"searching for the {job.name}")
+    what = {"build": "building a car", "verify": "checking the for-sale pages",
+            "offer": f"working out the offer for the {job.name}"}.get(job.kind, f"searching for the {job.name}")
     return f"Still {what}. Its results appear when it finishes, so there is no need to start it again."
 
 
@@ -992,6 +997,40 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
                          if fresh else "The search found nothing new this time.") + (f" {cost}" if cost else "")]}
 
 
+def offer_work(job, car: dict, comps: list[dict], client, model: str, had_message: bool) -> dict:
+    """Work the offer out again for a car whose facts or comps have changed. Runs on the job's own thread."""
+    job.progress.say(f"Working out the offer again from {len(comps)} cars")
+    plan = llm.suggest_offer(client, model, car, comps)
+    plan["shown"] = plan.get("open")
+    bits = [f"open at {calc.money(plan['open'])}" if plan.get("open") else "",
+            f"a fair deal is {calc.money(plan['target'])}" if plan.get("target") else "",
+            f"do not go past {calc.money(plan['walk_away'])}" if plan.get("walk_away") else ""]
+    miles = calc.to_int(car.get("miles"))
+    note = ("The offer is worked out again" + (f" for {miles:,} miles" if miles else "") + ": "
+            + ", ".join(bit for bit in bits if bit) + ".")
+    if had_message:
+        note += " The message still has the old numbers: write it again in the Message tab."
+    return {"pending": {"offer": plan}, "notices": [note]}
+
+
+def start_offer_job(car: dict) -> str:
+    """Start working the offer out again for the car on screen, with `car` as its facts. Returns '' when it
+    started, otherwise why it did not."""
+    ss = st.session_state
+    entry = ss["garage"].get(ss["active"]) or {}
+    comps = calc.clean_comps(entry.get("comps") or [])
+    if not any(comp["use"] for comp in comps):
+        return "There are no counted comps to work an offer out from yet."
+    if not ss["api_key"]:
+        return "Connect your Anthropic API key, then tap Work out the offer again in The case."
+    if my_job() is not None:
+        return still_working(my_job())
+    client, model, had_message = llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]], bool(entry.get("message"))
+    start_job(jobs.Job("offer", lambda job: offer_work(job, car, comps, client, model, had_message),
+                       car_id=ss["active"], name=short_car(car), flag="offer"))
+    return ""
+
+
 def collect_job() -> None:
     """Put in place what a finished job made: a new car, or new comps for the car it was started for, which
     may no longer be the one on screen."""
@@ -1000,7 +1039,8 @@ def collect_job() -> None:
     if job is None or not job.done:
         return
     if job.kind != "build" and job.car_id not in ss["garage"] and ss.get("fresh"):
-        return                                   # this visit has only just begun: its cars are still on their way back
+        ss["_job_parked"] = id(job)              # this visit has only just begun: its cars are still on their way back
+        return
     if jobs.take(ss.get("cid") or ss["sid"]) is None:
         return
     out, garage = job.outcome or {}, ss["garage"]
@@ -1010,16 +1050,19 @@ def collect_job() -> None:
     if "add" in out:                                             # a build: the new car joins the garage and is shown
         queue({"add": out["add"]})
     pending = out.get("pending")
-    if job.kind != "build" and job.car_id in garage and job.progress.lines:
+    if job.kind in ("more", "verify") and job.car_id in garage and job.progress.lines:
         ss.setdefault("logs", {})[job.car_id] = list(job.progress.lines)[-200:]
     if pending and job.car_id == ss["active"]:
         ss["_pending"] = {**(ss.get("_pending") or {}), **pending}
     elif pending and job.car_id in garage:                       # another car is on screen now: change the stored one
         entry = garage[job.car_id]
-        entry["comps"] = merged_comps(pending.get("keep"), pending.get("add_comps"))
+        if "add_comps" in pending:
+            entry["comps"] = merged_comps(pending.get("keep"), pending.get("add_comps"))
+            entry["sample"] = False
         if pending.get("summary"):
             entry["summary"] = pending["summary"]
-        entry["sample"] = False
+        if "offer" in pending:
+            entry["offer"] = pending["offer"]
         entry.pop("_file", None)
         notices = [f"{job.name}: {text}" for text in notices]
     elif pending:
@@ -1076,6 +1119,12 @@ def handle_stage_requests(progress_slot) -> None:
                                car_id=ss["active"], name=short_car(the_car), flag="verify" if kind == "verify" else (what or "sold")))
             continue                             # the screen keeps showing it as working until the job is collected
         ss["build_seq"] += 1
+    request = ss.pop("_reoffer_request", None)
+    if request:                                  # work the offer out again, from The case
+        why_not = start_offer_job(dict((ss["garage"].get(ss["active"]) or {}).get("car") or {}))
+        if why_not:
+            ss["stage_error"] = why_not
+            ss["build_seq"] += 1
     request = ss.pop("_car_request", None)
     if isinstance(request, dict):                  # the car's facts, corrected on the main screen
         before = (ss["garage"].get(ss["active"]) or {}).get("car") or {}
@@ -1092,8 +1141,20 @@ def handle_stage_requests(progress_slot) -> None:
             moved = any(fields[key].lower() != str(before.get(key) or "").strip().lower()
                         for key in ("year", "make", "model", "trim", "body") if key in fields)
             has_comps = bool((ss["garage"].get(ss["active"]) or {}).get("comps"))
-            ss["notices"] = ["Saved. The comps were found for the car as it was, so search again in the Sold tab to match them."
-                             if moved and has_comps else "Saved."]
+            # what the car is worth moves with its miles, its price and its history: the offer follows them
+            priced = [key for key in ("miles", "price", "history") if key in fields and
+                      (calc.to_int(fields[key]) != calc.to_int(before.get(key)) if key in NUMBER_FIELDS
+                       else fields[key].lower() != str(before.get(key) or "").strip().lower())]
+            if moved and has_comps:
+                ss["notices"] = ["Saved. The comps were found for the car as it was, so search again in the Sold tab to match them."]
+            elif priced and has_comps:
+                now = {**before, **{key: (calc.to_int(value) if key in NUMBER_FIELDS else value) for key, value in fields.items()}}
+                why_not = start_offer_job(now)
+                what = " and ".join({"miles": "miles", "price": "asking price", "history": "history"}[key] for key in priced)
+                ss["notices"] = [f"Saved. Working out the offer again for the new {what}." if not why_not
+                                 else f"Saved, but the offer still reflects the old {what}. {why_not}"]
+            else:
+                ss["notices"] = ["Saved."]
         ss["build_seq"] += 1
     request = ss.pop("_usecomp_request", None)
     if isinstance(request, dict):                  # count a sale in the typical price, or leave it out
@@ -1674,7 +1735,7 @@ flags = {
                 if my_job() is not None and not my_job().done else None),
 }
 stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail", "more", "verify",
-                "message", "car", "addcomp", "remove", "usecomp", "link")
+                "message", "car", "addcomp", "remove", "usecomp", "link", "reoffer")
 with stage_box:
     STAGE(
         data=json.dumps(stage.build_payload(
@@ -1713,9 +1774,9 @@ if actions:
 # Each line drawn is a point where Streamlit may start the script again (a tap, the page reconnecting). When it
 # does, the job carries on untouched and the new run comes back here. Nothing is started twice.
 job = my_job()
-if job is not None and not job.done:
+if job is not None and not (job.done and ss.get("_job_parked") == id(job)):
     while not job.done:
         draw_job(progress_slot, job)
         time.sleep(0.4)
     draw_job(progress_slot, job)
-    st.rerun()
+    st.rerun()                                   # the next run collects what it made (a job can finish before this run ends)
