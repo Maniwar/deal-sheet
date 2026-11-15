@@ -52,7 +52,35 @@ class LLMError(Exception):
         self.kind = kind
 
 
-_GATE = threading.BoundedSemaphore(3)         # at most three requests to the API at once, however the work is split up
+class _Gate:
+    """How many requests go to the API at once. Every search of a run is sent together (six covers them all),
+    because they do not depend on each other. If the key's rate limit is reached, the gate narrows to two at
+    a time for a while, so the searches take turns instead of failing together."""
+
+    def __init__(self, most: int):
+        self.most, self._now, self._slow_until, self._cond = most, 0, 0.0, threading.Condition()
+
+    def _limit(self) -> int:
+        return 2 if time.time() < self._slow_until else self.most
+
+    def slow(self, seconds: float = 90.0) -> None:
+        with self._cond:
+            self._slow_until = time.time() + seconds
+
+    def __enter__(self):
+        with self._cond:
+            while self._now >= self._limit():
+                self._cond.wait(timeout=1.0)
+            self._now += 1
+        return self
+
+    def __exit__(self, *exc) -> None:
+        with self._cond:
+            self._now -= 1
+            self._cond.notify_all()
+
+
+_GATE = _Gate(6)
 _WAIT_CAP = float(os.environ.get("DEALSHEET_RETRY_WAIT", "40"))     # the longest one pause before trying a request again
 # Sites the search tool could not be limited to (the API turned the request down, or nothing came back). They are
 # looked up by name from then on, so the failed attempt is made once and not on every search.
@@ -289,13 +317,18 @@ def _create(client, effort: str | None = None, progress: Progress | None = None,
             kwargs.pop("output_config")        # a model without effort levels: send it again without one
             _NO_EFFORT.add(kwargs.get("model"))
             return _create(client, progress=progress, label=label, attempt=attempt, **kwargs)
-        if "cache_control" in kwargs and "cache" in detail:
-            kwargs.pop("cache_control")        # somewhere caching is not offered: send it again without it
+        marked = any(isinstance(tool, dict) and "cache_control" in tool for tool in kwargs.get("tools") or [])
+        if ("cache_control" in kwargs or marked) and "cache" in detail:
+            kwargs.pop("cache_control", None)  # somewhere caching is not offered: send it again without it
+            if marked:
+                kwargs["tools"] = [{key: value for key, value in tool.items() if key != "cache_control"} if isinstance(tool, dict) else tool
+                                   for tool in kwargs["tools"]]
             return _create(client, progress=progress, label=label, attempt=attempt, **kwargs)
         raise LLMError(f"The API turned the request down ({exc.status_code}): {exc.message}", "request") from exc
     except anthropic.AuthenticationError as exc:
         raise LLMError("Anthropic rejected your API key. Forget it in the sidebar and paste it again.", "key") from exc
     except anthropic.RateLimitError as exc:
+        _GATE.slow()                               # this key cannot take them all at once: let them take turns
         if attempt < 2:
             return again(_pause(exc, 15), "your key's rate limit was reached")
         raise LLMError("Your key's rate limit was reached and waiting did not clear it. Wait a minute and try again.", "rate") from exc
@@ -311,11 +344,12 @@ def _create(client, effort: str | None = None, progress: Progress | None = None,
 
 
 def _again(run, progress: Progress | None, label: str):
-    """Run one search pass, and once more if it fails in a way a second try can fix (not a bad key or a rate limit)."""
+    """Run one search pass, and once more only if it failed in a passing way: a busy server or a dropped
+    connection. Any other failure would cost the whole search again for the same answer."""
     try:
         return run()
     except LLMError as exc:
-        if exc.kind in ("key", "rate"):
+        if exc.kind not in ("server", "network"):
             raise
         if progress is not None:
             progress.say(f"{label}: that did not go through ({exc}). Trying it once more")
@@ -616,7 +650,9 @@ def _gear_rule(car: dict) -> str:
         return f"- {record}\n"
     return (f"- Transmission is a hard requirement: the buyer's car is {'a manual' if kind == 'manual' else 'an automatic'}. "
             f"Leave out every car whose source says it is {'an automatic' if kind == 'manual' else 'a manual'}. {record} "
-            "A results list often gets this wrong, so prefer what the car's own page says.\n")
+            "A results list often gets this wrong, so prefer what the car's own page says when you have it. Do not "
+            "run a search or open a page only to learn a transmission: record unknown, and the app reads the car's "
+            "page itself.\n")
 
 
 def _trim_rule(car: dict) -> str:
@@ -684,7 +720,9 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "- Classic.com snippets show a placeholder '6865 mi' before the real mileage. Use the second figure.\n"
         "- Convert foreign prices only when the source gives a US dollar figure; otherwise skip the comp.\n"
         "- Be thorough: record every completed sale and no-sale of a matching car that the results show, up to "
-        "about 25, not just a handful. Use every search you have. Leave out only cars that clearly do not match."
+        "about 25, not just a handful. Leave out only cars that clearly do not match.\n"
+        "- Work economically. Send your searches together in one step where you can, because every extra step reads "
+        "all the results so far again, and stop searching once a search brings back cars you already have."
     )
 
 
@@ -727,8 +765,10 @@ def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
         "the site as the source. Record accident, damage or title history in history whenever it is stated.\n"
         "- Record only what the search results show. Never fill a gap from memory.\n"
         "- Be thorough: record every matching car that is for sale now that the results show, up to about 20, "
-        "nearest matches first. Use every search you have. In the summary say how many came from live auctions, "
-        "enthusiast classifieds and dealers, and name any of those where you found nothing."
+        "nearest matches first. In the summary say how many came from live auctions, enthusiast classifieds and "
+        "dealers, and name any of those where you found nothing.\n"
+        "- Work economically. Send your searches together in one step where you can, because every extra step reads "
+        "all the results so far again, and stop searching once a search brings back cars you already have."
     )
 
 
@@ -758,6 +798,11 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
     `only` limits the searches to those sites; `never` keeps sites out. The API takes one or the other.
     With `opens` (and `only`), the model may also open that many pages on those sites and read them whole:
     a market page then gives every car with the address of its own page, which a search snippet does not.
+
+    What keeps the cost down: the API runs the searches in a loop on its side and reads everything found so far
+    again at each step. With prompt caching on from the first request it puts a cache point after each search
+    result, so each step reads the earlier results from the cache at a tenth of the price instead of in full.
+    The model is asked again at most twice for its record, and those requests read the same cache.
     """
     search = {"type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": max_searches}
     if only:
@@ -766,31 +811,32 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
         search["blocked_domains"] = list(never)
     reader = {"type": WEB_FETCH_TYPE, "name": "web_fetch", "max_uses": int(opens), "allowed_domains": list(only or []),
               "max_content_tokens": 16000}
+    record = {**COMPS_TOOL, "cache_control": {"type": "ephemeral"}}       # a cache marker on the request turns on the per-result cache points
     can_open = bool(opens and only and not _FETCH_OFF)
-    tools = [search, reader, COMPS_TOOL] if can_open else [search, COMPS_TOOL]
+    tools = [search, reader, record] if can_open else [search, record]
     messages = [{"role": "user", "content": prompt}]
     seen_urls: set[str] = set()
     failed: list[str] = []
     used = {"input_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 0}
-    for turn in range(max_rounds):
-        # A second or later round sends the whole search so far again, so that part is read from the cache.
-        # The first round is new every time, and writing it to the cache would only cost more.
-        again = {"cache_control": {"type": "ephemeral"}} if turn else {}
+    searches = asked = 0
+    for turn in range(max(2, int(max_rounds))):
+        # reading a whole market page into twenty-odd records takes care; the other searches are short work
+        send = dict(effort="medium" if can_open else "low", progress=progress, label=label, model=model, max_tokens=16000, tools=tools,
+                    messages=list(messages), cache_control={"type": "ephemeral"})
         try:
-            response = _create(client, effort="medium", progress=progress, label=label, model=model, max_tokens=16000,
-                               tools=tools, messages=list(messages), **again)
+            response = _create(client, **send)
         except LLMError as exc:
             if not (can_open and reader in tools and exc.kind == "request" and "fetch" in str(exc).lower()):
                 raise
             _FETCH_OFF.append(str(exc))            # this key or model cannot use the page reader: search alone from now on
-            tools = [search, COMPS_TOOL]
+            tools = send["tools"] = [search, record]
             if progress:
                 progress.say(f"{label}: pages cannot be opened with this key, so reading the search results alone")
-            response = _create(client, effort="medium", progress=progress, label=label, model=model, max_tokens=16000,
-                               tools=tools, messages=list(messages), **again)
+            response = _create(client, **send)
         usage = _field(response, "usage")
         for key in used:
             used[key] += int(_field(usage, key) or 0) if usage is not None else 0
+        searches += int(_field(_field(usage, "server_tool_use"), "web_search_requests") or 0) if usage is not None else 0
         seen_urls |= _search_urls(response)
         failed += _search_errors(response)
         recorded = _tool_input(response, "record_comps")
@@ -816,18 +862,45 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
                 "searched": len(seen_urls),
                 "failed": failed,
                 "pages": pages,
+                "used": {**used, "searches": searches},
             }
         messages.append({"role": "assistant", "content": _field(response, "content")})
         if _field(response, "stop_reason") == "pause_turn":
             continue  # the server-side search loop paused; resume the same turn
         if _field(response, "stop_reason") == "refusal":
             raise LLMError("Claude declined that search.")
+        if asked >= 2:                             # asked twice and still no record: stop, do not keep paying for it
+            break
+        asked += 1
         messages.append({
             "role": "user",
             "content": "Now call the record_comps tool with the comps from your search results. "
-                       "Use only URLs that appeared in those results. Do not reply in text.",
+                       "Use only URLs that appeared in those results. Do not search again and do not reply in text.",
         })
+    if progress:
+        progress.say(f"{label}: stopped without a record{_tokens_note(used)}")
     raise LLMError(problem)
+
+
+def add_used(*parts) -> dict:
+    """What several searches used, added up: tokens in, from cache, written to cache, out, and web searches."""
+    total = {"input_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 0, "searches": 0}
+    for part in parts:
+        for key in total:
+            total[key] += int((part or {}).get(key) or 0)
+    return total
+
+
+def used_note(used: dict | None) -> str:
+    """One line on what a run cost, for the summary: searches and tokens, with how much came from the cache."""
+    used = used or {}
+    tokens = _tokens_note({key: int(used.get(key) or 0) for key in
+                           ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")}).strip(" ()")
+    count = int(used.get("searches") or 0)
+    if not tokens and not count:
+        return ""
+    bits = [f"{count} web search{'es' if count != 1 else ''}" if count else "", tokens]
+    return "This run used " + " and ".join(bit for bit in bits if bit) + "."
 
 
 # Auction sites searched one at a time. A search limited to one site returns that site's own pages, each with
@@ -842,7 +915,7 @@ AUCTION_SITES = [
 
 # How many pages a site's search may open and read whole. Classic.com's market page lists every car with the
 # address of its own page, and that address holds the VIN.
-_SITE_OPENS = {"Classic.com": 5}
+_SITE_OPENS = {"Classic.com": 2}
 
 # How to read each site's pages, added to that site's search.
 _SITE_NOTES = {
@@ -853,15 +926,15 @@ _SITE_NOTES = {
         "- Search for the car first. The results hold Classic.com's market page for the model (its address has /m/, "
         "often ending in the model year) and vehicle pages (their addresses have /veh/ and contain the VIN).\n"
         "- Open the market page with web_fetch. It lists every recent car of that model with its status, price, date, "
-        "miles and the auction site or dealer, and each one links to that car's own vehicle page. If the page for one "
-        "model year shows few sales, open the market page for the neighbouring year or for all years too.\n"
+        "miles and the auction site or dealer, and each one links to that car's own vehicle page. You can open two "
+        "pages in all: if the page for one model year shows few sales, use the second for the neighbouring year or "
+        "for all years.\n"
         "- Record every matching car on it, each with the address of its own vehicle page as the URL and the VIN "
         "from that address. 'Sold' is sold. 'Not Sold' with a 'Highest Bid' is high_bid. 'For Sale' is asking with "
         "available yes. 'Last Asking' means the listing has gone: asking with available no. Name the auction site "
         "or the dealer as the source.\n"
         "- If the opened page shows the cars but not their addresses, match each car to a vehicle page in your search "
-        "results by its year, price, date or town, and open a vehicle page with web_fetch when you need to see which "
-        "car it is. Only when a car's own page cannot be found, give the market page's address as its URL and start "
+        "results by its year, price, date or town. Only when a car's own page cannot be found, give the market page's address as its URL and start "
         "its note with 'Listed on Classic.com'. That is the one exception to the rule about market pages.\n"
         "- If web_fetch is not available, work from the search results in the same way.\n"
         "- Record each car once. Leave a date empty rather than guess it.\n"
@@ -943,10 +1016,11 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
     problem = "The comp research did not finish. Try again, or add comps by hand."
     sites = [(site, domains) for site, domains in AUCTION_SITES if tuple(domains) not in _UNSEARCHABLE]
     closed = [site for site, domains in AUCTION_SITES if tuple(domains) in _UNSEARCHABLE]
-    each = max(2, int(max_searches) // (len(sites) + 1))        # every site gets at least two searches
+    each = max(2, int(max_searches) // 6)      # per site: its own pages are few, and Classic.com reads a whole market page
+    wider = max(2, int(max_searches) // 4)
 
     def wide() -> dict:
-        searches = max(2, int(max_searches) - each * len(sites))
+        searches = wider
         return _again(lambda: _research(client, model, _research_prompt(car, today, searches) + _known_note(known), searches,
                                         max_rounds, problem, car=car, never=MIRROR_SITES, progress=progress, label="Wider web"),
                       progress, "Wider web")
@@ -955,11 +1029,7 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
         def limited() -> dict:
             return _research(client, model, _site_prompt(car, today, site, each) + _known_note(known), each, max_rounds,
                              problem, car=car, only=domains, progress=progress, label=site, opens=_SITE_OPENS.get(site, 0))
-
-        def by_name() -> dict:
-            return _again(lambda: _research(client, model, _site_prompt(car, today, site, each, limited=False) + _known_note(known),
-                                            each, max_rounds, problem, car=car, never=MIRROR_SITES, progress=progress, label=site),
-                          progress, site)
+        nothing = {"comps": [], "summary": "", "searched": 0, "failed": [], "pages": [], "used": {}}
         try:
             result = limited()
             if not result["searched"] and not result["comps"] and any(code in ("too_many_requests", "unavailable")
@@ -967,21 +1037,20 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
                 if progress:
                     progress.say(f"{site}: the search service was busy. Trying this site once more in a few seconds")
                 time.sleep(min(6.0, _WAIT_CAP))
-                result = limited()
+                again = limited()
+                again["used"] = add_used(result.get("used"), again.get("used"))
+                result = again
         except LLMError as exc:
-            if exc.kind != "request":              # a bad key or a rate limit would stop a search by name as well
+            if exc.kind != "request":              # a bad key or a rate limit stops every search
                 raise
             _UNSEARCHABLE.add(tuple(domains))      # the API will not limit a search to this site: do not ask again
             if progress:
-                progress.say(f"{site}: the search tool cannot look inside this site, so looking for its results across the web")
-            return by_name()
-        if result["searched"] or result["comps"]:
-            return result
-        if not result["failed"]:                   # the searches ran and not one page came back, now or ever
-            _UNSEARCHABLE.add(tuple(domains))
-        if progress:
-            progress.say(f"{site}: no pages came back from inside this site, so looking for its results across the web")
-        return by_name()
+                progress.say(f"{site}: the search tool cannot look inside this site, so its results come from "
+                             "Classic.com, which records them, and the wider web")
+            return nothing
+        if not result["searched"] and not result["comps"] and progress:
+            progress.say(f"{site}: no pages came back from inside this site for this car")
+        return result
 
     if progress:
         note = f" ({', '.join(closed)} cannot be searched on its own, so it is covered by Classic.com and the wider web)" if closed else ""
@@ -1013,7 +1082,7 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
         lead += " Run Search for more sales to try the ones that did not finish again."
     last = results[-1]["summary"] if not passes[-1]["error"] else ""
     return {"comps": comps, "summary": f"{lead} {last}".strip(), "searched": sum(result["searched"] for result in results),
-            "passes": passes}
+            "passes": passes, "used": add_used(*[result.get("used") for result in results])}
 
 
 # A search limited to this path returns Marketplace ads themselves: one car each, at its own address.
@@ -1044,6 +1113,7 @@ def _marketplace_prompt(car: dict, today: str, max_searches: int = 3) -> str:
         "day it was listed, worked out from today's date. Start the note with the town, then the transmission and "
         "the title status. Record the VIN when the seller's description gives it.\n"
         "- Record only what the ads show. Never fill a gap from memory.\n"
+        "- Send your searches together in one step, then record. Do not search again for more detail on an ad.\n"
         "In the summary say how many ads you recorded and how many you left out for being sold, old or abroad."
     )
 
@@ -1054,6 +1124,7 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
     Facebook Marketplace's public lists. The two searches run at the same time."""
     today = today or dt.date.today().strftime("%B %d, %Y")
     problem = "The search for cars for sale did not finish."
+    max_searches = max(3, min(8, int(max_searches) * 5 // 12))
 
     def everywhere() -> dict:
         return _again(lambda: _research(client, model, _for_sale_prompt(car, today, max_searches) + _known_note(known), max_searches,
@@ -1061,7 +1132,7 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
                       progress, "For sale now")
 
     def marketplace() -> dict:
-        return _research(client, model, _marketplace_prompt(car, today), 3, 3, problem, car=car, only=MARKETPLACE_ADS,
+        return _research(client, model, _marketplace_prompt(car, today, 2), 2, 3, problem, car=car, only=MARKETPLACE_ADS,
                          progress=progress, label="Facebook Marketplace")
 
     jobs = [("For sale now", everywhere)]
@@ -1081,7 +1152,7 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
     if isinstance(result, LLMError):
         if not listed:
             raise result
-        result = {"comps": [], "searched": 0, "failed": [],
+        result = {"comps": [], "searched": 0, "failed": [], "used": {},
                   "summary": f"The main search for cars for sale did not finish ({result}). Use Search for more to run it again."}
     # price-guide sites mirror other sites' listings and keep them up after the car has gone
     comps = [comp for comp in result["comps"] if comp["status"] == "asking" and not is_mirror(comp["url"])]
@@ -1092,6 +1163,7 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
     if lists is not None:
         result["summary"] = f"{result['summary']} Facebook Marketplace ads, each with its own link: {len(listed)}.".strip()
     result["comps"] = merge_comps(comps, listed)
+    result["used"] = add_used(result.get("used"), (lists or {}).get("used"))
     return result
 
 

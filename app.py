@@ -22,6 +22,7 @@ import pandas as pd
 import streamlit as st
 
 import calc
+import jobs
 import llm
 import previews
 import sheet
@@ -310,7 +311,7 @@ def drop_spare_trims(comps: list[dict]) -> tuple[list[dict], int]:
     return kept, len(comps) - len(kept)
 
 
-def check_listings(comps: list[dict], car: dict | None = None, say=None) -> tuple[list[dict], dict]:
+def check_listings(comps: list[dict], car: dict | None = None, say=None, only_new: bool = False) -> tuple[list[dict], dict]:
     """Open each for-sale page, where its site allows, and record what it shows.
 
     Sets `seen` (live, gone or unknown) and `seen_on` on each comp, fills in a VIN and a transmission the page
@@ -318,9 +319,10 @@ def check_listings(comps: list[dict], car: dict | None = None, say=None) -> tupl
     states the other transmission from the buyer's. 'live' is only said with proof that the car is on the page
     (see `previews.judge_page`). Returns (the comps that stay, how many were live, gone, unknown and wrong).
     """
-    listed = [comp for comp in comps if calc.comp_group(comp) == "live" and comp["url"] and not calc.is_list_page(comp["url"])]
-    looks = previews.listing_checks(listed)
     today = dt.date.today().strftime("%b %-d")
+    listed = [comp for comp in comps if calc.comp_group(comp) == "live" and comp["url"] and not calc.is_list_page(comp["url"])
+              and not (only_new and comp.get("seen") and comp.get("seen_on") == today)]      # `only_new`: not the ones opened a moment ago
+    looks = previews.listing_checks(listed)                  # every page at the same time
     count = {"live": 0, "gone": 0, "unknown": 0, "wrong": 0}
     for comp in listed:
         state, vin, gearbox = looks.get(comp["url"], ("unknown", "", ""))
@@ -380,15 +382,38 @@ def progress_for(slot):
     return progress, say
 
 
+def add_counts(*counts) -> dict:
+    total = {"live": 0, "gone": 0, "unknown": 0, "wrong": 0}
+    for count in counts:
+        for key in total:
+            total[key] += int((count or {}).get(key) or 0)
+    return total
+
+
 def research_market(client, model: str, car: dict, max_searches: int, progress=None) -> dict:
-    """Completed sales, then cars for sale now, then a check that each for-sale page still shows its car."""
+    """Completed sales and cars for sale now, searched at the same time, with a look at each for-sale page.
+
+    Nothing waits that does not have to: every search goes out together, and the for-sale pages are opened as
+    soon as that search is back, while the sales searches are still running.
+    """
     tell = progress.say if progress else (lambda text: None)
+
+    def for_sale_side() -> dict:
+        sale = llm.research_for_sale(client, model, car, max_searches=max_searches, progress=progress)
+        cars, off_body = same_body_only(car, sale["comps"])
+        cars, wrong = same_gearbox_only(car, cars, tell)
+        if cars:
+            tell("Opening each for-sale page to see whether the car is still there and what its page says")
+        cars, count = check_listings(cars, car, tell)
+        return {**sale, "comps": cars, "count": add_counts(count, {"wrong": wrong}), "off_body": off_body}
+
     pool = ThreadPoolExecutor(max_workers=1)                 # cars for sale are looked for while the sales are
-    for_sale = pool.submit(llm.research_for_sale, client, model, car, max_searches=min(max_searches, 8), progress=progress)
+    for_sale = pool.submit(for_sale_side)
     try:
         result = llm.research_comps(client, model, car, max_searches=max_searches, progress=progress)
         comps, summary = list(result["comps"]), result["summary"]
-        tell(f"{len(comps)} sale{'s' if len(comps) != 1 else ''} and no-sales found. Finishing the search for cars for sale today")
+        if not for_sale.done():
+            tell(f"{len(comps)} sale{'s' if len(comps) != 1 else ''} and no-sales found. Finishing the search for cars for sale today")
         while not for_sale.done():                           # its lines are drawn from this thread
             time.sleep(0.3)
             if progress:
@@ -401,10 +426,11 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
         pool.shutdown(wait=False, cancel_futures=True)
     comps += calc.new_comps(comps, sale["comps"])
     comps, dropped = same_body_only(car, comps)
+    dropped += int(sale.get("off_body") or 0)
     comps, wrong_box = same_gearbox_only(car, comps, tell)
     comps, spare = drop_spare_trims(comps)
-    tell("Opening each for-sale page to see whether the car is still there and what its page says")
-    comps, count = check_listings(comps, car, tell)          # also drops a car whose page states the other transmission
+    comps, count = check_listings(comps, car, tell, only_new=True)   # the for-sale cars the sales searches turned up
+    count = add_counts(count, sale.get("count"))
     note, wrong_box = checked_note(count), wrong_box + count["wrong"]
     leads = calc.set_aside_leads(comps)            # cars that cannot be opened and checked stay out of the numbers
     if note:
@@ -422,7 +448,11 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     if leads:
         note = (f"{leads} car{'s' if leads != 1 else ''} that cannot be opened and checked (read from a list, or with no confirmed "
                 f"link) {'are' if leads != 1 else 'is'} kept as leads and not counted. {note}").strip()
-    return {"comps": comps, "summary": " ".join(part for part in (summary, sale["summary"], note) if part).strip()}
+    spent = llm.add_used(result.get("used"), sale.get("used"))
+    cost = llm.used_note(spent)
+    if cost:
+        tell(cost)
+    return {"comps": comps, "summary": " ".join(part for part in (summary, sale["summary"], note, cost) if part).strip(), "used": spent}
 
 
 def tidy_car(found: dict) -> dict:
@@ -604,6 +634,18 @@ def set_offer(offer: dict) -> None:
     ss["pushback_text"] = "\n".join(offer.get("pushback") or [])
 
 
+def merged_comps(keep, add) -> list[dict]:
+    """The comps a car keeps, with the new ones added after them. One already there is not added twice."""
+    merged = list(keep or [])
+    seen = {(calc.normalize_url(c["url"]), c["price"], c["title"]) for c in merged}
+    for comp in add or []:
+        key = (calc.normalize_url(comp["url"]), comp["price"], comp["title"])
+        if key not in seen:
+            merged.append(comp)
+            seen.add(key)
+    return merged
+
+
 def apply_pending() -> None:
     """Apply queued changes before any widget is drawn (widget values can only be set here)."""
     ss = st.session_state
@@ -635,13 +677,7 @@ def apply_pending() -> None:
             if field in EDIT_FIELDS:
                 ss[f"car_{field}"] = fmt_field(field, value)
     if "add_comps" in payload:
-        merged = list(payload.get("keep") or [])
-        seen = {(calc.normalize_url(c["url"]), c["price"], c["title"]) for c in merged}
-        for comp in payload["add_comps"]:
-            key = (calc.normalize_url(comp["url"]), comp["price"], comp["title"])
-            if key not in seen:
-                merged.append(comp)
-                seen.add(key)
+        merged = merged_comps(payload.get("keep"), payload["add_comps"])
         ss["comps_base"] = merged
         ss["comps_ver"] += 1
         if payload.get("summary"):
@@ -818,6 +854,8 @@ def stage_event(name: str) -> None:
     value = ss["stage"][name]
     if value is None:
         return
+    if isinstance(value, dict) and re.fullmatch(r"[0-9a-f]{16}", str(value.get("cid") or "")):
+        ss["cid"] = value["cid"]                  # names this browser, so work it started is found again by a later visit
     if name == "key":
         ss["_key_try"] = value
     elif name == "build":
@@ -858,6 +896,145 @@ def stage_event(name: str) -> None:
         ss["_pending"] = pending
 
 
+def my_job():
+    """The long work this browser has under way, or finished and waiting to be collected. It is kept by browser,
+    not by visit, so a page that reconnects as a new visit finds it."""
+    ss = st.session_state
+    return jobs.current(ss.get("cid") or ss["sid"])
+
+
+def start_job(job) -> None:
+    ss = st.session_state
+    jobs.start(ss.get("cid") or ss["sid"], job)
+
+
+def short_car(car: dict) -> str:
+    name = " ".join(str(car.get(k) or "").strip() for k in ("model", "trim")).strip()
+    return name or calc.car_title(car) or "that car"
+
+
+def still_working(job) -> str:
+    what = {"build": "building a car", "verify": "checking the for-sale pages"}.get(job.kind, f"searching for the {job.name}")
+    return f"Still {what}. Its results appear when it finishes, so there is no need to start it again."
+
+
+def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client, model: str, searches: int) -> dict:
+    """Search for more of one car's comps, refresh them all, or check its for-sale pages. Runs on the job's own
+    thread: it is handed copies of the car and its comps and returns what to change, and touches no page state."""
+    progress = job.progress
+    if kind == "verify":                                         # look at each for-sale page again
+        progress.say("Opening each for-sale page to see whether the car is still there")
+        have, count = check_listings(have, the_car, progress.say)
+        note, wrong = checked_note(count), count["wrong"]
+        if wrong:
+            note = f"{wrong} car{'s' if wrong != 1 else ''} whose page states the other transmission {'were' if wrong != 1 else 'was'} removed. {note}".strip()
+        return {"pending": {"add_comps": [], "keep": have}, "notices": [note or "There are no for-sale listings to check yet."]}
+    wants_sale, refresh = what == "sale", what == "all"
+    known = [comp["url"] for comp in have if comp["url"]]
+    early = {"live": 0, "gone": 0, "unknown": 0, "wrong": 0}
+    if refresh:                                                  # every search again, as for a new car
+        pool = ThreadPoolExecutor(max_workers=1)                 # and the for-sale pages already held, opened meanwhile
+        if any(calc.comp_group(comp) == "live" for comp in have):
+            progress.say("Opening the for-sale pages you already had, to see whether each car is still there")
+        opened = pool.submit(check_listings, have, the_car, progress.say)
+        try:
+            found = research_market(client, model, the_car, searches, progress=progress)
+        finally:
+            kept, early = opened.result()                        # done long before the searches: it has its own time limit
+            pool.shutdown(wait=False)
+        stays = {id(comp) for comp in kept}
+        have = [comp for comp in have if id(comp) in stays]      # less any whose page states the other transmission
+    elif wants_sale:
+        found = llm.research_for_sale(client, model, the_car, max_searches=searches, known=known, progress=progress)
+    else:
+        found = llm.research_comps(client, model, the_car, max_searches=searches, known=known, progress=progress)
+    better = calc.upgrade_leads(have, found["comps"])            # a lead whose own page has now turned up takes that page
+    fresh = calc.new_comps(have, found["comps"])
+    fresh, _ = same_body_only(the_car, fresh)
+    fresh, _ = same_gearbox_only(the_car, fresh, progress.say)
+    if refresh:                                                  # a refresh clears the other transmission from what was there too
+        have, _ = same_gearbox_only(the_car, have, progress.say)
+    both, _ = drop_spare_trims(have + fresh)                     # with enough exact matches now, other trims go, old ones too
+    stays = {id(comp) for comp in both}
+    have, fresh = [comp for comp in have if id(comp) in stays], [comp for comp in fresh if id(comp) in stays]
+    # a refresh also tidies what was there: a lead the buyer never chose to count is set aside too
+    calc.set_aside_leads(have + fresh, None if refresh else fresh)
+    if refresh:
+        # a Marketplace car read from a list has no page of its own to open: it goes, unless the buyer kept it
+        have = [comp for comp in have if not (calc.marketplace_find(comp) and comp.get("aside") != "mine")]
+        back = 0
+        for comp in have:                                        # a sale set aside only because its page left out a detail of the trim line
+            row = {**comp, "trim": ""}
+            if calc.ease_trim_mark(the_car, row):
+                comp["note"], comp["use"], back = row["note"], True, back + 1
+        have, count = check_listings(have, the_car, progress.say, only_new=True)   # one that only now has a page of its own
+        note = checked_note(add_counts(early, count))            # the new ones were opened by the search itself
+        sold = sum(comp["status"] != "asking" for comp in fresh)
+        bits = [f"{better} car{'s' if better != 1 else ''} now with a direct link and VIN" if better else "",
+                f"{sold} more sale{'s' if sold != 1 else ''} and no-sales" if sold else "",
+                f"{len(fresh) - sold} more for sale" if len(fresh) - sold else "",
+                f"{back} sale{'s' if back != 1 else ''} counted again that had been set aside over a trim detail" if back else ""]
+        found_text = ", ".join(bit for bit in bits if bit)
+        return {"pending": {"add_comps": fresh, "keep": have, "summary": found["summary"]},
+                "notices": [f"Refreshed: {found_text or 'nothing new this time'}. {note}".strip()]}
+    note = ""
+    if wants_sale and fresh:
+        progress.say("Opening each new page to see whether the car is still there")
+    if wants_sale:
+        fresh, count = check_listings(fresh, the_car, progress.say)
+        note = checked_note(count)
+    cost = llm.used_note(found.get("used"))
+    if cost:
+        progress.say(cost)
+    thing = "car for sale" if wants_sale else "sale"
+    return {"pending": {"add_comps": fresh, "keep": have},
+            "notices": [(f"Found {len(fresh)} more {thing}{'s' if len(fresh) != 1 and not wants_sale else ''}. {note}".strip()
+                         if fresh else "The search found nothing new this time.") + (f" {cost}" if cost else "")]}
+
+
+def collect_job() -> None:
+    """Put in place what a finished job made: a new car, or new comps for the car it was started for, which
+    may no longer be the one on screen."""
+    ss = st.session_state
+    job = my_job()
+    if job is None or not job.done:
+        return
+    if job.kind != "build" and job.car_id not in ss["garage"] and ss.get("fresh"):
+        return                                   # this visit has only just begun: its cars are still on their way back
+    if jobs.take(ss.get("cid") or ss["sid"]) is None:
+        return
+    out, garage = job.outcome or {}, ss["garage"]
+    notices = [str(text) for text in (out.get("notices") or []) if text]
+    if out.get("error"):
+        ss["stage_error"] = out["error"]
+    if "add" in out:                                             # a build: the new car joins the garage and is shown
+        queue({"add": out["add"]})
+    pending = out.get("pending")
+    if job.kind != "build" and job.car_id in garage and job.progress.lines:
+        ss.setdefault("logs", {})[job.car_id] = list(job.progress.lines)[-200:]
+    if pending and job.car_id == ss["active"]:
+        ss["_pending"] = {**(ss.get("_pending") or {}), **pending}
+    elif pending and job.car_id in garage:                       # another car is on screen now: change the stored one
+        entry = garage[job.car_id]
+        entry["comps"] = merged_comps(pending.get("keep"), pending.get("add_comps"))
+        if pending.get("summary"):
+            entry["summary"] = pending["summary"]
+        entry["sample"] = False
+        entry.pop("_file", None)
+        notices = [f"{job.name}: {text}" for text in notices]
+    elif pending:
+        notices = []                                             # the car was removed while the search ran
+    if notices:
+        ss["notices"] = notices
+    ss["build_seq"] += 1
+
+
+def draw_job(slot, job) -> None:
+    """Show a running job's step and its latest lines where the screen looks for them."""
+    log = html.escape(json.dumps(list(job.progress.lines)[-12:]), quote=True)
+    slot.html(f'<i id="ds-progress" data-step="{job.step}" data-log="{log}" style="display:none"></i>')
+
+
 def handle_stage_requests(progress_slot) -> None:
     """Connect a key, bring back saved cars, or build a deal. A request stays queued until it is done."""
     ss = st.session_state
@@ -877,85 +1054,27 @@ def handle_stage_requests(progress_slot) -> None:
             ss["_pending"] = pending
         else:
             ss["stage_error"] = "That picture could not be read. Try another one."
-    for slot in ("_more_request", "_verify_request"):
-        request = ss.get(slot)
+    collect_job()                                # work that finished since the last run: put what it made in place
+    for slot, kind in (("_more_request", "more"), ("_verify_request", "verify")):
+        request = ss.pop(slot, None)             # taken off the queue at once: the work is started, never started again
         if not request:
             continue
         entry = ss["garage"].get(ss["active"]) or {}             # the car on screen, as last drawn
-        the_car, have = entry.get("car") or {}, calc.clean_comps(entry.get("comps") or [])
-        progress, _ = progress_for(progress_slot)
-        if slot == "_verify_request":                            # look at each for-sale page again
-            progress.say("Opening each for-sale page to see whether the car is still there")
-            have, count = check_listings(have, the_car, progress.say)
-            note, wrong = checked_note(count), count["wrong"]
-            if wrong:
-                note = f"{wrong} car{'s' if wrong != 1 else ''} whose page states the other transmission {'were' if wrong != 1 else 'was'} removed. {note}".strip()
-            ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
-            ss["notices"] = [note or "There are no for-sale listings to check yet."]
-        elif not ss["api_key"]:
+        the_car, have = dict(entry.get("car") or {}), calc.clean_comps(entry.get("comps") or [])
+        what = str(request.get("kind") or "")
+        if kind == "more" and not ss["api_key"]:
             ss["stage_error"] = "Connect your Anthropic API key first."
-        else:                                                    # search again, for cars not already found
-            wants_sale, refresh = str(request.get("kind") or "") == "sale", str(request.get("kind") or "") == "all"
-            known = [comp["url"] for comp in have if comp["url"]]
-            searches, the_client, the_model = int(ss["max_searches"]), llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]]
-            try:
-                if refresh:                                      # every search again, as for a new car
-                    found = research_market(the_client, the_model, the_car, searches, progress=progress)
-                elif wants_sale:
-                    found = llm.research_for_sale(the_client, the_model, the_car, max_searches=min(searches, 8), known=known,
-                                                  progress=progress)
-                else:
-                    found = llm.research_comps(the_client, the_model, the_car, max_searches=searches, known=known,
-                                               progress=progress)
-            except llm.LLMError as exc:
-                ss["stage_error"] = str(exc)
-            else:
-                better = calc.upgrade_leads(have, found["comps"])    # a lead whose own page has now turned up takes that page
-                fresh = calc.new_comps(have, found["comps"])
-                fresh, _ = same_body_only(the_car, fresh)
-                fresh, _ = same_gearbox_only(the_car, fresh, progress.say)
-                if refresh:                                    # a refresh clears the other transmission from what was there too
-                    have, _ = same_gearbox_only(the_car, have, progress.say)
-                both, _ = drop_spare_trims(have + fresh)       # with enough exact matches now, other trims go, old ones too
-                stays = {id(comp) for comp in both}
-                have, fresh = [comp for comp in have if id(comp) in stays], [comp for comp in fresh if id(comp) in stays]
-                # a refresh also tidies what was there: a lead the buyer never chose to count is set aside too
-                calc.set_aside_leads(have + fresh, None if refresh else fresh)
-                if refresh:
-                    # a Marketplace car read from a list has no page of its own to open: it goes, unless the buyer kept it
-                    have = [comp for comp in have if not (calc.marketplace_find(comp) and comp.get("aside") != "mine")]
-                    back = 0
-                    for comp in have:                          # a sale set aside only because its page left out a detail of the trim line
-                        row = {**comp, "trim": ""}
-                        if calc.ease_trim_mark(the_car, row):
-                            comp["note"], comp["use"], back = row["note"], True, back + 1
-                    if any(calc.comp_group(comp) == "live" for comp in have):
-                        progress.say("Opening the for-sale pages you already had, to see whether each car is still there")
-                    have, count = check_listings(have, the_car, progress.say)  # the new ones were opened by the search itself
-                    note = checked_note(count)
-                    sold = sum(comp["status"] != "asking" for comp in fresh)
-                    bits = [f"{better} car{'s' if better != 1 else ''} now with a direct link and VIN" if better else "",
-                            f"{sold} more sale{'s' if sold != 1 else ''} and no-sales" if sold else "",
-                            f"{len(fresh) - sold} more for sale" if len(fresh) - sold else "",
-                            f"{back} sale{'s' if back != 1 else ''} counted again that had been set aside over a trim detail" if back else ""]
-                    found_text = ", ".join(bit for bit in bits if bit)
-                    ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have, "summary": found["summary"]}
-                    ss["notices"] = [f"Refreshed: {found_text or 'nothing new this time'}. {note}".strip()]
-                else:
-                    if wants_sale and fresh:
-                        progress.say("Opening each new page to see whether the car is still there")
-                    note = ""
-                    if wants_sale:
-                        fresh, count = check_listings(fresh, the_car, progress.say)
-                        note = checked_note(count)
-                    ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have}
-                    what = "car for sale" if wants_sale else "sale"
-                    ss["notices"] = [(f"Found {len(fresh)} more {what}{'s' if len(fresh) != 1 and not wants_sale else ''}. {note}".strip()
-                                      if fresh else "The search found nothing new this time.")]
-        ss.pop(slot, None)
-        progress_slot.empty()
-        if progress.lines:
-            ss.setdefault("logs", {})[ss["active"]] = list(progress.lines)[-200:]
+        elif my_job() is not None:
+            running = my_job()
+            if running.kind == kind and running.car_id == ss["active"] and not running.done:
+                continue                         # the same request again (the page came back): it is already under way
+            ss["stage_error"] = still_working(running)
+        else:
+            client = llm.get_client(ss["api_key"]) if kind == "more" else None
+            model, searches = llm.MODELS[ss["model_label"]], int(ss["max_searches"])
+            start_job(jobs.Job(kind, lambda job, kind=kind, what=what: more_work(job, kind, what, the_car, have, client, model, searches),
+                               car_id=ss["active"], name=short_car(the_car), flag="verify" if kind == "verify" else (what or "sold")))
+            continue                             # the screen keeps showing it as working until the job is collected
         ss["build_seq"] += 1
     request = ss.pop("_car_request", None)
     if isinstance(request, dict):                  # the car's facts, corrected on the main screen
@@ -1102,10 +1221,16 @@ def handle_stage_requests(progress_slot) -> None:
             queue({"show_opened": request.get("active") or 0})
         ss["fresh"] = False
         ss.pop("_restore", None)
-    request = ss.get("_build_request")
+    request = ss.pop("_build_request", None)     # taken off the queue at once: the build is started, never started again
     if request:
         if not ss["api_key"]:
             ss["stage_error"] = "Connect your Anthropic API key first."
+            ss["build_seq"] += 1
+        elif my_job() is not None and my_job().kind == "build" and not my_job().done:
+            pass                                 # the same build again (the page came back and re-sent it): it is already under way
+        elif my_job() is not None:
+            ss["stage_error"] = still_working(my_job())
+            ss["build_seq"] += 1
         else:
             text = str(request.get("text") or "").strip()
             found_link = re.search(r"(?:https?://|www\.)\S+", text, re.I)
@@ -1114,25 +1239,24 @@ def handle_stage_requests(progress_slot) -> None:
             if link and not re.match(r"https?://", link, re.I):
                 link = "https://" + link
             shot = as_bytes(request.get("image"))
+            client, model = llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]]
+            searches, buyer = int(ss["max_searches"]), str(ss["buyer"]).strip()
 
-            progress, say = progress_for(progress_slot)
-            new_deal, notes = build_deal(llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]], link, shot,
-                                         int(ss["max_searches"]), str(ss["buyer"]).strip(), wanted=wanted, say=say,
-                                         progress=progress)
-            progress_slot.empty()
-            if new_deal:
-                new_deal["log"] = list(progress.lines)
-                queue({"add": new_deal})
-                ss["notices"] = notes
-            else:
-                ss["stage_error"] = " ".join(notes)
-        ss["build_seq"] += 1
-        ss.pop("_build_request", None)
+            def build(job):
+                new_deal, notes = build_deal(client, model, link, shot, searches, buyer, wanted=wanted, say=job.say,
+                                             progress=job.progress)
+                if not new_deal:
+                    return {"error": " ".join(notes)}
+                new_deal["log"] = list(job.progress.lines)
+                return {"add": new_deal, "notices": notes}
 
+            start_job(jobs.Job("build", build, asked=text or "From your screenshot"))
 
 init_state()
 progress_slot = st.empty()
 handle_stage_requests(progress_slot)
+if my_job() is not None and not my_job().done:
+    draw_job(progress_slot, my_job())
 apply_pending()
 ss = st.session_state
 
@@ -1545,6 +1669,9 @@ flags = {
     "message": ss["message_text"], "summary": ss["research_summary"],
     "prefs": current_prefs(), "prefs_ask": not ss["prefs_asked"], "sid": ss["sid"],
     "log": (ss.get("logs") or {}).get(ss["active"]) or [],
+    "working": ({"kind": my_job().kind, "flag": my_job().flag, "car": my_job().car_id, "secs": my_job().seconds,
+                 "step": my_job().step, "asked": my_job().asked}
+                if my_job() is not None and not my_job().done else None),
 }
 stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail", "more", "verify",
                 "message", "car", "addcomp", "remove", "usecomp", "link")
@@ -1580,4 +1707,15 @@ with deal_file_box:
 actions = ss.pop("_garage_actions", [])
 if actions:
     run_garage_actions(actions)
+    st.rerun()
+
+# ----- long work runs on its own thread: wait for it here, with the page already drawn -----
+# Each line drawn is a point where Streamlit may start the script again (a tap, the page reconnecting). When it
+# does, the job carries on untouched and the new run comes back here. Nothing is started twice.
+job = my_job()
+if job is not None and not job.done:
+    while not job.done:
+        draw_job(progress_slot, job)
+        time.sleep(0.4)
+    draw_job(progress_slot, job)
     st.rerun()

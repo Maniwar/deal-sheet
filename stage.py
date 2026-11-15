@@ -232,6 +232,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "modelName": " ".join(str(car.get(k) or "").strip() for k in ("make", "model")).strip(),
         "find3d": " ".join(str(car.get(k) or "").strip() for k in ("make", "model", "trim")).strip(),
         "sid": str(flags.get("sid") or ""),
+        "working": flags.get("working") if isinstance(flags.get("working"), dict) else None,     # long work under way on the server
         "sample": bool(flags.get("sample")), "hasCar": has_car,
         "edit": {field: ("" if car.get(field) in (None, "") else str(car.get(field))) for field in
                  ("year", "make", "model", "trim", "body", "transmission", "drivetrain", "miles", "price", "vin",
@@ -706,7 +707,14 @@ function create(root) {
     scrim: $(".scrim"), light: $(".lightbox"), toast: $(".toast"), photo: $(".photo"), progress: $(".progress"), empty: $(".empty"), live: $(".liveview"), shadow: $(".liveshadow"), zone: $(".zone"), picker: $(".pick3d") };
 
   /* one message to Python at a time: each one makes the app run again */
-  const post = (name, value) => { S.outbox.push([name, value]); pump(); };
+  /* A name for this browser, kept on the device. Work it starts is filed under it on the server, so a page that
+     comes back as a new visit (reloaded, or reconnected after the phone slept) finds that work instead of asking again. */
+  const CID = (() => {
+    let id = ""; try { id = localStorage.getItem("dealsheet.client") || ""; } catch (e) {}
+    if (!/^[0-9a-f]{16}$/.test(id)) { id = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join(""); try { localStorage.setItem("dealsheet.client", id); } catch (e) {} }
+    return id;
+  })();
+  const post = (name, value) => { if (["build", "more", "verify", "prefs"].includes(name) && value && typeof value === "object" && !Array.isArray(value)) value = { ...value, cid: CID }; S.outbox.push([name, value]); pump(); };
   const pump = () => { if (S.waiting || !S.outbox.length || !S.send) return; const [name, value] = S.outbox.shift(); S.waiting = true; clearTimeout(S.waitTimer); S.waitTimer = setTimeout(() => { S.waiting = false; pump(); }, 4000); S.send(name, value); };
 
   let toastTimer = 0;
@@ -722,7 +730,7 @@ function create(root) {
   el.garage.onclick = (e) => {
     const b = e.target.closest(".chip"); if (!b || S.busy) return;
     if (b.dataset.add) { focusBar(); return; }
-    if (!b.classList.contains("on")) { el.garage.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c === b)); post("switch", b.dataset.id); }
+    if (!b.classList.contains("on")) { el.garage.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c === b)); S.switching = b.dataset.id; post("switch", b.dataset.id); }
   };
   $(".gear").onclick = () => {
     const btn = document.querySelector('[data-testid="stExpandSidebarButton"]') || document.querySelector('[data-testid="stSidebarCollapsedControl"] button') || document.querySelector('[data-testid="stSidebarCollapsedControl"]');
@@ -1806,6 +1814,15 @@ function create(root) {
   /* ---------- new data from Python ---------- */
   let noticeKey = "";
   S.update = (d) => {
+    /* Choosing another car takes the server two passes: one that saves the car on screen, then one that shows
+       the car chosen. The first still describes the old car, so drawing it would flip the screen back before
+       it flips forward. Wait for the second. */
+    if (S.switching && d.busy) {
+      S.waiting = false; clearTimeout(S.waitTimer);
+      if (d.error) toast(d.error, true, 12000); else if ((d.notices || []).length) toast(d.notices.join(" "), false, 12000);
+      pump(); return;
+    }
+    S.switching = "";
     S.d = d; S.waiting = false; clearTimeout(S.waitTimer);
     /* The app restarted underneath this page (a new version went out, or it had been asleep). The server has
        forgotten the key, the settings, the cars and anything it was working on, so bring them back and send
@@ -1821,6 +1838,17 @@ function create(root) {
     if (S.optBusy && d.seq !== S.optSeq) { S.optBusy = false; if (!d.error) { S.optShot = ""; S.optText = ""; S.optOpen = false; } if (S.tab === "case") renderSheet(); }
     if (S.msgBusy && d.seq !== S.optSeq) S.msgBusy = "";
     S.optSeq = d.seq;
+    /* Work that is under way on the server (a build, a search, a check). It runs on its own there, so the page
+       may have been reloaded or another car chosen since it began: show it as working where it belongs. */
+    const w = d.working, onScreen = ((d.garage || []).find((c) => c.active) || {}).id || "";
+    if (w && w.kind === "build") {
+      if (!S.busy) { S.busy = true; S.sentSeq = d.seq; S.busyAt = Date.now() - (w.secs || 0) * 1000; S.asked = w.asked || "Your car"; S.step = Math.max(1, w.step || 1); S.log = S.log || []; }
+      S.resend = null;                                         /* it is already under way: nothing to send again */
+    } else if (w) {
+      const mine = w.car === onScreen;
+      if (mine && S.moreBusy !== w.flag) { S.moreBusy = w.flag || "sold"; S.busyAt = Date.now() - (w.secs || 0) * 1000; }
+      else if (!mine && S.moreBusy) S.moreBusy = "";            /* the search is for another car: this one's buttons are free to read */
+    }
     if (d.connected && S.afterKey) { const go = S.afterKey; S.afterKey = null; setTimeout(go, 60); }
     if (d.connected && S.resend && !S.busy) { const again = S.resend; S.resend = null; setTimeout(() => sendBuild(again.text, again.image), 80); }
     if (S.busy && d.seq !== S.sentSeq && !d.busy) {

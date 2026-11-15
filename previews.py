@@ -425,7 +425,7 @@ def listing_checks(cars: list[dict], budget: float = 18.0) -> dict[str, tuple[st
     found = {url: ("unknown", "", "") for url in unique}
     if not unique:
         return found
-    pool = ThreadPoolExecutor(max_workers=6)
+    pool = ThreadPoolExecutor(max_workers=12)                # every page at once: each is a different site
     try:
         futures = {pool.submit(_look, url, str(wanted[url].get("vin") or ""), calc.to_int(wanted[url].get("price")) or 0,
                                calc._year_of(wanted[url].get("title"))): url for url in unique}

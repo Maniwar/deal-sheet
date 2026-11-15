@@ -127,7 +127,24 @@ of the screen; a link beside it opens the Claude Console keys page
 - The app never reads a key from secrets or environment variables, so a public copy cannot spend
   the owner's key.
 - Usage is billed to whoever's key is connected. Web research is billed per search on top of
-  tokens, and the settings panel caps the number of searches per run.
+  tokens, and the settings panel caps the number of searches per run. Every run ends with a line
+  saying what it used: how many web searches, how many tokens in, how many of those came from
+  the cache, and how many out. It is in The case, under "What the search found".
+- **What keeps a run cheap.** The API runs a search's steps in a loop and reads everything found
+  so far again at each step. Prompt caching is on from the first request, so the API puts a cache
+  point after each search result and each later step reads the earlier results from the cache at
+  a tenth of the price. With the default setting a run sends at most 14 searches and opens at
+  most 2 pages (it was 23 and 5): two per auction site, three across the web, five for cars for
+  sale and two on Marketplace. The searches are told to stop when a search brings back cars they
+  already have, a search that does not record is asked again at most twice, and a search that
+  failed is run again only when the failure was a busy server or a dropped connection.
+- **Long work runs on its own.** A build, a search and a check of the for-sale pages each run on
+  their own thread on the server, filed under a name this browser keeps. Nothing you do while one
+  runs starts it again or throws its work away: you can choose another car, open tabs, or let the
+  phone sleep. A page that comes back (reloaded, or reconnected) finds the work still running, or
+  finished and waiting. Results go to the car the work was started for, even when another car is
+  on screen by then; the notice then starts with that car's name. One piece of long work runs at
+  a time per browser.
 
 Everything except the Claude features works without a key.
 
@@ -236,16 +253,19 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   Bids pages in search results are often copies made while the auction was still running, so they
   show no final price; those sales come through Classic.com.
 - Some sites cannot be searched from the inside (the search tool turns the request down, as it
-  does for Bring a Trailer). The app then looks for that site's results across the web instead,
-  remembers it, and does not ask again: later searches skip the failed attempt, and the site's
-  sales come from Classic.com and the wider web.
+  does for Bring a Trailer). The app remembers that and does not ask again: the site's sales come
+  from Classic.com, which records them, and from the search of the wider web.
 - A sale read from one of Classic.com's lists of results, when that car's own page was not among
   the search results, links to the list and says "Listed on Classic.com" in its note.
 - Results are merged so the same sale is not listed twice: the same page, the same VIN, or the
   same price and model year within three days. The record with a date and its own page is kept.
 - If the search service is busy, a site's search is tried once more. If your key's rate limit is
   reached, the app waits as long as the API asks (40 seconds at most), says so in the live lines,
-  and carries on; it gives up only after two waits. At most three requests run at once.
+  and carries on; it gives up only after two waits. Every search of a run goes out at the same
+  time (up to six requests at once), and the for-sale pages are opened, all together, as soon as
+  that search is back, while the sales searches are still running. If the key's rate limit is
+  reached, the app drops to two requests at a time for a minute and a half, so the searches take
+  turns instead of failing together.
 - KBB and J.D. Power listing pages are left out of every search: they copy dealers' listings and stay
   up after the car has gone. Any already saved are moved to the ended list.
 - Every comp shows its VIN under its title, in the lists and in the pop-up on the chart; tap it to
