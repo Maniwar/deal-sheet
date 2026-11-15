@@ -32,6 +32,22 @@ def get_client(api_key: str) -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key, max_retries=2, timeout=300.0)
 
 
+def check_key(api_key: str) -> tuple[bool, str]:
+    """Check a pasted key with a free call. Returns (usable, message for the person)."""
+    key = (api_key or "").strip()
+    if not key:
+        return False, "Paste your Anthropic API key first."
+    try:
+        anthropic.Anthropic(api_key=key, max_retries=1, timeout=20.0).models.list(limit=1)
+    except anthropic.AuthenticationError:
+        return False, "Anthropic rejected that key. Check that you copied all of it."
+    except anthropic.PermissionDeniedError:
+        return False, "That key is not allowed to use the API."
+    except anthropic.APIError:
+        return True, "Could not confirm the key just now. It will be checked the first time you use Claude."
+    return True, ""
+
+
 # ---------- helpers ----------
 
 def _field(obj, name, default=None):
@@ -67,7 +83,7 @@ def _create(client, **kwargs):
     try:
         return client.messages.create(**kwargs)
     except anthropic.AuthenticationError as exc:
-        raise LLMError("The Anthropic API key was rejected. Check it in the sidebar.") from exc
+        raise LLMError("Anthropic rejected your API key. Forget it in the sidebar and paste it again.") from exc
     except anthropic.RateLimitError as exc:
         raise LLMError("The API rate limit was hit. Wait a minute and try again.") from exc
     except anthropic.APIStatusError as exc:
@@ -135,6 +151,10 @@ LISTING_TOOL = {
             "location": {"type": "string"},
             "url": {"type": "string"},
             "notes": {"type": "string", "description": "Options, price drops, title status or condition notes, in one or two sentences."},
+            "photo_box": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4,
+                          "description": "Only when a screenshot is attached and it shows a photo of the car: the photo's "
+                                         "edges as [left, top, right, bottom], each a fraction of the screenshot's width or "
+                                         "height from 0 to 1. Cover the whole photo and nothing else."},
         },
         "required": ["make", "model"],
     },
@@ -205,11 +225,19 @@ COMPS_TOOL = {
 }
 
 
-def _comps_tool(require_url: bool) -> dict:
-    if require_url:
+def _comps_tool(require_url: bool, with_photos: bool = False) -> dict:
+    if require_url and not with_photos:
         return COMPS_TOOL
     tool = json.loads(json.dumps(COMPS_TOOL))
-    tool["input_schema"]["properties"]["comps"]["items"]["required"] = ["status", "title", "price"]
+    items = tool["input_schema"]["properties"]["comps"]["items"]
+    if not require_url:
+        items["required"] = ["status", "title", "price"]
+    if with_photos:
+        items["properties"]["photo_box"] = {
+            "type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4,
+            "description": "Only if the screenshot shows a photo of this car: the photo's edges as [left, top, right, "
+                           "bottom], each a fraction of the screenshot's width or height from 0 to 1.",
+        }
     return tool
 
 
@@ -239,15 +267,22 @@ def extract_comps(client, model: str, car: dict, text: str = "", image: bytes | 
     content.append({"type": "text", "text": prompt})
     response = _create(
         client, model=model, max_tokens=6000,
-        tools=[_comps_tool(False)], tool_choice={"type": "tool", "name": "record_comps"},
+        tools=[_comps_tool(False, with_photos=bool(image))], tool_choice={"type": "tool", "name": "record_comps"},
         messages=[{"role": "user", "content": content}],
     )
     recorded = _tool_input(response, "record_comps")
     if not isinstance(recorded, dict):
         raise LLMError("Claude did not find comps on that page. Try a clearer screenshot or paste the text.")
-    comps = clean_comps(recorded.get("comps") or [])
-    for comp in comps:
-        comp["link_ok"] = None
+    comps = []
+    for raw in recorded.get("comps") or []:
+        cleaned = clean_comps([raw])
+        if cleaned:
+            comp = cleaned[0]
+            comp["link_ok"] = None
+            box = raw.get("photo_box") if isinstance(raw, dict) else None
+            if isinstance(box, (list, tuple)) and len(box) == 4:
+                comp["photo_box"] = list(box)
+            comps.append(comp)
     return {"comps": comps, "summary": str(recorded.get("summary") or "").strip()}
 
 

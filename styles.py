@@ -30,6 +30,7 @@ header[data-testid="stHeader"]{background:transparent}
 .ds-top{display:flex;gap:24px;justify-content:space-between;align-items:flex-start;flex-wrap:wrap}
 .ds-eyebrow{font:700 11px var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--dim);display:flex;gap:10px;align-items:center}
 .ds-tag{font:700 10px var(--mono);letter-spacing:.1em;color:var(--amber);border:1px solid rgba(245,158,11,.45);background:rgba(245,158,11,.08);padding:3px 8px;border-radius:999px}
+.ds-tag.ok{color:#6ee7b7;border-color:rgba(16,185,129,.5);background:rgba(16,185,129,.10)}
 .ds-title{font:700 clamp(28px,4.6vw,44px)/1.05 var(--sans);letter-spacing:-.02em;color:var(--ink);margin:10px 0 12px;text-wrap:balance}
 .ds-chips{display:flex;flex-wrap:wrap;gap:6px}
 .ds-chips span{font:500 12.5px var(--sans);color:#cbd5e1;background:#111c33;border:1px solid var(--line);padding:5px 10px;border-radius:999px}
@@ -91,6 +92,14 @@ a.ds-comp:hover{border-color:var(--line2);transform:translateY(-1px)}
 .ds-comp .k{font:500 11.5px var(--sans);margin-top:7px}
 .ds-comp .k.ok{color:#6ee7b7} .ds-comp .k.warn{color:#fcd34d} .ds-comp .k.none{color:var(--dim)}
 
+/* ---------- bring your own key ---------- */
+.st-key-byok{border:1px solid rgba(16,185,129,.38);border-radius:18px;padding:18px 20px;margin-top:4px;
+  background:linear-gradient(135deg,rgba(16,185,129,.10),rgba(15,23,42,.75) 55%)}
+.ds-byok .ds-label{color:#6ee7b7}
+.ds-byok-t{font:700 19px/1.25 var(--sans);color:var(--ink);margin:6px 0 6px;text-wrap:balance}
+.ds-byok-s{font:400 13.5px/1.55 var(--sans);color:var(--mute)}
+.ds-byok-s a{color:#6ee7b7;white-space:nowrap}
+
 /* ---------- misc blocks ---------- */
 .ds-h{font:700 11px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin:8px 0 2px}
 .ds-note{border:1px solid var(--line);border-radius:14px;padding:12px 14px;background:var(--card2);color:#cbd5e1;font:400 14px/1.5 var(--sans)}
@@ -133,6 +142,7 @@ h4{letter-spacing:-.01em}
   .ds-top{gap:14px}
   .ds-tile{padding:10px 12px}
   .ds-railwrap{margin-top:16px}
+  .st-key-byok{padding:16px 14px}
   .ds-ask{text-align:left;min-width:0}
   .ds-ladder{grid-template-columns:repeat(2,minmax(0,1fr))}
   .ds-railwrap{padding:12px 10px 8px}

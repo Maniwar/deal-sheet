@@ -95,6 +95,7 @@ def clean_comp(row: dict) -> dict | None:
         "url": text("url"),
         "note": text("note"),
         "link_ok": None if link_ok is None else bool(link_ok),
+        "img": text("img"),
     }
 
 
