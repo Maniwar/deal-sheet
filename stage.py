@@ -43,6 +43,17 @@ def split_options(text) -> list[str]:
     return out
 
 
+def trust_of(comp: dict) -> int:
+    """How far a comp can be checked, for sorting and for its colour on the price line.
+
+    1: its link opens that one car's own page and it has a VIN. 2: its own page, no VIN. 3: nothing to open (read
+    from a list, or a link the search did not return), or a VIN that is for another model year.
+    """
+    if calc.is_lead(comp) or calc.vin_check(comp)[0] == "off":
+        return 3
+    return 1 if comp.get("vin") else 2
+
+
 def why_out(comp: dict) -> str:
     """Why a comp is not counted, in a few words: another trim, nothing to open and check, or the buyer's choice."""
     if comp["use"]:
@@ -181,6 +192,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             "host": "Facebook Marketplace" if find else calc.host_of(url), "kind": "find" if find else calc.link_kind(url), "use": bool(comp["use"]), "linkOk": comp.get("link_ok"), "delta": delta,
             "idx": idx, "why": why_out(comp), "lead": bool(not comp["use"] and comp.get("aside") == "lead"),
             "proof": calc.proof(comp), "vinOk": calc.vin_check(comp)[0], "vinYear": calc.vin_check(comp)[1],
+            "trust": trust_of(comp),
             "img": comp.get("img") or "", "vin": comp.get("vin") or "",
             "seen": comp.get("seen") or "", "seenOn": comp.get("seen_on") or "",
             "history": comp.get("history") or "", "histFlag": calc.history_flag(comp.get("history")),
@@ -431,8 +443,12 @@ button.opt{cursor:pointer}
 .legend{display:flex;flex-wrap:wrap;gap:3px 12px;margin:0 0 4px;font:500 10.5px var(--sans);color:var(--mute)}
 .legend span{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 .legend i{flex:none;width:9px;height:9px;border-radius:50%;background:var(--ink);border:1.5px solid var(--ink)}
-.legend i.asking{background:transparent;border-color:#9aa0aa}
-.legend i.high_bid{background:transparent;border-color:var(--warn)}
+.legend i.asking{background:transparent;border-color:#c9ced6}
+.legend i.high_bid{background:transparent;border-color:#c9ced6;border-radius:2px;transform:rotate(45deg) scale(.82)}
+.legend i.t1{background:#34d399;border-color:#34d399}
+.legend i.t2{background:var(--ink);border-color:var(--ink)}
+.legend i.t3{background:#727985;border-color:#727985}
+.legend .lg-break{flex-basis:100%;height:0}
 .legend i.med{width:0;height:11px;border-radius:0;background:none;border:0;border-left:1.5px dashed rgba(255,255,255,.75)}
 .legend i.offer{width:16px;height:7px;border-radius:4px;background:rgba(52,211,153,.45);border:1px solid var(--accent)}
 .track{position:relative;height:84px;margin:0 12px;touch-action:none}
@@ -443,8 +459,15 @@ button.opt{cursor:pointer}
 .dot{position:absolute;top:40px;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;border-radius:50%;background:var(--ink);border:1.5px solid var(--ink);opacity:0;transform:translateY(-26px) scale(.4);transition:transform .55s cubic-bezier(.2,1.5,.4,1),opacity .3s}
 .dot::after{content:"";position:absolute;inset:-12px}
 .dot.in{opacity:1;transform:none}
-.dot.asking{background:#0f1013;border-color:#9aa0aa}
-.dot.high_bid{background:#0f1013;border-color:var(--warn)}
+/* colour: how far the car can be checked. shape: what it is (filled = sold, ring = for sale, diamond = no sale) */
+.dot.t1{background:#34d399;border-color:#34d399}
+.dot.t3{background:#727985;border-color:#727985}
+.dot.asking,.dot.high_bid{background:#0f1013}
+.dot.high_bid{border-radius:2px}
+.dot.high_bid.in{transform:rotate(45deg) scale(.82)}
+.tdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px;background:var(--ink)}
+.tdot.t1{background:#34d399}
+.tdot.t3{background:#727985}
 .dot.off{opacity:.3}
 .dot.sel{box-shadow:0 0 0 5px rgba(255,255,255,.2)}
 .askmark{position:absolute;top:13px;width:1px;height:46px;background:var(--ink)}
@@ -792,7 +815,7 @@ function create(root) {
     if (el.rail.hidden) { dotsKey = ""; return; }
     if (!S.dragging) S.offer = { open: d.offer.open || null, target: d.offer.target || null, walk: d.offer.walk || null };
     const width = el.track.clientWidth || 340;
-    const key = JSON.stringify([a.lo, a.hi, d.ask, a.median, Math.round(width / 40), !!(d.offer.target || d.offer.open), (d.comps || []).map((k) => [k.price, k.group, k.use])]);
+    const key = JSON.stringify([a.lo, a.hi, d.ask, a.median, Math.round(width / 40), !!(d.offer.target || d.offer.open), (d.comps || []).map((k) => [k.price, k.group, k.use, k.trust])]);
     if (key !== dotsKey) {
       const fresh = dotsKey === "" || key.length !== dotsKey.length;
       dotsKey = key;
@@ -807,10 +830,12 @@ function create(root) {
         while (lv < 2 && placed.some((q) => q.lv === lv && Math.abs(q.x - x) < near)) lv++;
         placed.push({ x, lv }); level[i] = lv;
       });
-      h += comps.map((k, i) => `<button type="button" class="dot ${esc(k.status)}${k.use && k.group !== "ended" ? "" : " off"}${fresh ? "" : " in"}" data-i="${i}" style="left:${pos(k.price)}%;top:${40 - level[i] * 13}px" aria-label="${esc(k.label)} ${esc(k.priceText)}"></button>`).join("");
+      h += comps.map((k, i) => `<button type="button" class="dot ${esc(k.status)} t${k.trust || 3}${k.use && k.group !== "ended" ? "" : " off"}${fresh ? "" : " in"}" data-i="${i}" style="left:${pos(k.price)}%;top:${40 - level[i] * 13}px" aria-label="${esc(k.label)} ${esc(k.priceText)}"></button>`).join("");
       const has = (s) => comps.some((k) => k.group === s);
+      const tier = (n) => comps.some((k) => (k.trust || 3) === n);
       el.legend.innerHTML = (has("sold") ? '<span><i class="sold"></i>Sold</span>' : "") + (has("high_bid") ? '<span><i class="high_bid"></i>No sale</span>' : "") +
-        (has("live") ? '<span><i class="asking"></i>For sale now</span>' : "") + (a.median ? `<span><i class="med"></i>Median sale ${esc(a.medianText)}</span>` : "");
+        (has("live") ? '<span><i class="asking"></i>For sale now</span>' : "") + (a.median ? `<span><i class="med"></i>Median sale ${esc(a.medianText)}</span>` : "") +
+        '<span class="lg-break"></span>' + (tier(1) ? '<span><i class="t1"></i>Own page + VIN</span>' : "") + (tier(2) ? '<span><i class="t2"></i>Own page</span>' : "") + (tier(3) ? '<span><i class="t3"></i>Not checkable</span>' : "");
       h += '<button type="button" class="knob open" data-k="open" aria-label="Opening offer"></button><button type="button" class="knob walk" data-k="walk" aria-label="Walk-away price"></button><button type="button" class="knob target" data-k="target" aria-label="Target price"></button>';
       el.track.innerHTML = h;
       if (fresh) el.track.querySelectorAll(".dot").forEach((dot, i) => setTimeout(() => dot.classList.add("in"), 250 + i * 90));
@@ -876,7 +901,7 @@ function create(root) {
       : k.seen === "unknown" ? `<div class="c-seen">Not confirmed: this site does not let apps look. Open it to check it is still for sale.</div>`
       : '<div class="c-seen">Not checked yet. Tap Check they are still for sale.</div>';
     const out = big && k.group === "sold" && !k.use, flip = big && k.group === "sold" ? `<button type="button" class="textbtn usebtn" data-i="${k.idx}" data-price="${k.price}" data-use="${k.use ? 0 : 1}">${k.use ? "Leave it out" : "Count it"}</button>` : "";
-    const text = `<div><span class="pill ${esc(k.group)}">${esc(k.label)}</span>${out ? `<span class="pill out">Not counted: ${esc(k.why)}</span>` : ""}<span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
+    const text = `<div><i class="tdot t${k.trust || 3}" title="${k.trust === 1 ? "Opens on its own page and has a VIN" : k.trust === 2 ? "Opens on its own page, no VIN" : "Nothing to open and check"}"></i><span class="pill ${esc(k.group)}">${esc(k.label)}</span>${out ? `<span class="pill out">Not counted: ${esc(k.why)}</span>` : ""}<span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
       `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div><div>${k.vin ? vinChip(k.vin, "c-vin", k.vinOk, k.vinYear) : '<span class="vin none c-vin"><b>VIN</b>not found</span>'}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${seen}${flag}` +
       (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">${k.kind === "find" ? "Find it on Marketplace" : "Open"} ${ARROW} <small>${esc(k.kind === "find" ? "" : k.host)}</small></a>` : "") +
       (big && (k.proof === "list" || k.proof === "loose" || k.proof === "none") ? `<form class="linkrow setlink" data-i="${k.idx}" data-price="${k.price}"><input type="url" class="linkbox" placeholder="${k.kind === "find" ? "Found it? Share, Copy link, paste here" : "Have its own link? Paste it here"}" inputmode="url" aria-label="This car's own link"><button type="submit" class="btn ghost">Save</button></form>` : "") +
@@ -913,11 +938,13 @@ function create(root) {
   el.sheetTabs.onclick = (e) => { const b = e.target.closest(".tab"); if (b) { S.tab = b.dataset.tab; renderSheet(); } };
   function renderSheet() {
     const d = S.d, c = d.case || {}, [nSold, nSale] = counts(d);
-    const sort = S.sort || (S.sort = { key: "price", dir: 1 });
-    const order = (x, y) => { const p = x[sort.key] || 0, q = y[sort.key] || 0; if (!p || !q) return (q ? 1 : 0) - (p ? 1 : 0); return (p - q) * sort.dir; };   /* cars missing the value go last */
+    const sort = S.sort || (S.sort = { key: "trust", dir: 1 });
+    /* most reliable first: own page with a VIN, then own page, then the rest; newest first within each. Cars missing a value go last. */
+    const order = (x, y) => { if (sort.key === "trust") return ((x.trust || 3) - (y.trust || 3)) * sort.dir || (y.when || 0) - (x.when || 0) || x.price - y.price;
+      const p = x[sort.key] || 0, q = y[sort.key] || 0; if (!p || !q) return (q ? 1 : 0) - (p ? 1 : 0); return (p - q) * sort.dir; };
     const list = (groups, title, only, lead) => { const rows = (d.comps || []).filter((k) => groups.includes(k.group) && (!only || only(k))).sort(order); return rows.length ? `<h3>${title} · ${rows.length}</h3>${lead || ""}` + rows.map((k) => compCard(k, true)).join("") : ""; };
     const arrow = (key) => (sort.key === key ? (sort.dir > 0 ? " ↑" : " ↓") : "");
-    const sorter = `<div class="sortrow">Sort by ${[["price", "Price"], ["miles", "Miles"], ["when", "Date"]].map(([key, name]) => `<button type="button" class="sortbtn${sort.key === key ? " on" : ""}" data-sort="${key}">${name}${arrow(key)}</button>`).join("")}</div>`;
+    const sorter = `<div class="sortrow">Sort by ${[["trust", "Most reliable"], ["price", "Price"], ["miles", "Miles"], ["when", "Date"]].map(([key, name]) => `<button type="button" class="sortbtn${sort.key === key ? " on" : ""}" data-sort="${key}">${name}${arrow(key)}</button>`).join("")}</div>`;
     el.sheetTabs.innerHTML = [["case", "The case"], ["comps", `Sold<b>${nSold}</b>`], ["sale", `For sale now<b>${nSale}</b>`], ["message", "Message"], ["car", "Car details"], ["model", "3D model"]].map(([id, t]) => `<button type="button" class="tab${S.tab === id ? " lead" : ""}" data-tab="${id}">${t}</button>`).join("");
     let h = "";
     if (d.connected) S.needKey = "";

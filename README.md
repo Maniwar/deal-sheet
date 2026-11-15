@@ -178,6 +178,11 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   Rennlist and the PCA Mart), the maker's pre-owned finder, dealers, listing sites and Facebook
   Marketplace. Price-guide mirrors such as KBB are left out because they keep listings up after
   the car has gone.
+- **Most reliable first, and colour-coded.** Every list is sorted "Most reliable" by default: cars
+  that open on their own page and have a VIN, then cars with their own page, then the rest, newest
+  first within each. The price line uses the same three colours (green, white, grey), and shape
+  for what a car is: a filled dot is a sale, a ring is a car for sale, a diamond is a no-sale.
+  Each card carries the same coloured dot.
 - **What can be checked comes first.** A car counts when its link opens that one car's own page
   and the search (or a page the search opened) gave that link. Each card shows the VIN, with a tick
   when its check digit is right and its model year matches the title, and a warning when the VIN is
