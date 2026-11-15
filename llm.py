@@ -16,10 +16,11 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import anthropic
 
-from calc import car_facts, car_title, clean_comps, link_kind, mark_other_trim, money, normalize_url
+from calc import MIRROR_SITES, car_facts, car_title, clean_comps, is_mirror, link_kind, mark_other_trim, merge_comps, money, normalize_url
 
 MODELS = {
     "Sonnet 5.5 (balanced)": "claude-sonnet-5-5",
@@ -408,7 +409,8 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "a page, find the car's own page in the results, and leave the comp out if you cannot.\n"
         "- Options move prices. When a source names a comp's notable options or its original sticker price, "
         "record them in options.\n"
-        "- Record each comp's VIN when a source shows it. Classic.com vehicle addresses contain it.\n"
+        "- Record each comp's VIN whenever a source shows it: the buyer copies it to check the car. Auction "
+        "pages and dealer pages nearly always state it, and Classic.com vehicle addresses contain it.\n"
         "- Record accident, damage or title history in history whenever a source states it (a clean Carfax, an "
         "accident on the report, a branded title, paintwork).\n"
         "- Name the auction site as the source (Bring a Trailer, Cars & Bids) even when you found the sale "
@@ -481,12 +483,17 @@ def _known_note(known) -> str:
 
 
 def _research(client, model: str, prompt: str, max_searches: int, max_rounds: int, problem: str,
-              car: dict | None = None) -> dict:
-    """Run one web research turn that ends in a record_comps call."""
-    tools = [
-        {"type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": max_searches},
-        COMPS_TOOL,
-    ]
+              car: dict | None = None, only=None, never=None) -> dict:
+    """Run one web research turn that ends in a record_comps call.
+
+    `only` limits the searches to those sites; `never` keeps sites out. The API takes one or the other.
+    """
+    search = {"type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": max_searches}
+    if only:
+        search["allowed_domains"] = list(only)
+    elif never:
+        search["blocked_domains"] = list(never)
+    tools = [search, COMPS_TOOL]
     messages = [{"role": "user", "content": prompt}]
     seen_urls: set[str] = set()
     for _ in range(max_rounds):
@@ -519,12 +526,83 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
     raise LLMError(problem)
 
 
+# Auction sites searched one at a time. A search limited to one site returns that site's own auction pages, each
+# with its result, instead of a few of them among everything else on the web.
+AUCTION_SITES = [
+    ("Cars & Bids", ["carsandbids.com"]),
+    ("Bring a Trailer", ["bringatrailer.com"]),
+    ("PCARMARKET, Classic.com, Hagerty Marketplace and Collecting Cars", ["pcarmarket.com", "classic.com", "hagerty.com", "collectingcars.com"]),
+]
+
+
+def _site_prompt(car: dict, today: str, site: str, max_searches: int, limited: bool = True) -> str:
+    name = car_title(car) or "this car"
+    short = " ".join(str(car.get(key) or "").strip() for key in ("make", "model", "trim")).strip() or name
+    rules = _research_prompt(car, today, max_searches).split("Rules:\n", 1)[1]
+    scope = (f"Your searches return pages from {site} only." if limited
+             else f"Put the site's name in every search, so the results come from {site}.")
+    return (
+        f"Today is {today}. Find completed auctions of this car on {site}, so the buyer can negotiate.\n\n"
+        f"{_car_block(car)}\n\n"
+        f"{scope} Run up to {max_searches} searches, each worded differently so they surface different auctions, "
+        "then call record_comps once with every usable one:\n"
+        f"- \"{short}\"\n"
+        f"- \"{name}\"\n"
+        f"- \"{short} sold\", and the same for the neighbouring model years of this generation\n"
+        f"- \"{short}\" with the transmission or a paint colour, if you still have searches left\n"
+        "Each auction page says how it ended: 'Sold for' is sold; 'Bid to' or 'Reserve not met' is high_bid; an "
+        "auction that is still running is asking, with available yes and a note that starts 'Live auction'. Leave "
+        "out a page that does not show a price.\n"
+        "Rules:\n" + rules
+    )
+
+
 def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rounds: int = 6,
                    today: str | None = None, known=None) -> dict:
-    """Search the web for completed sales. Returns {'comps': [...], 'summary': str, 'searched': int}."""
+    """Search the web for completed sales. Returns {'comps': [...], 'summary': str, 'searched': int}.
+
+    With eight or more searches to spend, each auction site gets its own search first and the wider web
+    comes last; with fewer, it is one search of the whole web.
+    """
     today = today or dt.date.today().strftime("%B %d, %Y")
-    return _research(client, model, _research_prompt(car, today, max_searches) + _known_note(known), max_searches, max_rounds,
-                     "The comp research did not finish. Try again, or add comps by hand.", car=car)
+    problem = "The comp research did not finish. Try again, or add comps by hand."
+    budget = int(max_searches)
+
+    def wide(searches: int) -> dict:
+        return _research(client, model, _research_prompt(car, today, searches) + _known_note(known), searches, max_rounds,
+                         problem, car=car, never=MIRROR_SITES)
+
+    if budget < 8:
+        return wide(budget)
+    each = max(2, budget // (len(AUCTION_SITES) + 1))
+
+    def one_site(entry) -> dict:
+        site, domains = entry
+        try:
+            return _research(client, model, _site_prompt(car, today, site, each) + _known_note(known), each, max_rounds,
+                             problem, car=car, only=domains)
+        except LLMError:                       # a site the search tool cannot be limited to: name it in the searches instead
+            return _research(client, model, _site_prompt(car, today, site, each, limited=False) + _known_note(known), each,
+                             max_rounds, problem, car=car, never=MIRROR_SITES)
+
+    jobs = [lambda entry=entry: one_site(entry) for entry in AUCTION_SITES]
+    jobs.append(lambda: wide(max(2, budget - each * len(AUCTION_SITES))))
+    results, errors = [], []
+    with ThreadPoolExecutor(max_workers=2) as pool:           # two at a time keeps a new key inside its rate limit
+        for future in [pool.submit(job) for job in jobs]:
+            try:
+                results.append(future.result())
+            except LLMError as exc:
+                errors.append(exc)
+    if not results:
+        raise errors[0]
+    comps = merge_comps(*[result["comps"] for result in results])
+    names = ", ".join(site for site, _ in AUCTION_SITES[:2])
+    lead = f"Searched {names} and the other auction sites one at a time, then the wider web."
+    if errors:
+        lead += f" {len(errors)} of those searches did not finish, so run Search for more sales to fill the gap."
+    last = results[-1]["summary"] if not errors or len(results) == len(jobs) else ""
+    return {"comps": comps, "summary": f"{lead} {last}".strip(), "searched": sum(result["searched"] for result in results)}
 
 
 def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_rounds: int = 6,
@@ -532,10 +610,9 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
     """Search the web for cars like this one that are for sale now: live auctions, classifieds and dealers."""
     today = today or dt.date.today().strftime("%B %d, %Y")
     result = _research(client, model, _for_sale_prompt(car, today, max_searches) + _known_note(known), max_searches, max_rounds,
-                       "The search for cars for sale did not finish.", car=car)
+                       "The search for cars for sale did not finish.", car=car, never=MIRROR_SITES)
     # price-guide sites mirror other sites' listings and keep them up after the car has gone
-    result["comps"] = [comp for comp in result["comps"] if comp["status"] == "asking"
-                       and not any(site in comp["url"].lower() for site in ("kbb.com/", "jdpower.com/"))]
+    result["comps"] = [comp for comp in result["comps"] if comp["status"] == "asking" and not is_mirror(comp["url"])]
     for comp in result["comps"]:
         comp["available"] = comp.get("available") or "yes"
     return result

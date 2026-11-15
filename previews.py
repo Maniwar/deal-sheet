@@ -28,6 +28,8 @@ from urllib.parse import urljoin, urlparse
 import requests
 from PIL import Image
 
+import calc
+
 USER_AGENT = "DealSheetLinkPreview/1.0 (+https://github.com/Maniwar/deal-sheet)"
 VIN_API = "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/"       # NHTSA's public VIN decoder
 ALLOW_LOCAL = os.environ.get("DEALSHEET_ALLOW_LOCAL_PREVIEWS") == "1"   # tests only
@@ -256,40 +258,67 @@ _GONE_WORDS = ("has been sold", "vehicle is sold", "this car is sold", "no longe
                "listing has been removed", "ad has expired", "this ad is no longer")
 
 
+_VIN_LABEL = re.compile(r"\bVIN\b[^A-Za-z0-9]{0,24}([A-HJ-NPR-Z0-9]{17})\b", re.I)
+
+
+def page_vin(text: str) -> str:
+    """The VIN a listing page states for its car: the one beside a 'VIN' label, and only if its check digit is right."""
+    for found in _VIN_LABEL.findall(text or ""):
+        vin = found.upper()
+        if calc.vin_checks_out(vin):
+            return vin
+    return ""
+
+
+def listing_look(url: str) -> tuple[str, str]:
+    """(`listing_state` for the page, the VIN the page states or '')."""
+    return _look(url)
+
+
 def listing_state(url: str) -> str:
     """Whether a for-sale page still shows the car: 'live', 'gone' (sold or removed) or 'unknown'.
 
     'unknown' covers every case where the site would not let the app read the page. Nothing here
     tries to get past a refusal.
     """
+    return _look(url)[0]
+
+
+def _look(url: str) -> tuple[str, str]:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,*/*;q=0.5"})
     try:
         if not is_safe_url(url) or not _allowed(url, session):
-            return "unknown"
+            return "unknown", ""
         status, _, content_type, body = _get(url, PAGE_LIMIT, session)
         if status in (404, 410):
-            return "gone"
+            return "gone", ""
         if status != 200 or content_type.lower().startswith("image/"):
-            return "unknown"
+            return "unknown", ""
         page = body.decode("utf-8", "replace")
-        text = re.sub(r"\s+", " ", html.unescape(_TAG.sub(" ", _HIDDEN.sub(" ", page)))).lower()[:80000]
-        return "gone" if any(word in text for word in _GONE_WORDS) else "live"
+        words = re.sub(r"\s+", " ", html.unescape(_TAG.sub(" ", _HIDDEN.sub(" ", page))))[:80000]
+        text = words.lower()
+        return ("gone" if any(word in text for word in _GONE_WORDS) else "live"), page_vin(words)
     except Exception:
-        return "unknown"
+        return "unknown", ""
     finally:
         session.close()
 
 
 def listing_states(urls: list[str], budget: float = 16.0) -> dict[str, str]:
     """`listing_state` for several links at once, within a time budget. Links that run out of time are 'unknown'."""
-    unique = list(dict.fromkeys(url for url in urls if url))[:16]
-    states = {url: "unknown" for url in unique}
+    return {url: look[0] for url, look in listing_looks(urls, budget).items()}
+
+
+def listing_looks(urls: list[str], budget: float = 16.0) -> dict[str, tuple[str, str]]:
+    """`listing_look` for several links at once, within a time budget. Links that run out of time are ('unknown', '')."""
+    unique = list(dict.fromkeys(url for url in urls if url))[:24]
+    states = {url: ("unknown", "") for url in unique}
     if not unique:
         return states
     pool = ThreadPoolExecutor(max_workers=6)
     try:
-        futures = {pool.submit(listing_state, url): url for url in unique}
+        futures = {pool.submit(listing_look, url): url for url in unique}
         done, _ = wait(futures, timeout=budget)
         for future in done:
             try:

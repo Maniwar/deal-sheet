@@ -269,16 +269,18 @@ def settle_trim(car: dict) -> str:
 def check_listings(comps: list[dict]) -> dict:
     """Open each for-sale page, where its site allows, and record whether it still shows the car.
 
-    Sets `seen` (live, gone or unknown) and `seen_on` on each comp, and moves a car whose page says
-    sold or removed out of the for-sale list. Returns how many were live, gone and unknown.
+    Sets `seen` (live, gone or unknown) and `seen_on` on each comp, fills in a VIN the page states, and
+    moves a car whose page says sold or removed out of the for-sale list. Returns how many were live, gone and unknown.
     """
     listed = [comp for comp in comps if calc.comp_group(comp) == "live" and comp["url"]]
-    states = previews.listing_states([comp["url"] for comp in listed])
+    looks = previews.listing_looks([comp["url"] for comp in listed])
     today = dt.date.today().strftime("%b %-d")
     count = {"live": 0, "gone": 0, "unknown": 0}
     for comp in listed:
-        state = states.get(comp["url"], "unknown")
+        state, vin = looks.get(comp["url"], ("unknown", ""))
         comp["seen"], comp["seen_on"] = state, today
+        if vin and not comp.get("vin"):
+            comp["vin"] = vin                    # the page states it, so it is there to copy
         count[state] += 1
         if state == "gone":
             comp["available"] = "no"

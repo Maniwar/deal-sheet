@@ -150,8 +150,16 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   (vpic.nhtsa.dot.gov) to check the trim. If the VIN is plainly more specific (the listing says
   Carrera, the VIN says Carrera S) the trim is corrected and a note says so; if the two disagree
   any other way, the note asks you to check it. Only the VIN is sent.
-- The searches use Claude's built-in web search: site-by-site queries first, then plain queries the
-  way a buyer would type them. The case shows how many comps came from each place, including "none" for those two.
+- The searches use Claude's built-in web search. Completed sales are searched one auction site at a
+  time (Cars & Bids, Bring a Trailer, then PCARMARKET, Classic.com, Hagerty Marketplace and
+  Collecting Cars), each search limited to that site so it returns the site's own auction pages,
+  and then the wider web. Results are merged so the same sale is not listed twice. This needs the
+  search limit in Settings to be 8 or more (12 by default); below that it is one search of the
+  whole web.
+- KBB and J.D. Power listing pages are left out of every search: they copy dealers' listings and stay
+  up after the car has gone. Any already saved are moved to the ended list.
+- Every comp shows its VIN under its title, in the lists and in the pop-up on the chart; tap it to
+  copy. When the app can open a for-sale page it also reads the VIN from it. The case shows how many comps came from each place, including "none" for those two.
 - Every comp is labeled sold, high bid or asking, and its link is checked against the URLs the
   search actually returned. A link that was not in the results is flagged.
 - Claude is told to record each car's own page, never a results page, and the app checks the link's
@@ -170,8 +178,11 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
 **A 3D model of the actual car.** The app does not ship models of real cars. In the **3D model** tab,
 **Find models** searches Sketchfab's public library and shows the results in the app. Tap one and
 it plays on the main screen in Sketchfab's own viewer, with the artist's name on it: no account,
-and nothing is downloaded or stored in the app. The app asks the viewer for a black backdrop and
-turns the studio black to match, so the car sits in the page instead of in a window. With a free Sketchfab account you can instead
+and nothing is downloaded or stored in the app. The app runs that viewer through its API: the backdrop is set to the studio's own colour, the car is
+framed at the size and height the built-in car is drawn at, a drag turns it and it turns slowly on
+its own, and the page's shading and a ground shadow are laid over it. So the car sits in the page
+instead of in a window. (The viewer's picture cannot be made see-through on a free account, which
+is why the studio around a live car is one flat colour.) With a free Sketchfab account you can instead
 download a model into the studio (paste your API token once), or load a `.glb` file or link you
 already have. Your choice is kept in your browser on your device only and is used for every car of
 that make and model in your garage. Use only models whose licence allows it.

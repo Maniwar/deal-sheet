@@ -68,6 +68,36 @@ def monthly_payment(principal: float, apr_pct: float, months: int) -> float:
     return principal * rate / (1 - (1 + rate) ** -months)
 
 
+MIRROR_SITES = ("kbb.com", "jdpower.com")     # price guides that copy other sites' listings and keep them up after the car is gone
+
+
+def is_mirror(url) -> bool:
+    """True for a page on a price-guide site that mirrors dealer listings and leaves them up once the car has sold."""
+    host = host_of(str(url or ""))
+    return any(host == site or host.endswith("." + site) for site in MIRROR_SITES)
+
+
+def merge_comps(*groups) -> list[dict]:
+    """Several searches' comps as one list, without the same car twice (the same page, or the same sale on two sites)."""
+    out, seen = [], set()
+    for group in groups:
+        for comp in group:
+            keys = []
+            if comp["url"]:
+                keys.append(("page", normalize_url(comp["url"])))
+            if comp.get("vin"):
+                keys.append(("vin", comp["vin"], comp["status"], comp["price"]))
+            if comp["status"] != "asking" and date_key(comp["date"]):
+                keys.append(("sale", comp["status"], comp["price"], date_key(comp["date"])))
+            if not keys:
+                keys.append(("car", comp["title"].lower(), comp["status"], comp["price"], comp["date"]))
+            if any(key in seen for key in keys):
+                continue
+            seen.update(keys)
+            out.append(comp)
+    return out
+
+
 def clean_comp(row: dict) -> dict | None:
     """Normalize one comp row. Returns None when it has no usable price."""
     price = to_int(row.get("price"))
@@ -89,6 +119,11 @@ def clean_comp(row: dict) -> dict | None:
     link_ok = row.get("link_ok")
     if _missing(link_ok):
         link_ok = None
+    available, note = (_yes_no(text("available")) if status == "asking" else ""), text("note")
+    if status == "asking" and available != "no" and is_mirror(text("url")):
+        available = "no"                 # these pages stay up long after the car has gone
+        if "price-guide page" not in note.lower():
+            note = f"Price-guide page: these stay up after the car has gone, so it was set aside. {note}".strip()
     return {
         "use": use,
         "status": status,
@@ -98,12 +133,12 @@ def clean_comp(row: dict) -> dict | None:
         "date": text("date"),
         "source": text("source") or host_of(text("url")),
         "url": text("url"),
-        "note": text("note"),
+        "note": note,
         "link_ok": None if link_ok is None else bool(link_ok),
         "img": text("img"),
         "options": text("options"),
         "vin": clean_vin(text("vin")) or find_vin(text("url")),
-        "available": _yes_no(text("available")) if status == "asking" else "",
+        "available": available,
         "body": text("body"),
         "history": text("history"),
         "seen": text("seen") if text("seen") in ("live", "gone", "unknown") and status == "asking" else "",

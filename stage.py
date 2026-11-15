@@ -225,6 +225,7 @@ HTML = r"""
   <section class="zone">
     <button class="photo" type="button" hidden aria-label="Open the listing photo"><img alt=""></button>
     <div class="liveview" hidden><iframe title="3D model of this car" allow="autoplay; fullscreen; xr-spatial-tracking" referrerpolicy="no-referrer"></iframe></div>
+    <div class="liveshadow"></div>
     <div class="progress" hidden></div>
     <div class="empty" hidden></div>
   </section>
@@ -292,6 +293,7 @@ button.opt{cursor:pointer}
 .vin{font:500 11px var(--mono);letter-spacing:.02em;padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:#d5d9e0;background:rgba(255,255,255,.05);white-space:nowrap}
 .vin b{font:700 9px var(--sans);letter-spacing:.14em;color:var(--dim);margin-right:5px}
 .c-vin{display:inline-block;margin-top:5px}
+.vin.none{border-style:dashed;color:var(--dim);background:none;cursor:default}
 .srcs{display:flex;flex-wrap:wrap;gap:5px 6px;margin-top:8px}
 .src{font:500 11.5px var(--sans);padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:#d5d9e0;background:rgba(255,255,255,.05);white-space:nowrap}
 .src b{font-weight:700;margin-left:5px;color:var(--ink)}
@@ -313,17 +315,27 @@ button.opt{cursor:pointer}
 .liveview{position:absolute;inset:0;overflow:hidden;opacity:0;transition:opacity .7s;
   -webkit-mask-image:linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 7%,#000 93%,transparent);-webkit-mask-composite:source-in;
   mask-image:linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 7%,#000 93%,transparent);mask-composite:intersect}
-/* the viewer's backdrop is set to black, and the studio turns black with it, so there is no window edge to see */
-.live-blend .bg{background:#000}
-.live-blend .shade{opacity:0}
-.live-blend.stage{background:#000}
+/* The viewer's picture is opaque. So in live view the studio behind it is one flat colour, the same one the viewer
+   is told to use, and the page's own shading is laid over both: no window edge to see, and the car stays solid. */
+.stage{--studio:#1b1d21}
+.live-blend .bg{background:var(--studio)}
+.live-blend .zone{z-index:auto}
+.stage.live-blend .liveview{z-index:2;right:auto;transform:none;pointer-events:none;-webkit-mask-image:none;mask-image:none}
+.live-blend .shade{z-index:3}
+.live-blend :is(.top,.head,.verdict,.rail,.tabs,.dock),.live-blend .zone>:is(.photo,.progress,.empty){z-index:4}
+.liveshadow{display:none;position:absolute;z-index:3;border-radius:50%;opacity:0;transition:opacity .7s;
+  background:radial-gradient(closest-side,rgba(0,0,0,.62) 0%,rgba(0,0,0,.42) 45%,rgba(0,0,0,.16) 75%,rgba(0,0,0,0) 100%)}
+.zone>.liveshadow{pointer-events:none}
+.live-blend .liveshadow{display:block}
+.live-blend .liveview.ready~.liveshadow{opacity:1}
 .liveview.ready{opacity:1}
 .liveview[hidden]{display:none}
 .liveview iframe{display:block;width:100%;height:100%;border:0;background:transparent}
 /* without the viewer API it stays an honest framed window */
 .liveview.plain{inset:4px 12px;border-radius:18px;border:1px solid rgba(255,255,255,.2);background:#0d0e11;-webkit-mask-image:none;mask-image:none}
 .live3d .zone::before{content:"Loading the 3D model";position:absolute;inset:0;display:grid;place-items:center;font:500 13px var(--sans);color:var(--dim)}
-.live3d .gl{opacity:0!important;pointer-events:none}
+.live3d .gl{opacity:0!important}
+.live3d:not(.live-blend) .gl{pointer-events:none}
 .live3d .zone{min-height:190px}
 .photo img{width:100%;height:100%;object-fit:cover;display:block}
 .credit{margin:7px 6px 0;text-align:center;font:400 9.5px/1.3 var(--sans);color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -575,7 +587,7 @@ function create(root) {
   const S = { d: {}, offer: {}, busy: false, shot: "", tab: "", outbox: [], waiting: false, remember: true };
   const el = { garage: $(".garage"), head: $(".head"), verdict: $(".verdict"), rail: $(".rail"), legend: $(".legend"), track: $(".track"), nums: $(".nums"),
     tabs: $(".tabs"), dock: $(".dockbar"), pop: $(".pop"), sheet: $(".sheet"), sheetTabs: $(".sheet-tabs"), sheetBody: $(".sheet-body"),
-    scrim: $(".scrim"), light: $(".lightbox"), toast: $(".toast"), photo: $(".photo"), progress: $(".progress"), empty: $(".empty"), live: $(".liveview") };
+    scrim: $(".scrim"), light: $(".lightbox"), toast: $(".toast"), photo: $(".photo"), progress: $(".progress"), empty: $(".empty"), live: $(".liveview"), shadow: $(".liveshadow"), zone: $(".zone"), gl: $(".gl") };
 
   /* one message to Python at a time: each one makes the app run again */
   const post = (name, value) => { S.outbox.push([name, value]); pump(); };
@@ -621,7 +633,7 @@ function create(root) {
   /* a VIN, shown in full; a tap copies it */
   const vinChip = (vin, cls) => `<button type="button" class="vin${cls ? " " + cls : ""}" data-vin="${esc(vin)}" title="Copy the VIN"><b>VIN</b>${esc(vin)}</button>`;
   root.addEventListener("click", (e) => {
-    const chip = e.target.closest && e.target.closest(".vin"); if (!chip) return;
+    const chip = e.target.closest && e.target.closest(".vin"); if (!chip || !chip.dataset.vin) return;
     e.preventDefault(); e.stopPropagation();
     const vin = chip.dataset.vin || "";
     const done = () => toast("VIN copied: " + vin);
@@ -760,7 +772,7 @@ function create(root) {
       : k.seen === "unknown" ? `<div class="c-seen">Not confirmed: this site does not let apps look. Open it to check it is still for sale.</div>`
       : '<div class="c-seen">Not checked yet. Tap Check they are still for sale.</div>';
     const text = `<div><span class="pill ${esc(k.group)}">${esc(k.label)}</span><span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
-      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${k.vin ? `<div>${vinChip(k.vin, "c-vin")}</div>` : ""}${seen}${flag}` +
+      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div><div>${k.vin ? vinChip(k.vin, "c-vin") : '<span class="vin none c-vin"><b>VIN</b>not found</span>'}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${seen}${flag}` +
       (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">Open ${ARROW} <small>${esc(k.host)}</small></a>` : "") + "</div>";
     return big ? `<div class="card${k.use ? "" : " off"}">${text}${k.image ? `<img src="${esc(k.image)}" alt="" loading="lazy">` : "<span></span>"}</div>` : text;
   };
@@ -871,9 +883,12 @@ function create(root) {
   const SK_SLOT = "dealsheet.sketchfab";
   const skApi = () => root.dataset.skfb || "https://api.sketchfab.com";
   const skSite = () => root.dataset.skfbSite || "https://sketchfab.com";
-  /* The live model plays in Sketchfab's viewer. Its viewer API lets the page set the backdrop colour and frame
-     the whole car, so it sits in the studio instead of looking like a window on top of it. */
-  const LIVE_BG = [0, 0, 0];      /* black is the same in every colour space, so the page can match it exactly */
+  /* The live model plays in Sketchfab's viewer, and the page runs that viewer through its API: the backdrop is set
+     to the studio's own colour, the car is framed at the size and height the built-in car is drawn at, and a
+     drag turns it the same way. The viewer's picture is opaque, so the studio around it is that one flat colour. */
+  const LIVE_BG = [27, 29, 33];            /* --studio in the stylesheet: the two must be the same colour */
+  const live = { api: null, cam: null, geo: null, az: 0, vel: 0, held: 0, down: null, sent: "", loop: 0, last: 0 };
+  const stillLife = matchMedia("(prefers-reduced-motion:reduce)").matches;
   let liveKey = "", skLib = null;
   S.paintLive = () => paintLive();
   const skLoad = () => skLib || (skLib = new Promise((ok, fail) => {
@@ -883,30 +898,105 @@ function create(root) {
     s.onerror = () => { skLib = null; fail(new Error("blocked")); };
     document.head.appendChild(s);
   }));
+  /* where the built-in car sits and how big it is drawn (the studio camera has a 30 degree lens) */
+  function liveGeo() {
+    const R = root.getBoundingClientRect(), Z = el.zone.getBoundingClientRect(), zw = Math.max(Z.width, 10), zh = Math.max(Z.height, 10);
+    let perUnit = Math.min(zw / 6.7, zh / 2.75), cx = zw / 2;
+    if (el.photo.offsetWidth) {                                  /* the listing photo beside the car: make room for it */
+      const edge = el.photo.getBoundingClientRect().left - Z.left - 18;
+      if (cx + perUnit * 3.1 > edge && edge > 200) { perUnit = Math.min(perUnit, edge / 6.7); cx = edge / 2; }
+    }
+    const D = Math.max(R.height, 10) / (2 * Math.tan(Math.PI / 12) * perUnit), L = 4.5 * perUnit;
+    return { zh, cx, perUnit, L, elev: Math.atan((D * 0.17 + 0.5 - 0.72) / D), w: Math.min(Math.max(L * 1.3, 300), zw) };
+  }
+  function liveLayout() {
+    if (!root.classList.contains("live-blend")) return;
+    const g = live.geo = liveGeo(), sw = g.L * 1.12, sh = g.L * 0.2;
+    el.live.style.left = (g.cx - g.w / 2) + "px"; el.live.style.width = g.w + "px";
+    el.shadow.style.cssText = `left:${g.cx - sw / 2}px;top:${g.zh / 2 + 0.72 * g.perUnit * Math.cos(g.elev) + g.L * 0.012 - sh / 2}px;width:${sw}px;height:${sh}px`;
+    live.sent = "";
+  }
+  /* point the viewer's camera: it circles the car at the studio camera's height. Sketchfab scenes have z up. */
+  function liveAim() {
+    const c = live.cam, g = live.geo; if (!c || !g || !live.api) return;
+    const R = c.R0 * 0.84 * g.zh / g.L, az = c.az0 - live.az, key = az.toFixed(4) + "|" + R.toFixed(3) + "|" + g.elev.toFixed(4);
+    if (key === live.sent) return;
+    live.sent = key; const flat = R * Math.cos(g.elev);
+    try { live.api.setCameraLookAt([c.T[0] + flat * Math.cos(az), c.T[1] + flat * Math.sin(az), c.T[2] + R * Math.sin(g.elev)], c.T, 0); } catch (e) {}
+  }
+  function liveTick(now) {
+    if (!live.cam || !root.isConnected || !root.classList.contains("live-blend")) { live.loop = 0; return; }
+    live.loop = requestAnimationFrame(liveTick);
+    const dt = Math.min((now - (live.last || now)) / 1000, 0.05); live.last = now;
+    if (document.hidden) return;
+    if (!live.down) { live.az += live.vel; live.vel *= 0.93; if (!stillLife && now - live.held > 3500 && !S.busy) live.az += dt * 0.09; }
+    liveAim();
+  }
+  function liveStop() {
+    if (live.loop) cancelAnimationFrame(live.loop);
+    Object.assign(live, { api: null, cam: null, geo: null, sent: "", loop: 0, down: null, vel: 0 });
+    root.classList.remove("live-blend"); el.live.style.left = el.live.style.width = ""; el.shadow.removeAttribute("style");
+  }
+  /* a drag on the studio turns the live car, as it turns the built-in one */
+  el.gl.addEventListener("pointerdown", (e) => { if (live.cam) live.down = { x: e.clientX }; });
+  el.gl.addEventListener("pointermove", (e) => { if (!live.cam || !live.down) return; const dx = e.clientX - live.down.x; live.down.x = e.clientX; live.vel = dx * 0.0065; live.az += live.vel; live.held = performance.now(); });
+  for (const name of ["pointerup", "pointercancel"]) el.gl.addEventListener(name, () => { live.down = null; });
+  if (window.ResizeObserver) { const ro = new ResizeObserver(() => liveLayout()); ro.observe(root); ro.observe(el.zone); }
+  /* once the viewer has framed the whole car, read where its camera sits and take the camera over */
+  function settle(api, uid) {
+    let last = "", tries = 0, done = false;
+    const finish = (cam) => {
+      if (done || liveKey !== uid) return; done = true;
+      if (cam) {
+        const T = cam.target, d = cam.position.map((v, i) => v - T[i]);
+        Object.assign(live, { api, cam: { T, R0: Math.hypot(d[0], d[1], d[2]) || 1, az0: Math.atan2(d[1], d[0]) }, az: 0, vel: 0, held: performance.now(), last: 0 });
+        try { api.setUserInteraction(false, () => {}); } catch (e) {}
+      }
+      root.classList.add("live-blend"); liveLayout(); liveAim();
+      setTimeout(() => { if (liveKey === uid) el.live.classList.add("ready"); }, cam ? 260 : 0);
+      if (cam && !live.loop) live.loop = requestAnimationFrame(liveTick);
+    };
+    const read = () => {
+      if (done || liveKey !== uid) return;
+      try {
+        api.getCameraLookAt((err, cam) => {
+          const ok = !err && cam && Array.isArray(cam.position) && Array.isArray(cam.target), pos = ok ? cam.position.map((v) => (+v).toFixed(3)).join() : "";
+          if ((ok && pos === last) || ++tries > 14) { finish(ok ? cam : null); return; }
+          last = pos; setTimeout(read, 220);
+        });
+      } catch (e) { finish(null); }
+    };
+    setTimeout(read, 300); setTimeout(() => finish(null), 7000);
+  }
   function startLive(frame, uid) {
+    let linked = false;
     const plain = () => {                                   /* without the viewer API: an ordinary embed, shown as a framed window */
       if (liveKey !== uid) return;
-      el.live.classList.add("plain", "ready"); root.classList.remove("live-blend");
+      liveStop(); el.live.classList.add("plain", "ready");
       frame.src = `${skSite()}/models/${encodeURIComponent(uid)}/embed?autostart=1&autospin=0.2&preload=1&ui_hint=0&ui_theme=dark&dnt=1`;
     };
-    el.live.classList.remove("plain", "ready"); root.classList.remove("live-blend"); frame.removeAttribute("src");
+    liveStop(); el.live.classList.remove("plain", "ready"); frame.removeAttribute("src");
     if (root.dataset.skfbSite) { plain(); return; }
     skLoad().then(() => {
       if (liveKey !== uid) return;
       new window.Sketchfab(frame).init(uid, {
-        autostart: 1, autospin: 0.2, preload: 1, camera: 0, scrollwheel: 0, ui_hint: 0, ui_theme: "dark", dnt: 1,
+        autostart: 1, autospin: 0, preload: 1, camera: 0, scrollwheel: 0, ui_hint: 0, ui_theme: "dark", dnt: 1,
         success: (api) => {
-          api.start();
+          linked = true; api.start();
           api.addEventListener("viewerready", () => {
             if (liveKey !== uid) return;
-            try { api.setBackground({ color: LIVE_BG }, () => {}); api.recenterCamera(() => {}); } catch (e) {}
-            el.live.classList.add("ready"); root.classList.add("live-blend");   /* the studio goes black to match the viewer */
+            try {
+              api.setBackground({ color: LIVE_BG.map((v) => v / 255) }, () => {});
+              api.setEnableCameraConstraints(false, { preventCameraConstraintsFocus: true }, () => {});
+              api.recenterCamera(() => {});
+            } catch (e) {}
+            settle(api, uid);
           });
         },
         error: plain,
       });
     }).catch(plain);
-    setTimeout(() => { if (liveKey === uid) el.live.classList.add("ready"); }, 9000);     /* never leave it hidden */
+    setTimeout(() => { if (liveKey === uid && !linked) plain(); }, 12000);     /* never leave it hidden */
   }
   async function paintLive() {
     const d = S.d; let rec = null;
@@ -919,7 +1009,7 @@ function create(root) {
       credit.innerHTML = `3D view: ${safeUrl(rec.url) ? `<a href="${esc(rec.url)}" target="_blank" rel="noopener">“${esc(rec.name)}”</a>` : "“" + esc(rec.name) + "”"} by ${esc(rec.author || "its artist")}, shown live from Sketchfab`;
       credit.hidden = false;
     } else if (liveKey || !el.live.hidden) {
-      liveKey = ""; frame.removeAttribute("src"); el.live.hidden = true; el.live.classList.remove("plain", "ready"); root.classList.remove("live3d", "live-blend");
+      liveKey = ""; liveStop(); frame.removeAttribute("src"); el.live.hidden = true; el.live.classList.remove("plain", "ready"); root.classList.remove("live3d");
     }
   }
   const skToken = () => { try { return localStorage.getItem(SK_SLOT) || ""; } catch (e) { return ""; } };
