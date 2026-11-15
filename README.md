@@ -178,9 +178,16 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   Rennlist and the PCA Mart), the maker's pre-owned finder, dealers, listing sites and Facebook
   Marketplace. Price-guide mirrors such as KBB are left out because they keep listings up after
   the car has gone.
-- Facebook Marketplace shows the search tool only its public lists for a city (car, price, miles,
-  town), not each car's own page. Cars read from those lists link to the list, say so in their
-  note, and are not checked: sign in to Facebook to find the car.
+- **What can be checked comes first.** A car counts when its link opens that one car's own page
+  and the search (or a page the search opened) gave that link. Each card shows the VIN, with a tick
+  when its check digit is right and its model year matches the title, and a warning when the VIN is
+  for another year. A car with nothing to open (read from a list, or with a link the search did
+  not return) is a lead: once a car has three results that can be checked, leads are folded away
+  and left out of the numbers. Paste a lead's own link into the box on its card and it is counted.
+- Facebook Marketplace shows the search tool only its lists for a city (car, price, miles, town).
+  Those cars are always leads. Each has a link that opens Marketplace searched for that car at
+  about its price in the same area, and a box for the direct link (in Facebook: Share, then Copy
+  link), which the car keeps from then on.
 - The app cannot open sites that block automated visits, so some for-sale cars are marked "not
   confirmed". Open those yourself.
 - Body style and trim are hard requirements: a coupe is compared only with coupes and a Carrera S
@@ -198,7 +205,10 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   that run at the same time: Classic.com, Cars & Bids, Bring a Trailer and the wider web. Each of
   the first three is limited to that one site, so it returns the site's own pages. Classic.com is
   the main source: it records the results of Bring a Trailer, Cars & Bids, PCARMARKET, Hagerty,
-  Hemmings and Collecting Cars auctions with the price, the date, the miles and the VIN. Cars &
+  Hemmings and Collecting Cars auctions with the price, the date, the miles and the VIN. Its
+  search also opens Classic.com's market page for the model (Claude's web fetch tool) and reads
+  every car on it with the link to that car's own page, which holds the VIN. If a key cannot use
+  the fetch tool, the search carries on from the search results alone. Cars &
   Bids pages in search results are often copies made while the auction was still running, so they
   show no final price; those sales come through Classic.com.
 - Some sites cannot be searched from the inside (the search tool turns the request down, as it

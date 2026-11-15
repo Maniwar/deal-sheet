@@ -17,8 +17,10 @@ import base64
 import datetime as dt
 import json
 import os
+import re
 import threading
 import time
+from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
@@ -34,6 +36,8 @@ MODELS = {                                   # the first one is the default
 DEFAULT_MODEL = "claude-haiku-5-5"
 _NO_EFFORT: set[str] = set()                 # models that turned down an effort level, so it is not sent to them again
 WEB_SEARCH_TYPE = "web_search_20250305"
+WEB_FETCH_TYPE = "web_fetch_20250910"         # opens a page the search returned and reads all of it, links included
+_FETCH_OFF: list[str] = []                    # set once the API has turned the fetch tool down, so it is not offered again
 
 
 class LLMError(Exception):
@@ -90,19 +94,36 @@ def _tool_input(response, tool_name: str):
     return None
 
 
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"'()\[\]]+")
+_PATH_IN_TEXT = re.compile(r"(?<![\w/.:])(/(?:veh|s|a|l|m)/[^\s<>\"'()\[\]]+)")
+
+
+def _urls_in(text: str, base: str) -> set[str]:
+    """Every address written on a page that was opened, with site-relative ones (/veh/...) completed."""
+    found = {normalize_url(url.rstrip(".,;")) for url in _URL_IN_TEXT.findall(text or "")}
+    if base:
+        found |= {normalize_url(urljoin(base, path.rstrip(".,;"))) for path in _PATH_IN_TEXT.findall(text or "")}
+    return found
+
+
 def _search_urls(response) -> set[str]:
-    """URLs the web search returned in this response, normalized."""
+    """URLs this response gives grounds for: those the web search returned, each page that was opened, and the
+    addresses written on an opened page (a market page's links to each car's own page). Normalized."""
     found = set()
     for block in _field(response, "content", []) or []:
-        if _field(block, "type") != "web_search_tool_result":
-            continue
-        results = _field(block, "content")
-        if not isinstance(results, list):
-            continue  # an error object, e.g. max_uses_exceeded
-        for result in results:
-            url = _field(result, "url")
+        kind, body = _field(block, "type"), _field(block, "content")
+        if kind == "web_search_tool_result" and isinstance(body, list):
+            for result in body:
+                url = _field(result, "url")
+                if url:
+                    found.add(normalize_url(url))
+        elif kind == "web_fetch_tool_result" and _field(body, "type") == "web_fetch_result":
+            url = str(_field(body, "url") or "")
             if url:
                 found.add(normalize_url(url))
+            data = _field(_field(_field(body, "content"), "source"), "data")
+            if isinstance(data, str):
+                found |= _urls_in(data, url)
     return found
 
 
@@ -146,6 +167,14 @@ class Progress:
 
 
 # What the search tool's own error codes mean. A failed search is not billed, and the rest of the work goes on.
+_FETCH_ERRORS = {
+    "url_not_allowed": "that site does not let its pages be opened this way",
+    "url_not_accessible": "that page would not open",
+    "url_not_in_prior_context": "that address was not one the search returned, so it was not opened",
+    "max_uses_exceeded": "it has opened as many pages as it was given",
+    "too_many_requests": "the page service is busy, so that page was skipped",
+    "unsupported_content_type": "that page is not text, so it was skipped",
+}
 _SEARCH_ERRORS = {
     "max_uses_exceeded": "it has used all the searches it was given for this site",
     "too_many_requests": "the search service is busy, so that search was skipped",
@@ -177,20 +206,33 @@ def _watch(event, kinds: dict, parts: dict, progress: Progress, label: str, stre
             else:                              # the search itself failed: say which way, in plain words
                 code = results.get("error_code") if isinstance(results, dict) else getattr(results, "error_code", "")
                 progress.say(f"{label}: {_SEARCH_ERRORS.get(str(code or ''), 'that search failed, so it was skipped')}")
+        elif kinds[index] == "web_fetch_tool_result":
+            body = getattr(block, "content", None)
+            code = body.get("error_code") if isinstance(body, dict) else getattr(body, "error_code", "")
+            if code:
+                progress.say(f"{label}: {_FETCH_ERRORS.get(str(code), 'that page could not be read')}")
+            else:
+                progress.say(f"{label}: read that page")
+        elif kinds[index] == "server_tool_use":
+            parts[("name", index)] = getattr(block, "name", "") or ""
         elif kinds[index] == "tool_use":
             progress.say(f"{label}: writing up what it found")
     elif kind == "content_block_delta" and getattr(event.delta, "type", "") == "input_json_delta":
         parts[index] = parts.get(index, "") + (getattr(event.delta, "partial_json", "") or "")
     elif kind == "content_block_stop" and kinds.get(index) == "server_tool_use":
-        query = ""
+        asked: dict = {}
         try:
-            query = json.loads(parts.pop(index, "") or "{}").get("query") or ""
+            asked = json.loads(parts.pop(index, "") or "{}") or {}
         except ValueError:
             pass
-        if not query and stream is not None:       # the query did not come in pieces: read it off the finished block
-            block = stream.current_message_snapshot.content[index]
-            query = (getattr(block, "input", None) or {}).get("query") or ""
-        progress.say(f"{label}: searching “{query}”" if query else f"{label}: searching")
+        if not asked and stream is not None:       # the input did not come in pieces: read it off the finished block
+            asked = getattr(stream.current_message_snapshot.content[index], "input", None) or {}
+        if parts.pop(("name", index), "") == "web_fetch":
+            page = str(asked.get("url") or "").split("://", 1)[-1].rstrip("/")
+            progress.say(f"{label}: opening {page[:90]}" if page else f"{label}: opening a page")
+        else:
+            query = asked.get("query") or ""
+            progress.say(f"{label}: searching “{query}”" if query else f"{label}: searching")
 
 
 def _create_live(client, progress: Progress, label: str, kwargs: dict):
@@ -601,6 +643,9 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "record them in options.\n"
         "- Record each comp's VIN whenever a source shows it: the buyer copies it to check the car. Auction "
         "pages and dealer pages nearly always state it, and Classic.com vehicle addresses contain it.\n"
+        "- The buyer will open every link and check every VIN, so a car with its own page and its VIN is worth "
+        "far more than one without. Spend your searches on finding cars' own pages, record those first, and "
+        "leave out a car you can give neither a page nor a VIN for unless you have fewer than three others.\n"
         "- Record accident, damage or title history in history whenever a source states it (a clean Carfax, an "
         "accident on the report, a branded title, paintwork).\n"
         "- Name the auction site as the source (Bring a Trailer, Cars & Bids) even when you found the sale "
@@ -652,6 +697,8 @@ def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
         "a Targa buyer only Targas. Record each car's body style in body.\n"
         + _trim_rule(car) +
         "- Match the generation, drivetrain and transmission where you can. If a car differs, say so in its note.\n"
+        "- The buyer will open every link and check every VIN: record cars whose own page you can give first, "
+        "and always record the VIN when the page, the snippet or the address shows it.\n"
         "- Record miles, VIN, options and the seller (the dealer's name, or 'private seller') when shown. Name "
         "the site as the source. Record accident, damage or title history in history whenever it is stated.\n"
         "- Record only what the search results show. Never fill a gap from memory.\n"
@@ -680,17 +727,23 @@ def _tokens_note(used: dict) -> str:
 
 
 def _research(client, model: str, prompt: str, max_searches: int, max_rounds: int, problem: str,
-              car: dict | None = None, only=None, never=None, progress: Progress | None = None, label: str = "Search") -> dict:
+              car: dict | None = None, only=None, never=None, progress: Progress | None = None, label: str = "Search",
+              opens: int = 0) -> dict:
     """Run one web research turn that ends in a record_comps call.
 
     `only` limits the searches to those sites; `never` keeps sites out. The API takes one or the other.
+    With `opens` (and `only`), the model may also open that many pages on those sites and read them whole:
+    a market page then gives every car with the address of its own page, which a search snippet does not.
     """
     search = {"type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": max_searches}
     if only:
         search["allowed_domains"] = list(only)
     elif never:
         search["blocked_domains"] = list(never)
-    tools = [search, COMPS_TOOL]
+    reader = {"type": WEB_FETCH_TYPE, "name": "web_fetch", "max_uses": int(opens), "allowed_domains": list(only or []),
+              "max_content_tokens": 7000}
+    can_open = bool(opens and only and not _FETCH_OFF)
+    tools = [search, reader, COMPS_TOOL] if can_open else [search, COMPS_TOOL]
     messages = [{"role": "user", "content": prompt}]
     seen_urls: set[str] = set()
     failed: list[str] = []
@@ -699,8 +752,18 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
         # A second or later round sends the whole search so far again, so that part is read from the cache.
         # The first round is new every time, and writing it to the cache would only cost more.
         again = {"cache_control": {"type": "ephemeral"}} if turn else {}
-        response = _create(client, effort="medium", progress=progress, label=label, model=model, max_tokens=16000,
-                           tools=tools, messages=list(messages), **again)
+        try:
+            response = _create(client, effort="medium", progress=progress, label=label, model=model, max_tokens=16000,
+                               tools=tools, messages=list(messages), **again)
+        except LLMError as exc:
+            if not (can_open and reader in tools and exc.kind == "request" and "fetch" in str(exc).lower()):
+                raise
+            _FETCH_OFF.append(str(exc))            # this key or model cannot use the page reader: search alone from now on
+            tools = [search, COMPS_TOOL]
+            if progress:
+                progress.say(f"{label}: pages cannot be opened with this key, so reading the search results alone")
+            response = _create(client, effort="medium", progress=progress, label=label, model=model, max_tokens=16000,
+                               tools=tools, messages=list(messages), **again)
         usage = _field(response, "usage")
         for key in used:
             used[key] += int(_field(usage, key) or 0) if usage is not None else 0
@@ -746,21 +809,31 @@ AUCTION_SITES = [
     ("Bring a Trailer", ["bringatrailer.com"]),
 ]
 
+# How many pages a site's search may open and read whole. Classic.com's market page lists every car with the
+# address of its own page, and that address holds the VIN.
+_SITE_OPENS = {"Classic.com": 5}
+
 # How to read each site's pages, added to that site's search.
 _SITE_NOTES = {
     "Classic.com": (
-        "How to read Classic.com, which records the results of Bring a Trailer, Cars & Bids, PCARMARKET, Hagerty, "
-        "Hemmings and Collecting Cars auctions:\n"
-        "- A vehicle page (its address has /veh/) is one car. It shows 'Sold' with the price, the date and the auction "
-        "site; 'Not Sold' with a 'Highest Bid' (record as high_bid); or 'For Sale' and 'Last Asking' (asking prices: "
-        "leave those to the for-sale search). Its address holds the VIN. Use that address as the comp's URL and "
-        "name the auction site it gives as the source.\n"
-        "- A market page (its address has /m/) and the Comps list on a vehicle page list many auctions, each with a "
-        "price, a date and the auction site. Record every sold and not-sold auction of a matching car from those "
-        "lists as well. When that car's own page is not among your results, use the address of the page where you "
-        "saw it as its URL and start its note with 'Listed on Classic.com'. This is the one exception to the rule "
-        "that a market page is not a comp's URL.\n"
-        "- Record each auction once, with its own price and date. Leave the date empty rather than guess it.\n"
+        "How to work on Classic.com, which records the results of Bring a Trailer, Cars & Bids, PCARMARKET, Hagerty, "
+        "Hemmings and Collecting Cars auctions. The buyer will open every link and check every VIN, so each car "
+        "needs the address of its own page:\n"
+        "- Search for the car first. The results hold Classic.com's market page for the model (its address has /m/, "
+        "often ending in the model year) and vehicle pages (their addresses have /veh/ and contain the VIN).\n"
+        "- Open the market page with web_fetch. It lists every recent car of that model with its status, price, date, "
+        "miles and the auction site or dealer, and each one links to that car's own vehicle page. If the page for one "
+        "model year shows few sales, open the market page for the neighbouring year or for all years too.\n"
+        "- Record every matching car on it, each with the address of its own vehicle page as the URL and the VIN "
+        "from that address. 'Sold' is sold. 'Not Sold' with a 'Highest Bid' is high_bid. 'For Sale' is asking with "
+        "available yes. 'Last Asking' means the listing has gone: asking with available no. Name the auction site "
+        "or the dealer as the source.\n"
+        "- If the opened page shows the cars but not their addresses, match each car to a vehicle page in your search "
+        "results by its year, price, date or town, and open a vehicle page with web_fetch when you need to see which "
+        "car it is. Only when a car's own page cannot be found, give the market page's address as its URL and start "
+        "its note with 'Listed on Classic.com'. That is the one exception to the rule about market pages.\n"
+        "- If web_fetch is not available, work from the search results in the same way.\n"
+        "- Record each car once. Leave a date empty rather than guess it.\n"
         "- 'CMB' figures are Classic.com's own estimates, not sales: never record one.\n"
     ),
     "Cars & Bids": (
@@ -845,7 +918,7 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
     def one_site(site: str, domains: list[str]) -> dict:
         def limited() -> dict:
             return _research(client, model, _site_prompt(car, today, site, each) + _known_note(known), each, max_rounds,
-                             problem, car=car, only=domains, progress=progress, label=site)
+                             problem, car=car, only=domains, progress=progress, label=site, opens=_SITE_OPENS.get(site, 0))
 
         def by_name() -> dict:
             return _again(lambda: _research(client, model, _site_prompt(car, today, site, each, limited=False) + _known_note(known),
@@ -967,8 +1040,6 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
         comp["available"] = comp.get("available") or "yes"
     for comp in listed:                            # read from a list, not from the car's own page, and not opened
         comp["source"], comp["available"] = "Facebook Marketplace", ""
-        if "marketplace list" not in comp["note"].lower():
-            comp["note"] = f"From a Facebook Marketplace list, not the car's own page: sign in to Facebook to find it. {comp['note']}".strip()
     if lists is not None:
         result["summary"] = f"{result['summary']} Facebook Marketplace's public lists: {len(listed)}.".strip()
     result["comps"] = merge_comps(comps, listed)

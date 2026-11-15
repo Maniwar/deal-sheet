@@ -60,7 +60,7 @@ EDIT_FIELDS = ("year", "make", "model", "trim", "body", "transmission", "drivetr
                "exterior", "interior", "seller", "location", "history")
 SELLER_TYPES = ["", "dealer", "private", "auction"]
 COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img", "options", "vin",
-                "available", "seen", "seen_on", "body", "history"]
+                "available", "seen", "seen_on", "body", "history", "aside"]
 DOT = " \u00b7 "
 QR_SIZES = {"Large (1.1 in)": 82, "Extra large (1.5 in)": 108}
 EMPTY_DEAL = {"car": {}, "comps": [], "offer": {}, "summary": "", "message": "", "sample": False}
@@ -373,6 +373,7 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     comps += calc.new_comps(comps, sale["comps"])
     comps, dropped = same_body_only(car, comps)
     comps, spare = drop_spare_trims(comps)
+    leads = calc.set_aside_leads(comps)            # cars that cannot be opened and checked stay out of the numbers
     tell("Opening each for-sale page to see whether the car is still there")
     note = checked_note(check_listings(comps))
     if note:
@@ -384,6 +385,9 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
         note = f"Exact matches were scarce, so {off_trim} car{'s' if off_trim != 1 else ''} of another trim {'are' if off_trim != 1 else 'is'} kept for context and not counted. {note}".strip()
     if spare:
         note = f"{spare} car{'s' if spare != 1 else ''} of another trim {'were' if spare != 1 else 'was'} left out. {note}".strip()
+    if leads:
+        note = (f"{leads} car{'s' if leads != 1 else ''} that cannot be opened and checked (read from a list, or with no confirmed "
+                f"link) {'are' if leads != 1 else 'is'} kept as leads and not counted. {note}").strip()
     return {"comps": comps, "summary": " ".join(part for part in (summary, sale["summary"], note) if part).strip()}
 
 
@@ -703,7 +707,7 @@ def comps_frame(comps: list[dict]) -> pd.DataFrame:
     frame["use"] = frame["use"].astype("boolean").fillna(True).astype(bool)
     for column in ("price", "miles"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Int64")
-    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available", "seen", "seen_on", "body", "history"):
+    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available", "seen", "seen_on", "body", "history", "aside"):
         frame[column] = frame[column].astype("string").fillna("")
     return frame
 
@@ -802,6 +806,8 @@ def stage_event(name: str) -> None:
         queue({"remove": ss["active"]})
     elif name == "usecomp":
         ss["_usecomp_request"] = value
+    elif name == "link":
+        ss["_link_request"] = value
     elif name == "message":
         ss["_message_request"] = value
     elif name == "car":
@@ -867,11 +873,13 @@ def handle_stage_requests(progress_slot) -> None:
             except llm.LLMError as exc:
                 ss["stage_error"] = str(exc)
             else:
+                better = calc.upgrade_leads(have, found["comps"])    # a lead whose own page has now turned up takes that page
                 fresh = calc.new_comps(have, found["comps"])
                 fresh, _ = same_body_only(the_car, fresh)
                 both, _ = drop_spare_trims(have + fresh)       # with enough exact matches now, other trims go, old ones too
                 stays = {id(comp) for comp in both}
                 have, fresh = [comp for comp in have if id(comp) in stays], [comp for comp in fresh if id(comp) in stays]
+                calc.set_aside_leads(have + fresh, fresh)
                 if refresh:
                     back = 0
                     for comp in have:                          # a sale set aside only because its page left out a detail of the trim line
@@ -882,7 +890,8 @@ def handle_stage_requests(progress_slot) -> None:
                         progress.say("Opening the for-sale pages you already had, to see whether each car is still there")
                     note = checked_note(check_listings(have))  # the new ones were opened by the search itself
                     sold = sum(comp["status"] != "asking" for comp in fresh)
-                    bits = [f"{sold} more sale{'s' if sold != 1 else ''} and no-sales" if sold else "",
+                    bits = [f"{better} car{'s' if better != 1 else ''} now with a direct link and VIN" if better else "",
+                            f"{sold} more sale{'s' if sold != 1 else ''} and no-sales" if sold else "",
                             f"{len(fresh) - sold} more for sale" if len(fresh) - sold else "",
                             f"{back} sale{'s' if back != 1 else ''} counted again that had been set aside over a trim detail" if back else ""]
                     found_text = ", ".join(bit for bit in bits if bit)
@@ -925,10 +934,29 @@ def handle_stage_requests(progress_slot) -> None:
         have = calc.clean_comps((ss["garage"].get(ss["active"]) or {}).get("comps") or [])
         at = calc.to_int(request.get("i"))
         if at is not None and 0 <= at < len(have) and have[at]["price"] == calc.to_int(request.get("price")):
-            have[at]["use"] = bool(request.get("use"))
+            have[at]["use"], have[at]["aside"] = bool(request.get("use")), ""       # the buyer's own choice from here on
             ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
         else:
             ss["stage_error"] = "That car has moved in the list. Try again."
+        ss["build_seq"] += 1
+    request = ss.pop("_link_request", None)
+    if isinstance(request, dict):                  # the buyer found a lead's own page and pasted its link
+        have = calc.clean_comps((ss["garage"].get(ss["active"]) or {}).get("comps") or [])
+        at, link = calc.to_int(request.get("i")), str(request.get("url") or "").strip()[:600]
+        if link and "://" not in link and "." in link.split("/")[0]:
+            link = "https://" + link
+        if not (at is not None and 0 <= at < len(have) and have[at]["price"] == calc.to_int(request.get("price"))):
+            ss["stage_error"] = "That car has moved in the list. Try again."
+        elif not previews.is_safe_url(link) or calc.is_list_page(link):
+            ss["stage_error"] = "That is not a link to one car's own page. Open the car, use Share, then Copy link, and paste that."
+        else:
+            comp = have[at]
+            comp.update(url=link, link_ok=None, aside="", use=True, vin=comp.get("vin") or calc.find_vin(link) or "",
+                        note=re.sub(r"(?i)(listed on classic\.com|from a facebook marketplace list[^.]*)\.?\s*", "", comp["note"]).strip())
+            if comp["status"] == "asking":
+                comp["seen"], comp["seen_on"] = "", ""
+            ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
+            ss["notices"] = ["Saved. That car now opens on its own page and is counted."]
         ss["build_seq"] += 1
     request = ss.pop("_addcomp_request", None)
     if isinstance(request, dict):                  # a sale or a listing the buyer knows of, added on the main screen
@@ -1472,7 +1500,7 @@ flags = {
     "log": (ss.get("logs") or {}).get(ss["active"]) or [],
 }
 stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail", "more", "verify",
-                "message", "car", "addcomp", "remove", "usecomp")
+                "message", "car", "addcomp", "remove", "usecomp", "link")
 with stage_box:
     STAGE(
         data=json.dumps(stage.build_payload(

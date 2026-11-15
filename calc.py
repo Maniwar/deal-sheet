@@ -6,7 +6,7 @@ import datetime as dt
 import math
 import re
 from statistics import median
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 STATUSES = ("sold", "high_bid", "asking")
 STATUS_LABEL = {"sold": "SOLD", "high_bid": "HIGH BID", "asking": "ASKING"}
@@ -83,6 +83,33 @@ _LIST_PAGE = re.compile(r"classic\.com/(m|search|a)/|[?&]tab=comps|facebook\.com
 def is_list_page(url) -> bool:
     """True for a page that lists many cars rather than one: a Classic.com market page, a Facebook Marketplace city page."""
     return bool(_LIST_PAGE.search(str(url or "")))
+
+
+_FB_LIST = re.compile(r"facebook\.com/marketplace/(?!item/)", re.I)
+_FB_NOT_A_PLACE = {"category", "search", "item", "vehicles", "cars", "you", "create"}
+
+
+def marketplace_find(comp: dict) -> str:
+    """For a car read from one of Facebook Marketplace's lists: a link that opens Marketplace searched for that car.
+
+    Facebook shows neither search engines nor apps a car's own page, only its lists for a city, so no link can
+    go straight to the listing. This one is the closest: Marketplace's own search, in the same area as the list
+    the car was on, for the car's year and name, within a narrow band round its price. '' for any other comp.
+    """
+    url = str(comp.get("url") or "")
+    if not _FB_LIST.search(url):
+        return ""
+    parts = [part for part in urlparse(url if "://" in url else "https://" + url).path.split("/") if part]
+    place = parts[1] if len(parts) > 1 and parts[1].lower() not in _FB_NOT_A_PLACE else ""
+    title = re.sub(r"\s+in\s+[^,]+,\s*[A-Za-z]{2}\s*$", "", str(comp.get("title") or ""))        # "... in Plainview, NY"
+    words = [word for word in re.sub(r"[^A-Za-z0-9.+\- ]", " ", title).split()
+             if word.lower() not in ("2d", "4d", "coupe", "sedan", "convertible", "hatchback", "miles", "mile", "mi")
+             and not re.fullmatch(r"\d{5,}", word)][:5]                # body words and a mileage are not the car's name
+    price = to_int(comp.get("price")) or 0
+    ask = f"query={quote(' '.join(words))}" if words else ""
+    band = f"minPrice={int(price * 0.9)}&maxPrice={int(price * 1.02) + 1}" if price else ""
+    where = f"https://www.facebook.com/marketplace/{place + '/' if place else ''}search"
+    return where + "?" + "&".join(bit for bit in (ask, band, "exact=false") if bit)
 
 
 def _year_of(title) -> str:
@@ -219,6 +246,7 @@ def clean_comp(row: dict) -> dict | None:
         "available": available,
         "body": text("body"),
         "history": text("history"),
+        "aside": text("aside") if text("aside") == "lead" else "",        # set aside by the app because it cannot be opened and checked
         "seen": text("seen") if text("seen") in ("live", "gone", "unknown") and status == "asking" else "",
         "seen_on": text("seen_on") if status == "asking" else "",
     }
@@ -379,6 +407,96 @@ def mark_other_trim(car: dict, row: dict) -> bool:
         mark = f"Different trim ({str(row.get('trim')).strip()})."
         row["note"] = f"{note} {mark}" if note.lower().startswith("live auction") else f"{mark} {note}".strip()
     return True
+
+
+_VIN_YEAR_CODES = "ABCDEFGHJKLMNPRSTVWXY123456789"
+
+
+def vin_year(vin) -> int:
+    """The model year a North American VIN states in its 10th character, or 0 when the VIN is not of that kind.
+
+    The 30 codes repeat every 30 years; on cars the 7th character tells the cycles apart (a letter is 2010 on).
+    Only a VIN whose check digit is right is read, because only those follow this layout for certain.
+    """
+    vin = clean_vin(vin)
+    if not vin or not vin_checks_out(vin):
+        return 0
+    at = _VIN_YEAR_CODES.find(vin[9])
+    if at < 0:
+        return 0
+    return 1980 + at + (30 if vin[6].isalpha() else 0)
+
+
+def vin_check(comp: dict) -> tuple[str, int]:
+    """('ok', year) when the comp's VIN is a real one for the model year in its title, ('off', year) when the VIN
+    is for another model year, ('', 0) when there is no VIN or it cannot be read this way."""
+    year, said = vin_year(comp.get("vin")), _year_of(comp.get("title"))
+    if not year or not said:
+        return "", 0
+    return ("ok" if str(year) == said else "off"), year
+
+
+def proof(comp: dict) -> str:
+    """How a buyer can check a comp: 'own' (its link opens that one car's own page, and the search or an opened
+    page gave that link), 'yours' (the buyer added it), 'list' (the link opens a page of many cars), 'loose' (the
+    link was not among the pages the search returned), 'none' (no link at all)."""
+    url = str(comp.get("url") or "")
+    if not url:
+        return "yours" if str(comp.get("source") or "") == "Added by you" else "none"
+    if is_list_page(url) or link_kind(url) == "page":
+        return "list"
+    return "loose" if comp.get("link_ok") is False else "own"
+
+
+def is_lead(comp: dict) -> bool:
+    """True for a comp that cannot be opened and checked as one car: worth knowing about, not worth counting on."""
+    return proof(comp) in ("list", "loose", "none")
+
+
+def set_aside_leads(comps: list[dict], fresh: list[dict] | None = None) -> int:
+    """Switch off the cars that cannot be checked, once there are enough that can. Returns how many were set aside.
+
+    With three or more counted sales that open on their own page, a sale that only appears on a list (or whose
+    link the search did not return) is left out of the numbers; the same for cars for sale. A car read from a
+    Facebook Marketplace list is always set aside: its own page is never available to check. Only the cars in
+    `fresh` are touched (all of them by default), so a choice the buyer has made is kept.
+    """
+    fresh, count = (comps if fresh is None else fresh), 0
+    for group in ("sold", "live"):
+        enough = sum(comp_group(comp) == group and comp["use"] and not is_lead(comp) for comp in comps) >= 3
+        for comp in fresh:
+            if comp_group(comp) == group and comp["use"] and is_lead(comp) and (enough or marketplace_find(comp)):
+                comp["use"], comp["aside"] = False, "lead"
+                count += 1
+    return count
+
+
+def upgrade_leads(have: list[dict], found: list[dict]) -> int:
+    """When a search finds the own page of a car the buyer holds only as a lead, the held car takes the page.
+
+    It gets the link, the VIN, the date and the miles, and is counted again if the app had set it aside.
+    Returns how many were upgraded.
+    """
+    count = 0
+    for new in found:
+        if is_lead(new):
+            continue
+        for old in have:
+            if (not is_lead(old) or old["status"] != new["status"] or old["price"] != new["price"]
+                    or _year_of(old["title"]) != _year_of(new["title"])):
+                continue
+            a, b = date_key(old["date"]), date_key(new["date"])
+            if a and b and abs(a - b) > 3:
+                continue
+            old.update(url=new["url"], link_ok=new.get("link_ok"), vin=new.get("vin") or old.get("vin") or "",
+                       date=new["date"] or old["date"], source=new["source"] or old["source"],
+                       miles=new["miles"] if new.get("miles") is not None else old.get("miles"),
+                       note=re.sub(r"(?i)listed on classic\.com\.?\s*", "", old["note"]).strip())
+            if old.get("aside") == "lead":
+                old["use"], old["aside"] = True, ""
+            count += 1
+            break
+    return count
 
 
 def loose_trim(car: dict) -> bool:

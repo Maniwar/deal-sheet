@@ -23,7 +23,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas as pdfcanvas
 
-from calc import (STATUS_LABEL, car_facts, car_title, comp_stats, host_of, money,
+from calc import (STATUS_LABEL, car_facts, car_title, comp_stats, host_of, marketplace_find, money,
                   monthly_payment, out_the_door, price_axis, short_money, link_kind, source_name)
 
 FONT_DIR = Path(__file__).parent / "assets" / "fonts"
@@ -511,7 +511,7 @@ class _Sheet:
         for start in range(0, len(comps), 2):
             items = []
             for comp in comps[start:start + 2]:
-                url = _clean(comp.get("url"))
+                url = _clean(marketplace_find(comp) or comp.get("url"))
                 text_w = width - 24 - ((qr_size + 6) if url else 0)
                 items.append((comp, url, text_w, self.card_text(comp, url, text_w)))
             height = max(blocks["height"] for *_, blocks in items)
