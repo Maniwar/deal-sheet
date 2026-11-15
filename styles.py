@@ -157,7 +157,7 @@ h4{letter-spacing:-.01em}
   .ds-tile{padding:10px 12px}
   .ds-railwrap{margin-top:16px}
   .st-key-byok{padding:16px 14px}
-  .st-key-byok [data-testid="stHorizontalBlock"]{gap:.4rem}
+  .st-key-byok [data-testid="stHorizontalBlock"]{gap:1.5rem}
   .ds-ask{text-align:left;min-width:0}
   .ds-ladder{grid-template-columns:repeat(2,minmax(0,1fr))}
   .ds-railwrap{padding:12px 10px 8px}

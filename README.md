@@ -8,14 +8,19 @@ Tap **Add a car**, paste a listing link or add a screenshot, and press **Build t
 Claude reads the listing, researches comps, suggests an offer and drafts the message in one run
 (about two minutes). Every car you add goes in the **garage** at the top of the page.
 
+No listing yet? Name the car instead ("2020 BMW M2 CS, manual, about 15,000 miles"). The app finds
+what that car has been selling for and gives you a typical sale price, the range, the comps with
+their links, and what to open at, aim for and not exceed.
+
 ## What you see
 
 - **A garage.** Each car you add is a chip at the top. Tap one to switch. Nothing is kept between
   visits, so save the garage to a file from the sidebar and open that file to bring your cars back.
 - **A 3D showroom.** The car sits on a turntable you can drag to spin (WebGL, three.js). With a photo it
-  shows the photo as a lit slab. Without one it draws a 3D car of the right body type (coupe,
-  convertible, sedan, hatchback, wagon, SUV, pickup or van), with proportions for a front, mid or rear
-  engine, in the listing's paint color. These are generic shapes, not a model of any maker's design.
+  shows the photo as a lit slab. Without one it draws a 3D car in the listing's paint color: a
+  detailed concept coupe for coupes (see Credits), and a simple shape of the right body type for
+  everything else (convertible, sedan, hatchback, wagon, SUV, pickup or van). None of these is a
+  model of any maker's design.
   In front of it, the comps stand as glowing markers on a price runway, with the asking price as a
   beacon and your offer range as a lit band. Tap a marker to open that listing.
 - **A comps carousel.** Each comp is a card with its photo (or a mini price map), and the whole card
@@ -96,6 +101,18 @@ Turn the fetch off in the sidebar under Photos.
   search actually returned. A link that was not in the results is flagged.
 - Treat every comp as a lead. Open the link and confirm it before you put it in front of a seller.
 
+## Credits
+
+- **3D coupe:** "Car Concept" by Eric Chadwick, (c) 2024 Darmstadt Graphics Group GmbH, licensed
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), from the
+  [Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept).
+  Modified for this app: logos removed, simplified and repainted. Details in `static/models/CREDITS.md`.
+  The credit also shows under the 3D view whenever the model is on screen.
+- **three.js** and its glTF loader (MIT), **DM Sans** and **JetBrains Mono** (SIL Open Font License).
+
+To add another detailed model, put a `.glb` in `static/models/`, add it to `PRO_MODELS` in `showcase.py`
+with its credit, and name its body-paint material `Paint`. Use only models whose licence allows it.
+
 ## Files
 
 | File | What it does |
@@ -108,7 +125,8 @@ Turn the fetch off in the sidebar under Photos.
 | `calc.py` | Money math and comp helpers |
 | `styles.py` | The stylesheet for the Streamlit widgets |
 | `sample_deal.json` | The sample car (2020 911 Carrera S, researched Nov 14, 2026) |
-| `static/` | Fonts (DM Sans, JetBrains Mono, SIL Open Font License) and three.js (MIT) |
+| `static/` | Fonts, three.js with its glTF loader, and the 3D model in `static/models/` |
+| `tools/` | The script that prepared the 3D model from the original file |
 | `assets/fonts/` | The same fonts as TTF for the PDF |
 
 The garage saves and reopens as one JSON file from the sidebar, photos included (a single car can be

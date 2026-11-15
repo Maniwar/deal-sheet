@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import html
+import importlib
 import io
 import json
 import os
@@ -23,7 +24,28 @@ import llm
 import previews
 import sheet
 import showcase
-from styles import CSS
+import styles
+
+
+def refresh_modules() -> None:
+    """Re-import this app's own modules when their files changed after they were loaded.
+
+    A deploy can replace the files while the server keeps running. Streamlit then runs the
+    new app.py, but modules it imported earlier stay as they were, so new code can meet an
+    old showcase.py and fail. Any module whose file is newer than its loaded copy is reloaded.
+    """
+    for module in (calc, previews, styles, llm, sheet, showcase):     # calc first: the others import from it
+        try:
+            stamp = os.path.getmtime(module.__file__)
+        except (OSError, TypeError):
+            continue
+        if getattr(module, "_ds_loaded", None) != stamp:
+            importlib.reload(module)
+            module._ds_loaded = stamp
+
+
+refresh_modules()
+CSS = styles.CSS
 
 APP_DIR = Path(__file__).parent
 CAR_FIELDS = ["year", "make", "model", "trim", "body", "transmission", "drivetrain", "miles", "price",
@@ -194,17 +216,26 @@ def garage_label(car_id: str, live_car: dict | None = None) -> str:
 
 # ---------------------------------------------------------------- one step: link or screenshot to a full deal
 
-def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: str) -> tuple[dict | None, list[str]]:
-    """Read the listing, research comps, suggest an offer and draft the message. Returns (deal, notes)."""
+def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: str,
+               wanted: str = "") -> tuple[dict | None, list[str]]:
+    """Read the listing, research comps, suggest an offer and draft the message. Returns (deal, notes).
+
+    `wanted` is the buyer's own description of a car. With no link and no screenshot it is all there
+    is: the result is a price guide for that car, with no asking price and no message.
+    """
     notes: list[str] = []
+    no_listing = bool(wanted) and not link and shot is None
     page = {"status": "none", "text": "", "image": None}
     if link:
         st.write("Reading the listing page")
         page = previews.read_page(link)
     st.write("Pulling out the car's details")
     image, media_type = image_for_api(shot) if shot is not None else (None, "image/jpeg")
+    text = page["text"]
+    if wanted:
+        text = (text + "\n\n" if text else "") + "The buyer's own description of the car they want: " + wanted
     try:
-        found = llm.read_listing(client, model, page["text"], image, media_type, url=link)
+        found = llm.read_listing(client, model, text, image, media_type, url=link)
     except llm.LLMError as exc:
         return None, [str(exc)]
     box = found.pop("photo_box", None)
@@ -215,7 +246,12 @@ def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: st
     unread = bool(link) and page["status"] != "ok"
     why = ("That site does not let apps read its pages" if page["status"] == "blocked"
            else "That link could not be opened")
+    if no_listing:
+        car["price"] = None                       # a description has no asking price, whatever came back
     if not (car["make"] and car["model"]):
+        if no_listing:
+            return None, ["Could not tell which car that is. Give the year, make and model, for example "
+                          "2020 BMW M2 CS."]
         if unread and shot is None:
             return None, [f"{why}, and the link alone does not name the car. Add a screenshot of the listing and try again."]
         return None, ["Could not find a car in that listing. Try a clearer screenshot, or one that shows the title and price."]
@@ -226,6 +262,9 @@ def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: st
     if unread and shot is None:
         notes.append(f"{why}, so only the words in the link were read. "
                      "Add a screenshot in the Car tab to fill in the price, miles and photo.")
+    elif no_listing:
+        notes.append("There is no listing, so there is no asking price. The numbers show what this car has been "
+                     "selling for. When you find one, paste its link in the Car tab to compare its price.")
     elif not car["price"]:
         notes.append("No asking price was found. Enter it in the Car tab.")
 
@@ -244,7 +283,7 @@ def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: st
         plan = llm.suggest_offer(client, model, car, deal["comps"])
         plan["shown"] = plan.get("open")
         deal["offer"] = plan
-        if plan.get("open"):
+        if plan.get("open") and not no_listing:    # no seller to write to yet
             st.write("Drafting the offer message")
             deal["message"] = llm.draft_message(client, model, car, deal["comps"], plan["open"], buyer, "text")
     except llm.LLMError as exc:
@@ -280,6 +319,7 @@ def init_state() -> None:
     ss["auto_photo"] = None     # car photo cut out of a listing screenshot
     ss["comp_photos"] = {}      # comp photos cut out of page screenshots, by id
     ss["want_photos"] = True
+    ss["detailed_car"] = True
     ss["key_ver"] = 0
     ss["buyer"] = secret("BUYER_NAME")
     ss["model_label"] = next(iter(llm.MODELS))
@@ -496,9 +536,12 @@ with st.sidebar:
     st.number_input("Loan term, months", min_value=0, max_value=120, step=12, key="months")
     st.text_input("Your first name", key="buyer", help="Signs the offer message.")
 
-    st.markdown("### Photos")
+    st.markdown("### Photos and 3D")
     st.toggle("Load photos from listing pages", key="want_photos",
               help="Fetches each link's preview image, where the site allows it. Turn off to skip those requests.")
+    st.toggle("Detailed 3D car", key="detailed_car",
+              help="Coupes show a detailed, credited 3D model (a 4 MB download). Turn off for the simple shape, "
+                   "for example on a slow phone or connection.")
 
     st.markdown("### Garage file")
     st.caption("Nothing is kept between visits. Save the garage to keep your cars, and open the file to bring them back.")
@@ -568,35 +611,39 @@ for notice in ss.pop("notices", []) or []:
 has_car = bool(ss["car_make"] or ss["car_model"])
 with st.container(key="intake"):
     if has_car:
-        if st.button("Close" if ss["intake_open"] else "Add a car from a link or a screenshot", width="stretch",
+        if st.button("Close" if ss["intake_open"] else "Add a car: a link, a screenshot, or just its name", width="stretch",
                      icon=":material/close:" if ss["intake_open"] else ":material/add_circle:", key="intake_toggle"):
             ss["intake_open"] = not ss["intake_open"]
             st.rerun()
     if ss["intake_open"] or not has_car:
         put('<div class="ds-intake"><div class="ds-label">Add a car</div>'
-            '<div class="ds-intake-t">Paste the listing link, add a screenshot, or both</div></div>')
+            '<div class="ds-intake-t">Paste a listing link, add a screenshot, or just name the car</div></div>')
         link_col, shot_col = st.columns([1.25, 1], gap="medium")
         with link_col:
             intake_link = st.text_input("Listing link", key=f"intake_link_{ss['intake_ver']}",
                                         placeholder="https://www.dealer.com/used-2020-porsche-911")
-            build_clicked = st.button("Build the deal sheet", type="primary", width="stretch", disabled=client is None,
-                                      help=None if client else needs_key)
         with shot_col:
             intake_shot = st.file_uploader("Screenshot of the listing", type=IMAGE_TYPES,
                                            key=f"intake_shot_{ss['intake_ver']}")
-        st.caption("Claude reads the listing, finds comps, suggests an offer and drafts the message. It takes about "
-                   f"two minutes and runs on your key (up to {int(ss['max_searches'])} web searches). "
-                   "Some sites do not let apps read their pages. For those, add a screenshot.")
+        intake_wanted = st.text_input("No listing? Name the car you want priced", key=f"intake_wanted_{ss['intake_ver']}",
+                                      placeholder="2020 BMW M2 CS, manual, about 15,000 miles")
+        build_clicked = st.button("Build the deal sheet", type="primary", width="stretch", disabled=client is None,
+                                  help=None if client else needs_key)
+        st.caption("Claude reads the listing, finds comps, suggests an offer and drafts the message. With only a "
+                   "car's name, it finds what that car sells for. It takes about two minutes and runs on your key "
+                   f"(up to {int(ss['max_searches'])} web searches). Some sites do not let apps read their pages. "
+                   "For those, add a screenshot.")
         if build_clicked:
             link = intake_link.strip()
             if link and not re.match(r"https?://", link, re.I):
                 link = "https://" + link
-            if not link and intake_shot is None:
-                st.warning("Paste a listing link or add a screenshot first.")
+            wanted = intake_wanted.strip()
+            if not link and intake_shot is None and not wanted:
+                st.warning("Paste a listing link, add a screenshot, or name the car first.")
             else:
                 with st.status("Building the deal sheet", expanded=True) as progress:
                     new_deal, build_notes = build_deal(client, model, link, intake_shot,
-                                                       int(ss["max_searches"]), settings["buyer"])
+                                                       int(ss["max_searches"]), settings["buyer"], wanted=wanted)
                     progress.update(label="Deal sheet ready" if new_deal else "Could not build the deal sheet",
                                     state="complete" if new_deal else "error", expanded=not new_deal)
                 if new_deal:
@@ -896,7 +943,7 @@ with hero_box:
     SHOWROOM(
         data=json.dumps(showcase.build_payload(car, comps, offer, settings, is_sample=ss["is_sample"],
                                                connected=bool(api_key), photo=photo_bytes, comp_images=comp_images,
-                                               comp_photos=ss["comp_photos"])),
+                                               comp_photos=ss["comp_photos"], detailed=bool(ss["detailed_car"]))),
         key="showroom",
     )
 

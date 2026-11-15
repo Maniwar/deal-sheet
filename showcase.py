@@ -25,7 +25,7 @@ _COLOR_WORDS = [
     (("yellow", "gold"), "#f5c518", "#e6b800"),
     (("orange", "lava", "copper", "papaya"), "#f97316", "#e2570b"),
     (("purple", "violet", "plum", "amethyst"), "#a855f7", "#6d32b8"),
-    (("brown", "mahogany", "bronze", "cognac", "espresso"), "#b08968", "#5e4330"),
+    (("brown", "mahogany", "bronze", "cognac", "espresso", "saddle", "caramel", "tan"), "#b08968", "#5e4330"),
     (("chalk", "crayon"), "#e8edf5", "#c4c7cb"),
     (("ivory", "cream", "beige"), "#e8edf5", "#e9e1cc"),
     (("white", "pearl"), "#e8edf5", "#eef1f5"),
@@ -54,6 +54,31 @@ def color_for(paint: str) -> str:
 
 def paint_for(paint: str) -> str:
     return _colors(paint)[1]
+
+
+def cabin_for(interior: str) -> str:
+    """Interior colour for the detailed 3D car: the listing's, or charcoal when it names none."""
+    found = _colors(interior)
+    return "#24272d" if found is _DEFAULT_COLORS else found[1]
+
+
+# Detailed 3D models that ship with the app, by body type. Each one is someone's work under a
+# licence that asks for credit, so the credit travels with the model and shows under the 3D view.
+# See static/models/CREDITS.md.
+PRO_MODELS = {
+    "coupe": {
+        "url": "app/static/models/concept-coupe.glb",
+        "credit": {
+            "title": "Car Concept",
+            "author": "Eric Chadwick",
+            "owner": "\u00a9 2024 Darmstadt Graphics Group GmbH",
+            "source": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept",
+            "license": "CC BY 4.0",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
+            "changes": "modified",
+        },
+    },
+}
 
 
 BODY_SHAPES = ["coupe", "convertible", "sedan", "hatch", "wagon", "suv", "truck", "van"]
@@ -94,7 +119,7 @@ def data_url(image: bytes | None, mime: str = "image/jpeg") -> str:
 
 def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, is_sample: bool,
                   connected: bool, photo: bytes | None, comp_images: dict[str, bytes] | None,
-                  comp_photos: dict[str, bytes] | None = None) -> dict:
+                  comp_photos: dict[str, bytes] | None = None, detailed: bool = True) -> dict:
     """Everything the showroom draws, as plain JSON-ready data."""
     comp_images = comp_images or {}
     comp_photos = comp_photos or {}
@@ -120,6 +145,15 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             gap = {"text": f"{calc.money(-diff)} below the median sale", "tone": "down"}
     elif ask:
         gap = {"text": "No completed sales yet", "tone": "flat"}
+    ask_label, ask_text = "Asking", calc.money(ask) if ask else "n/a"
+    if not ask and stats["sold_median"]:           # no listing: show what the car sells for
+        ask_label, ask_text = "Typical sale", calc.money(stats["sold_median"])
+        count = stats["sold_count"]
+        gap = {"text": f"{count} sale{'s' if count != 1 else ''}, {calc.short_money(stats['sold_low'])} to "
+                       f"{calc.short_money(stats['sold_high'])}", "tone": "flat"}
+    elif not ask and stats["asking_median"]:
+        ask_label, ask_text = "Typical ask", calc.money(stats["asking_median"])
+        gap = {"text": "Asking prices only, no completed sales yet", "tone": "flat"}
 
     tags = []
     if is_sample:
@@ -178,13 +212,15 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "seller": " · ".join(bit for bit in seller_bits if bit) if has_car
         else "Add a car above: paste a listing link or add a screenshot.",
         "url": car.get("url") or "",
-        "ask": ask, "askText": calc.money(ask) if ask else "n/a",
+        "ask": ask, "askText": ask_text, "askLabel": ask_label,
         "gap": gap, "tags": tags, "ladder": ladder,
         "offer": {"open": offer.get("open"), "target": offer.get("target"), "walk": offer.get("walk_away")},
         "comps": cards, "axis": axis,
         "color": color_for(str(car.get("exterior") or "")),
         "paint": paint_for(str(car.get("exterior") or "")),
         "shape": shape_for(car),
+        "cabin": cabin_for(str(car.get("interior") or "")),
+        "model": PRO_MODELS.get(shape_for(car)["body"]) if detailed else None,
         "photo": data_url(photo),
         "counts": {"sold": stats["sold_count"], "asking": stats["asking_count"],
                    "highBid": sum(1 for c in used if c["status"] == "high_bid")},
@@ -200,6 +236,7 @@ HTML = """
       <div class="flat"></div>
       <div class="tip" hidden></div>
       <div class="hint"></div>
+      <div class="credit" hidden></div>
     </div>
     <div class="hud"></div>
     <div class="ladder"></div>
@@ -243,6 +280,10 @@ a{color:inherit}
   font:500 11.5px var(--sans);color:#7b8aa3;letter-spacing:.02em;opacity:0;transition:opacity .6s;
   padding:4px 10px;border-radius:999px;background:rgba(2,6,23,.55);border:1px solid rgba(30,41,59,.8)}
 .has-gl .hint{opacity:1}
+.credit{position:absolute;right:16px;bottom:128px;z-index:3;max-width:31%;text-align:right;
+  font:400 10px/1.35 var(--sans);color:#64748b;letter-spacing:.01em}
+.credit a{color:#8b9bb4;text-decoration:underline;text-decoration-color:rgba(139,155,180,.4)}
+.credit a:hover{color:#cbd5e1}
 
 /* tooltip for a marker */
 .tip{position:absolute;z-index:6;min-width:210px;max-width:260px;padding:12px 14px;border-radius:14px;
@@ -274,9 +315,9 @@ a{color:inherit}
 .lbl{font:700 10.5px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
 .asknum{font:700 clamp(30px,4.2cqw,44px)/1.1 var(--mono);font-variant-numeric:tabular-nums;margin-top:6px;text-shadow:0 0 40px rgba(232,238,247,.25)}
 .gap{display:inline-block;margin-top:8px;font:500 12.5px var(--sans);padding:4px 10px;border-radius:999px;border:1px solid}
-.gap.up{color:#fcd34d;background:rgba(245,158,11,.10);border-color:rgba(245,158,11,.35)}
-.gap.down{color:#6ee7b7;background:rgba(16,185,129,.10);border-color:rgba(16,185,129,.35)}
-.gap.flat{color:var(--mute);background:rgba(17,28,51,.7);border-color:var(--line)}
+.gap.is-up{color:#fcd34d;background:rgba(245,158,11,.10);border-color:rgba(245,158,11,.35)}
+.gap.is-down{color:#6ee7b7;background:rgba(16,185,129,.10);border-color:rgba(16,185,129,.35)}
+.gap.is-flat{color:var(--mute);background:rgba(17,28,51,.7);border-color:var(--line)}
 .open{display:inline-flex;align-items:center;gap:7px;margin-top:12px;padding:9px 14px;border-radius:11px;text-decoration:none;
   font:700 13px var(--sans);color:#03130d;background:linear-gradient(180deg,#34d399,#10b981);
   box-shadow:0 12px 30px -12px rgba(16,185,129,.9);transition:transform .15s,box-shadow .15s}
@@ -296,7 +337,7 @@ a{color:inherit}
 /* ---------- flat fallback (no WebGL) ---------- */
 .flat{display:none;position:absolute;left:24px;right:24px;top:46%;z-index:2}
 .no-gl .flat{display:block}
-.no-gl .gl,.no-gl .labels,.no-gl .hint{display:none}
+.no-gl .gl,.no-gl .labels,.no-gl .hint,.no-gl .credit{display:none}
 .rail{position:relative;height:96px;margin:0 10px}
 .rail .track{position:absolute;left:0;right:0;top:52px;height:4px;border-radius:4px;background:#1e293b}
 .rail .band{position:absolute;top:45px;height:18px;border-radius:9px;background:rgba(16,185,129,.16);border:1px solid rgba(16,185,129,.5)}
@@ -381,6 +422,7 @@ a{color:inherit}
   .ladder{position:static;order:3;grid-template-columns:repeat(2,minmax(0,1fr));padding:12px 12px 12px;gap:8px}
   .tile{padding:10px 12px}
   .hint{bottom:6px;font-size:11px}
+  .credit{left:12px;right:12px;bottom:34px;max-width:none;text-align:center}
   .flat{top:30%;left:8px;right:8px}
   .card{flex-basis:84%}
   .nav{display:none}
@@ -402,7 +444,7 @@ export default function (component) {
   if (!root) return;
   const S = root.__ds || (root.__ds = {});
   S.data = d;
-  root.dataset.car = d.photo ? "photo" : "hologram";
+  if (!S.scene) root.dataset.car = d.photo ? "photo" : "hologram";
   paintHud(root, d);
   paintLadder(root, d);
   paintGallery(root, d);
@@ -416,12 +458,12 @@ function paintHud(root, d) {
   const tags = (d.tags || []).map((t) => `<span class="tag ${esc(t.tone)}">${esc(t.text)}</span>`).join("");
   const chips = (d.chips || []).map((c) => `<span>${esc(c)}</span>`).join("");
   const url = safeUrl(d.url);
-  const gap = d.gap && d.gap.text ? `<div class="gap ${esc(d.gap.tone)}">${esc(d.gap.text)}</div>` : "";
+  const gap = d.gap && d.gap.text ? `<div class="gap is-${esc(d.gap.tone)}">${esc(d.gap.text)}</div>` : "";
   const open = url ? `<div><a class="open" href="${esc(url)}" target="_blank" rel="noopener">Open the listing ${ARROW}</a></div>` : "";
   root.querySelector(".hud").innerHTML =
     `<div><div class="eyebrow">Deal sheet${tags}</div><h1 class="title">${esc(d.title)}</h1>` +
     `<div class="chips">${chips}</div><div class="seller">${esc(d.seller)}</div></div>` +
-    `<div class="askbox"><div class="lbl">Asking</div><div class="asknum">${esc(d.askText)}</div>${gap}${open}</div>`;
+    `<div class="askbox"><div class="lbl">${esc(d.askLabel || "Asking")}</div><div class="asknum">${esc(d.askText)}</div>${gap}${open}</div>`;
 }
 
 function paintLadder(root, d) {
@@ -514,13 +556,27 @@ function loadThree() {
     try {
       const res = await fetch(new URL("app/static/vendor/three.module.min.js", document.baseURI).href);
       if (!res.ok) throw new Error("local copy missing");
-      const blobUrl = URL.createObjectURL(new Blob([await res.text()], { type: "text/javascript" }));
-      return await import(/* webpackIgnore: true */ blobUrl);
+      window.__dsThreeUrl = URL.createObjectURL(new Blob([await res.text()], { type: "text/javascript" }));
+      return await import(/* webpackIgnore: true */ window.__dsThreeUrl);
     } catch (e) {
-      return await import(/* webpackIgnore: true */ "https://unpkg.com/three@0.160.0/build/three.module.min.js");
+      window.__dsThreeUrl = "https://unpkg.com/three@0.160.0/build/three.module.min.js";
+      return await import(/* webpackIgnore: true */ window.__dsThreeUrl);
     }
   })();
   return window.__dsThree;
+}
+
+/* the glTF loader and a studio-light environment, linked against the same copy of three.js */
+function loadAddons() {
+  if (window.__dsAddons) return window.__dsAddons;
+  window.__dsAddons = (async () => {
+    await loadThree();
+    const res = await fetch(new URL("app/static/vendor/three-addons.module.min.js", document.baseURI).href);
+    if (!res.ok) throw new Error("model loader missing");
+    const code = (await res.text()).split('from"three"').join('from"' + window.__dsThreeUrl + '"');
+    return await import(/* webpackIgnore: true */ URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+  })();
+  return window.__dsAddons;
 }
 
 function boot(root, S) {
@@ -542,6 +598,7 @@ function makeScene(THREE, root, S) {
   const labels = root.querySelector(".labels");
   const tip = root.querySelector(".tip");
   const hint = root.querySelector(".hint");
+  const credit = root.querySelector(".credit");
   const calm = matchMedia("(prefers-reduced-motion:reduce)").matches;
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: "high-performance" });
@@ -625,7 +682,10 @@ function makeScene(THREE, root, S) {
 
   const dispose = (obj) => obj.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
-    if (o.material) { (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { if (m.map && m.map !== glowTex && m.map !== wheelTex && m.map !== shadeTex) m.map.dispose(); m.dispose(); }); }
+    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => {
+      for (const k in m) { const v = m[k]; if (v && v.isTexture && v !== glowTex && v !== wheelTex && v !== shadeTex) v.dispose(); }
+      m.dispose();
+    });
   });
 
   /* ---- the car: a generic shape for its body type, in the listing's paint colour ----
@@ -803,6 +863,55 @@ function makeScene(THREE, root, S) {
     return g;
   }
 
+  /* ---- a detailed model (a glTF file that ships with the app), repainted for this car ---- */
+  const showCredit = (c) => {
+    if (!c) { credit.hidden = true; credit.innerHTML = ""; return; }
+    const link = (text, url) => (safeUrl(url) ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text));
+    credit.innerHTML = `3D model: ${link("\u201c" + c.title + "\u201d", c.source)} by ${esc(c.author)}, ${esc(c.owner)}, ${link(c.license, c.license_url)}, ${esc(c.changes)}`;
+    credit.hidden = false;
+  };
+  function dressModel(model, d) {
+    const g = new THREE.Group();
+    const accent = new THREE.Color(d.color);
+    const paint = new THREE.Color(d.paint || d.color), cabin = new THREE.Color(d.cabin || "#24272d");
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => {
+        /* the file's paint is near-chrome; a real car colour needs to read as that colour */
+        if (m.name === "Paint") { m.color.copy(paint); m.metalness = 0.3; m.roughness = 0.42; m.clearcoat = 1; m.clearcoatRoughness = 0.06; }
+        else if (m.name === "Interior") m.color.copy(cabin);
+        if ("envMapIntensity" in m) m.envMapIntensity = 0.95;
+      });
+    });
+    /* glTF cars face +z; the showroom wants the nose toward +x */
+    model.rotation.y = Math.PI / 2; model.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model), size = box.getSize(new THREE.Vector3()), mid = box.getCenter(new THREE.Vector3());
+    const k = Math.min(5.8 / size.x, 1.9 / size.y);
+    model.scale.setScalar(k); model.position.set(-mid.x * k, -box.min.y * k, -mid.z * k);
+    g.add(model);
+    const L = size.x * k, W = size.z * k;
+    const under = glow(accent, 7, 0.16); under.position.set(0, 0.08, 0); g.add(under);
+    const shade = new THREE.Mesh(new THREE.PlaneGeometry(L * 1.18, W * 1.5), new THREE.MeshBasicMaterial({ map: shadeTex, transparent: true, depthWrite: false }));
+    shade.rotation.x = -Math.PI / 2; shade.position.y = 0.012; g.add(shade);
+    return g;
+  }
+  const modelFiles = new Map();
+  let envReady = false;
+  function loadModel(d, key) {
+    const m = d.model;
+    loadAddons().then(async (A) => {
+      if (!modelFiles.has(m.url)) modelFiles.set(m.url, fetch(new URL(m.url, document.baseURI).href).then((r) => { if (!r.ok) throw new Error("model file " + r.status); return r.arrayBuffer(); }));
+      const file = await modelFiles.get(m.url);
+      const gltf = await new Promise((done, fail) => new A.GLTFLoader().parse(file.slice(0), "", done, fail));
+      if (carKey !== key || !alive) { dispose(gltf.scene); return; }      /* another car was chosen meanwhile */
+      if (!envReady) { const pm = new THREE.PMREMGenerator(renderer); scene.environment = pm.fromScene(new A.RoomEnvironment(), 0.04).texture; pm.dispose(); envReady = true; }
+      const obj = dressModel(gltf.scene, d);
+      if (carObj) { table.remove(carObj); dispose(carObj); }
+      scan = null; carObj = obj; table.add(obj);
+      root.dataset.car = "model"; showCredit(m.credit);
+    }).catch((e) => { modelFiles.delete(m.url); console.warn("Deal Sheet: the detailed 3D model is unavailable, keeping the simple shape.", e); });
+  }
+
   /* the car photo as a lit slab with a floor reflection */
   function buildPhoto(src, colorHex) {
     const g = new THREE.Group();
@@ -834,7 +943,7 @@ function makeScene(THREE, root, S) {
   }
 
   function setCar(d) {
-    const key = (d.photo ? "p:" + d.photo.length + d.photo.slice(-24) : "h:" + JSON.stringify(d.shape || {}) + (d.paint || "")) + d.color;
+    const key = (d.photo ? "p:" + d.photo.length + d.photo.slice(-24) : "h:" + JSON.stringify(d.shape || {}) + (d.paint || "") + (d.cabin || "") + (d.model ? d.model.url : "")) + d.color;
     if (key === carKey) return;
     carKey = key;
     if (carObj) { table.remove(carObj); dispose(carObj); }
@@ -842,6 +951,8 @@ function makeScene(THREE, root, S) {
     photoMode = !!d.photo;
     carObj = photoMode ? buildPhoto(d.photo, d.color) : buildCar(d.color, d.paint || d.color, d.shape);
     table.add(carObj);
+    root.dataset.car = photoMode ? "photo" : "hologram"; showCredit(null);
+    if (!photoMode && d.model && d.model.url) loadModel(d, key);       /* swaps in when it has loaded */
     spin = photoMode ? 0 : -0.55; offset = 0; vel = 0;
     const c = new THREE.Color(d.color);
     pool.material.color.copy(c); ringMat.color.copy(c.clone().lerp(new THREE.Color(0xffffff), 0.25));

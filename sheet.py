@@ -351,8 +351,11 @@ class _Sheet:
         height = 56
         self.need(height + 8)
         top = self.y - 6
-        tiles = [("Asking", money(ask) if ask else "n/a", INK,
-                  "List price" if (self.car.get("seller_type") or "") != "auction" else "Current bid")]
+        if ask:
+            tiles = [("Asking", money(ask), INK,
+                      "List price" if (self.car.get("seller_type") or "") != "auction" else "Current bid")]
+        else:
+            tiles = [("Asking", "n/a", MUTED, "No listing yet")]
         if stats["sold_count"]:
             sub = (f"{stats['sold_count']} completed sale{'s' if stats['sold_count'] != 1 else ''}, "
                    f"{money(stats['sold_low'])} to {money(stats['sold_high'])}")
