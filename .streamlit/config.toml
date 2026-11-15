@@ -1,0 +1,52 @@
+[server]
+enableStaticServing = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#10b981"
+backgroundColor = "#020617"
+secondaryBackgroundColor = "#0f172a"
+textColor = "#e2e8f0"
+borderColor = "#1e293b"
+linkColor = "#34d399"
+font = "'DM Sans', sans-serif"
+headingFont = "'DM Sans', sans-serif"
+codeFont = "'JetBrains Mono', monospace"
+baseRadius = "0.7rem"
+buttonRadius = "0.7rem"
+showWidgetBorder = true
+dataframeBorderColor = "#1e293b"
+dataframeHeaderBackgroundColor = "#0b1222"
+
+[[theme.fontFaces]]
+family = "DM Sans"
+url = "app/static/dm-sans-latin-400-normal.woff2"
+weight = 400
+style = "normal"
+
+[[theme.fontFaces]]
+family = "DM Sans"
+url = "app/static/dm-sans-latin-500-normal.woff2"
+weight = 500
+style = "normal"
+
+[[theme.fontFaces]]
+family = "DM Sans"
+url = "app/static/dm-sans-latin-700-normal.woff2"
+weight = 700
+style = "normal"
+
+[[theme.fontFaces]]
+family = "JetBrains Mono"
+url = "app/static/jetbrains-mono-latin-500-normal.woff2"
+weight = 500
+style = "normal"
+
+[[theme.fontFaces]]
+family = "JetBrains Mono"
+url = "app/static/jetbrains-mono-latin-700-normal.woff2"
+weight = 700
+style = "normal"

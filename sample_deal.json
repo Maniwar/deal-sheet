@@ -1,0 +1,84 @@
+{
+  "sample": true,
+  "car": {
+    "year": 2020,
+    "make": "Porsche",
+    "model": "911",
+    "trim": "Carrera S",
+    "body": "Coupe",
+    "transmission": "PDK",
+    "drivetrain": "RWD",
+    "miles": 31775,
+    "price": 118470,
+    "vin": "",
+    "exterior": "Aventurine Green Metallic",
+    "interior": "Slate Grey",
+    "seller": "Ride N Drive",
+    "seller_type": "dealer",
+    "location": "McKinney, TX",
+    "url": "https://www.cars.com/vehicledetail/ff91c5f1-ccb2-448a-9805-afb3acbd6078/",
+    "notes": "Listed at $121,470 on Oct 28. Price differs by site: $118,470 on Classic.com, $120,245 on Cars.com. Options and history not checked yet."
+  },
+  "comps": [
+    {
+      "use": true, "status": "sold", "title": "2020 Porsche 911 Carrera S Coupe", "miles": 20000, "price": 116000,
+      "date": "Jun 22, 2026", "source": "Classic.com", "note": "PDK. Auction sale, Los Angeles.",
+      "url": "https://www.classic.com/veh/2020-porsche-911-carrera-s-wp0ab2a98ls228716-nBJmEZn/", "link_ok": true
+    },
+    {
+      "use": true, "status": "sold", "title": "2020 Porsche 911 Carrera S Coupe", "miles": 10000, "price": 119000,
+      "date": "Apr 7, 2026", "source": "Classic.com", "note": "PDK. Auction sale, Pleasanton, CA.",
+      "url": "https://www.classic.com/veh/2020-porsche-911-carrera-s-wp0ab2a90ls228175-4AaBMB4/", "link_ok": true
+    },
+    {
+      "use": true, "status": "sold", "title": "2020 Porsche 911 Carrera S Coupe", "miles": 15000, "price": 117000,
+      "date": "Mar 25, 2026", "source": "Classic.com", "note": "PDK. Mileage flagged TMU on the listing.",
+      "url": "https://www.classic.com/veh/2020-porsche-911-carrera-s-wp0ab2a94ls225781-4oGmQL4/", "link_ok": true
+    },
+    {
+      "use": true, "status": "sold", "title": "2020 Porsche 911 Carrera S Coupe", "miles": 34000, "price": 124000,
+      "date": "Nov 22, 2025", "source": "Classic.com", "note": "PDK. Closest on miles, but a year old.",
+      "url": "https://www.classic.com/veh/2020-porsche-911-carrera-s-coupe-wp0ab2a97ls225449-pzzr95p/", "link_ok": true
+    },
+    {
+      "use": false, "status": "sold", "title": "2020 Porsche 911 Carrera S Coupe (modified)", "miles": 10000, "price": 130000,
+      "date": "May 11, 2026", "source": "Classic.com", "note": "Flagged as modified, so left out.",
+      "url": "https://www.classic.com/veh/2020-porsche-911-carrera-s-wp0ab2a92ls226184-nKxrx7W/", "link_ok": true
+    },
+    {
+      "use": true, "status": "asking", "title": "2020 Porsche 911 Carrera S, certified", "miles": 32047, "price": 119955,
+      "date": "Nov 2026", "source": "Porsche White Plains", "note": "Same green. Certified, 24-month Porsche warranty.",
+      "url": "https://finder.porsche.com/us/en-US/details/4449N5", "link_ok": true
+    },
+    {
+      "use": true, "status": "asking", "title": "2020 Porsche 911 Carrera S Coupe", "miles": 29000, "price": 115799,
+      "date": "Nov 2026", "source": "Space Auto, NJ", "note": "Listed on the Classic.com market page.",
+      "url": "https://www.classic.com/m/porsche/911/992/9921/carrera-s/coupe/year-2020/", "link_ok": true
+    },
+    {
+      "use": true, "status": "asking", "title": "2020 Porsche 911 Carrera S Coupe", "miles": 36000, "price": 117799,
+      "date": "Nov 2026", "source": "Space Auto, NJ", "note": "Listed on the Classic.com market page.",
+      "url": "https://www.classic.com/m/porsche/911/992/9921/carrera-s/coupe/year-2020/", "link_ok": true
+    }
+  ],
+  "offer": {
+    "open": 110000,
+    "target": 113500,
+    "walk_away": 116500,
+    "shown": 110000,
+    "reasons": [
+      "A 2020 Carrera S coupe with 20,000 miles sold for $116,000 on June 22, 2026.",
+      "Two more sold this spring for $117,000 (15,000 miles) and $119,000 (10,000 miles).",
+      "This car has 31,775 miles, more than any of those three.",
+      "Porsche White Plains lists a certified one in the same green, with 32,047 miles and a 24-month warranty, for $119,955.",
+      "The price has already come down from $121,470 on October 28."
+    ],
+    "pushback": [
+      "They cite the 34,000-mile car that sold for $124,000. Reply: that was a year ago, and three sales since closed at $116,000 to $119,000.",
+      "They say it is priced below market. Reply: below other dealers' asking prices, but above what lower-mile cars actually sold for.",
+      "They will not move on price. Ask for the fees to come off or a service to be included, and get the out-the-door number in writing."
+    ]
+  },
+  "summary": "Sample deal from the Nov 14, 2026 research. Sold prices come from Classic.com's 2020 Carrera S coupe market page.",
+  "message": ""
+}
