@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 import re
 from statistics import median
@@ -80,8 +81,9 @@ def clean_comp(row: dict) -> dict | None:
     if status not in STATUSES:
         status = "asking"
     use = row.get("use")
-    if _missing(use):                # a live auction's current bid is not a price, so it starts switched off
-        use = not (status == "asking" and text("note").lower().startswith("live auction"))
+    if _missing(use):                # a live auction's bid is not a price, and another trim is another car: both start switched off
+        note = text("note").lower()
+        use = not ((status == "asking" and note.startswith("live auction")) or "different trim" in note)
     else:
         use = bool(use)
     link_ok = row.get("link_ok")
@@ -102,6 +104,8 @@ def clean_comp(row: dict) -> dict | None:
         "options": text("options"),
         "vin": clean_vin(text("vin")) or find_vin(text("url")),
         "available": _yes_no(text("available")) if status == "asking" else "",
+        "body": text("body"),
+        "history": text("history"),
         "seen": text("seen") if text("seen") in ("live", "gone", "unknown") and status == "asking" else "",
         "seen_on": text("seen_on") if status == "asking" else "",
     }
@@ -171,6 +175,125 @@ def _yes_no(value: str) -> str:
     if word in ("no", "false", "0", "sold", "ended", "removed"):
         return "no"
     return ""
+
+
+_BAD_HISTORY = ("accident", "damage", "salvage", "rebuilt", "branded", "flood", "frame", "structural", "lemon",
+                "buyback", "buy back", "total loss", "theft", "hail", "collision", "repaint", "paintwork")
+_CLEAN_HISTORY = re.compile(
+    r"\b(?:no|zero|0|without|never|free of)\b[^.;,]{0,40}?\b(?:accidents?|damage|collisions?|paintwork)(?:\s+or\s+(?:accidents?|damage))?"
+    r"|\b(?:accident|damage)[- ]free\b|\bclean\s+(?:carfax|autocheck|title|history|report)\b")
+
+
+def history_flag(text) -> str:
+    """'bad' when a car's history names an accident, damage or a branded title, 'clean' when it says there is none, else ''."""
+    words = str(text or "").lower()
+    rest = _CLEAN_HISTORY.sub(" ", words)
+    if any(word in rest for word in _BAD_HISTORY):
+        return "bad"
+    return "clean" if rest != words else ""
+
+
+_DATE_SHAPES = ("%b %d, %Y", "%B %d, %Y", "%b %d %Y", "%B %d %Y", "%d %b %Y", "%d %B %Y", "%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y",
+                "%b %Y", "%B %Y", "%Y")
+
+
+def date_key(text) -> int:
+    """A date as a number that sorts in time order, or 0 when the text is not a date the app recognises."""
+    words = str(text or "").strip().replace("Sept ", "Sep ")
+    for shape in _DATE_SHAPES:
+        try:
+            return dt.datetime.strptime(words, shape).toordinal()
+        except ValueError:
+            continue
+    return 0
+
+
+_OPEN_WORDS = ("cabriolet", "convertible", "cabrio", "spyder", "spider", "roadster", "speedster", "drophead", "volante")
+
+
+def body_kind(text) -> str:
+    """'open' (cabriolet, convertible, roadster), 'targa' or 'coupe' when the words say so, else ''."""
+    words = str(text or "").lower()
+    if "targa" in words:
+        return "targa"
+    if any(word in words for word in _OPEN_WORDS) or re.search(r"\bcab\b", words):
+        return "open"
+    if "coupe" in words or "coupé" in words:
+        return "coupe"
+    return ""
+
+
+def other_body(car: dict, comp: dict) -> bool:
+    """True when a comp is plainly a different body style from the car: a cabriolet against a coupe, say."""
+    mine = body_kind(car.get("body")) or body_kind(car.get("trim"))
+    theirs = body_kind(comp.get("body")) or body_kind(comp.get("title"))
+    return bool(mine and theirs and mine != theirs)
+
+
+_TRIM_NOISE = {"coupe", "coupé", "cabriolet", "convertible", "cabrio", "sedan", "hatchback", "wagon", "pdk", "manual",
+               "automatic", "auto", "dct", "tiptronic", "rwd", "awd", "fwd", "4wd", "base", "the"}
+
+
+def trim_key(text, car: dict | None = None) -> list[str]:
+    """A trim as comparable words: lower case, without the year, make, model, body style or gearbox."""
+    words = re.sub(r"[^a-z0-9.+ ]", " ", str(text or "").lower().replace("-", " "))
+    words = re.sub(r"\b\d+\s*speed\b", " ", words)
+    words = re.sub(r"\b(\d) s\b", r"\1s", words)                      # "Carrera 4 S" is "Carrera 4S"
+    skip = set(_TRIM_NOISE)
+    for field in ("make", "model"):
+        skip.update(re.sub(r"[^a-z0-9.+ ]", " ", str((car or {}).get(field) or "").lower().replace("-", " ")).split())
+    return [word for word in words.split() if word not in skip and not re.fullmatch(r"(19|20)\d\d", word)]
+
+
+def _same_trim(mine: list[str], theirs: list[str]) -> bool:
+    """Equal, or one is the tail of the other ('S' and 'Carrera S'). 'Carrera' and 'Carrera S' are not the same."""
+    short, long = sorted((mine, theirs), key=len)
+    return long[len(long) - len(short):] == short
+
+
+def other_trim(car: dict, comp: dict) -> bool:
+    """True when a comp states a trim and it is not the car's: a Carrera against a Carrera S, say."""
+    mine, theirs = trim_key(car.get("trim"), car), trim_key(comp.get("trim"), car)
+    return bool(mine and theirs and not _same_trim(mine, theirs))
+
+
+def mark_other_trim(car: dict, row: dict) -> bool:
+    """Say so in the note of a comp of another trim, which keeps it switched off and out of the numbers."""
+    if not other_trim(car, row):
+        return False
+    note = str(row.get("note") or "").strip()
+    if "different trim" not in note.lower():
+        mark = f"Different trim ({str(row.get('trim')).strip()})."
+        row["note"] = f"{note} {mark}" if note.lower().startswith("live auction") else f"{mark} {note}".strip()
+    return True
+
+
+def trim_from_vin(car: dict, options: list[str]) -> tuple[str, str]:
+    """Settle the car's trim against what its VIN decodes to. Returns (the trim to use, a note for the buyer or '').
+
+    The trim only changes when the VIN is plainly more specific than the listing (the listing says
+    Carrera, the VIN says Carrera S). When the two disagree any other way, the note says so and the
+    trim is left alone.
+    """
+    read = str(car.get("trim") or "").strip()
+    mine = trim_key(read, car)
+    keys = [(option, trim_key(option, car)) for option in options]
+    keys = [(option, key) for option, key in keys if key]
+    if not keys or (mine and any(_same_trim(mine, key) for _, key in keys)):
+        return read, ""
+    fits = [(option, key) for option, key in keys if key[:len(mine)] == mine]
+    drive = str(car.get("drivetrain") or "").lower()
+    all_wheel = any(word in drive for word in ("awd", "all", "4wd", "four", "quattro", "xdrive", "4matic"))
+    if len(fits) > 1 and (all_wheel or any(word in drive for word in ("rwd", "rear"))):
+        def four(key):
+            return any(re.fullmatch(r"4[a-z]*|awd|xdrive|quattro", word) for word in key)
+        fits = [(option, key) for option, key in fits if four(key) == all_wheel] or fits
+    if len(fits) == 1:
+        was = f"from {read}" if read else "from blank"
+        return fits[0][0], f"The VIN decodes as {fits[0][0]}, so the trim was changed {was}."
+    names = " or ".join(option for option, _ in keys)
+    return read, (f"The VIN decodes as {names}, but the listing reads as {read or 'no trim'}. "
+                  "Check the trim under Edit and print, because comps are matched to it.")
 
 
 def comp_group(comp: dict) -> str:

@@ -37,6 +37,9 @@ what that car has been selling for and gives you a typical sale price, the comps
   the dealer's description, and shown under the title; comps carry theirs too, and the offer
   reasoning accounts for the difference. You can add options at any time under **The case**: paste
   or pick a picture of the window sticker, or paste the dealer's description.
+- **Accident and title history.** What the listing says about accidents, damage and title shows as a
+  chip under the title (green when clean, red when not, amber when the listing says nothing) and on
+  each comp that states it. The offer reasoning weighs it.
 - **VINs.** The car's VIN shows under the title and each comp's VIN on its card; tap one to copy it.
   When a listing leaves the VIN out, the app says so. Comp VINs are also read out of links that
   contain them (Classic.com's do).
@@ -44,7 +47,8 @@ what that car has been selling for and gives you a typical sale price, the comps
   each with a **Search for more** button that looks for cars not already found. For-sale cars come
   from live auctions, enthusiast classifieds and dealers. The app opens each for-sale page, where
   the site allows it, and moves a car to "sold or gone" when its page says so; **Check they are
-  still for sale** does that again. Each card says whether its page was checked.
+  still for sale** does that again. Each card says whether its page was checked. Both lists sort by
+  price, miles or date.
   Each comp has a button that opens that car's own page. A link that opens a list of
   results instead of one car is flagged on the screen and on the PDF, and is never offered as the
   proof link for a point in the case.
@@ -137,7 +141,17 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   pre-owned finder, dealers and listing sites. Price-guide mirrors such as KBB are left out because
   they keep listings up after the car has gone.
 - The app cannot open sites that block automated visits, so some for-sale cars are marked "not
-  confirmed". Open those yourself. The case shows how many comps came from each place, including "none" for those two.
+  confirmed". Open those yourself.
+- Body style and trim are hard requirements: a coupe is compared only with coupes and a Carrera S
+  only with Carrera S. Cars of another body style are dropped. A car of another trim is kept only
+  as context: its note starts "Different trim", and it is switched off so it stays out of the
+  numbers. The check compares the trim each source states, so a source that names no trim passes.
+- When a listing shows a VIN, the app looks it up in NHTSA's public VIN decoder
+  (vpic.nhtsa.dot.gov) to check the trim. If the VIN is plainly more specific (the listing says
+  Carrera, the VIN says Carrera S) the trim is corrected and a note says so; if the two disagree
+  any other way, the note asks you to check it. Only the VIN is sent.
+- The searches use Claude's built-in web search: site-by-site queries first, then plain queries the
+  way a buyer would type them. The case shows how many comps came from each place, including "none" for those two.
 - Every comp is labeled sold, high bid or asking, and its link is checked against the URLs the
   search actually returned. A link that was not in the results is flagged.
 - Claude is told to record each car's own page, never a results page, and the app checks the link's
@@ -156,7 +170,8 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
 **A 3D model of the actual car.** The app does not ship models of real cars. In the **3D model** tab,
 **Find models** searches Sketchfab's public library and shows the results in the app. Tap one and
 it plays on the main screen in Sketchfab's own viewer, with the artist's name on it: no account,
-and nothing is downloaded or stored in the app. With a free Sketchfab account you can instead
+and nothing is downloaded or stored in the app. The app asks the viewer for a black backdrop and
+turns the studio black to match, so the car sits in the page instead of in a window. With a free Sketchfab account you can instead
 download a model into the studio (paste your API token once), or load a `.glb` file or link you
 already have. Your choice is kept in your browser on your device only and is used for every car of
 that make and model in your garage. Use only models whose licence allows it.

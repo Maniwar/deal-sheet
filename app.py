@@ -51,11 +51,11 @@ CSS = styles.CSS
 APP_DIR = Path(__file__).parent
 CAR_FIELDS = ["year", "make", "model", "trim", "body", "transmission", "drivetrain", "miles", "price",
               "vin", "exterior", "interior", "seller", "seller_type", "location", "url", "notes",
-              "shape", "layout", "options", "msrp"]
+              "shape", "layout", "options", "msrp", "history"]
 NUMBER_FIELDS = {"year", "miles", "price", "msrp"}
 SELLER_TYPES = ["", "dealer", "private", "auction"]
 COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img", "options", "vin",
-                "available", "seen", "seen_on"]
+                "available", "seen", "seen_on", "body", "history"]
 DOT = " \u00b7 "
 QR_SIZES = {"Large (1.1 in)": 82, "Extra large (1.5 in)": 108}
 EMPTY_DEAL = {"car": {}, "comps": [], "offer": {}, "summary": "", "message": "", "sample": False}
@@ -248,6 +248,24 @@ def run_garage_actions(actions: list[dict]) -> None:
 
 # ---------------------------------------------------------------- one step: link or screenshot to a full deal
 
+def same_body_only(car: dict, comps: list[dict]) -> tuple[list[dict], int]:
+    """Drop comps that are plainly another body style (a cabriolet for a coupe). Returns (kept, how many dropped)."""
+    kept = [comp for comp in comps if not calc.other_body(car, comp)]
+    return kept, len(comps) - len(kept)
+
+
+def settle_trim(car: dict) -> str:
+    """Check the trim against the VIN in NHTSA's public decoder, fixing it when the VIN is plainly more specific.
+
+    Returns a note for the buyer when the trim changed or the two disagree, else ''.
+    """
+    vin = calc.clean_vin(car.get("vin"))
+    if not vin or not calc.vin_checks_out(vin):
+        return ""
+    car["trim"], note = calc.trim_from_vin(car, previews.vin_trims(vin))
+    return note
+
+
 def check_listings(comps: list[dict]) -> dict:
     """Open each for-sale page, where its site allows, and record whether it still shows the car.
 
@@ -293,7 +311,13 @@ def research_market(client, model: str, car: dict, max_searches: int) -> dict:
         sale = {"comps": [], "summary": "The search for cars for sale now did not finish. Use Search for more in the For sale now tab to retry it."}
     seen = {calc.normalize_url(comp["url"]) for comp in comps if comp["url"]}
     comps += [comp for comp in sale["comps"] if not comp["url"] or calc.normalize_url(comp["url"]) not in seen]
+    comps, dropped = same_body_only(car, comps)
     note = checked_note(check_listings(comps))
+    if dropped:
+        note = f"{dropped} car{'s' if dropped != 1 else ''} of a different body style {'were' if dropped != 1 else 'was'} left out. {note}".strip()
+    off_trim = sum("different trim" in comp["note"].lower() for comp in comps)
+    if off_trim:
+        note = f"{off_trim} car{'s' if off_trim != 1 else ''} of another trim {'are' if off_trim != 1 else 'is'} shown switched off. {note}".strip()
     return {"comps": comps, "summary": " ".join(part for part in (summary, sale["summary"], note) if part).strip()}
 
 
@@ -341,6 +365,9 @@ def build_deal(client, model: str, link: str, shot: bytes | None, max_searches: 
     car = tidy_car(found)
     if link:
         car["url"] = link
+    trim_note = settle_trim(car)
+    if trim_note:
+        notes.append(trim_note)
     unread = bool(link) and page["status"] != "ok"
     why = ("That site does not let apps read its pages" if page["status"] == "blocked"
            else "That link could not be opened")
@@ -587,7 +614,7 @@ def comps_frame(comps: list[dict]) -> pd.DataFrame:
     frame["use"] = frame["use"].astype("boolean").fillna(True).astype(bool)
     for column in ("price", "miles"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Int64")
-    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available", "seen", "seen_on"):
+    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available", "seen", "seen_on", "body", "history"):
         frame[column] = frame[column].astype("string").fillna("")
     return frame
 
@@ -735,6 +762,7 @@ def handle_stage_requests(progress_slot) -> None:
             else:
                 seen = {calc.normalize_url(url) for url in known}
                 fresh = [comp for comp in found["comps"] if not comp["url"] or calc.normalize_url(comp["url"]) not in seen]
+                fresh, _ = same_body_only(the_car, fresh)
                 note = checked_note(check_listings(fresh)) if wants_sale else ""
                 ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have}
                 what = "car for sale" if wants_sale else "sale"
@@ -760,7 +788,7 @@ def handle_stage_requests(progress_slot) -> None:
             except llm.LLMError as exc:
                 ss["stage_error"] = str(exc)
             else:
-                extra = {key: found[key] for key in ("options", "msrp", "vin")
+                extra = {key: found[key] for key in ("options", "msrp", "vin", "history")
                          if found.get(key) and (key == "options" or not ss.get(f"car_{key}"))}
                 if extra.get("options"):
                     have = [line.strip() for line in str(ss.get("car_options") or "").splitlines() if line.strip()]
@@ -926,6 +954,9 @@ with tab_car:
                     else:
                         if pasted_link:
                             found["url"] = pasted_link
+                        trim_note = settle_trim(found)
+                        if trim_note:
+                            ss["notices"] = [trim_note]
                         box = found.pop("photo_box", None)
                         auto_photo = page["image"]
                         if shots and isinstance(box, (list, tuple)) and len(box) == 4:
@@ -968,6 +999,9 @@ with tab_car:
         a.text_area("Options (one per line)", key="car_options", height=110,
                     help="Factory options change the price. Copy them from the listing or the window sticker.")
         b.text_input("Original sticker price", key="car_msrp", help="The MSRP with options, if you know it.")
+        st.text_input("Accident and title history", key="car_history",
+                      placeholder="No accidents reported, clean title, 2 owners",
+                      help="What the listing or the Carfax says. An accident or a branded title lowers the price.")
         st.text_area("Notes", key="car_notes", height=80)
         a, b = st.columns(2)
         a.selectbox("3D body shape", list(SHAPE_NAMES), key="car_shape", format_func=SHAPE_NAMES.get,
@@ -988,7 +1022,7 @@ with tab_comps:
             comps_frame(ss["comps_base"]),
             key=f"comps_editor_{ss['comps_ver']}",
             num_rows="dynamic", hide_index=True, width="stretch",
-            column_order=["use", "status", "price", "miles", "title", "vin", "date", "source", "available", "url", "options", "note"],
+            column_order=["use", "status", "price", "miles", "title", "body", "history", "vin", "date", "source", "available", "url", "options", "note"],
             column_config={
                 "use": st.column_config.CheckboxColumn("Use", default=True, width="small"),
                 "status": st.column_config.SelectboxColumn("Status", options=list(calc.STATUSES), default="sold", required=True),
@@ -999,6 +1033,8 @@ with tab_comps:
                 "source": st.column_config.TextColumn("Source"),
                 "url": st.column_config.TextColumn("Link", width="medium"),
                 "options": st.column_config.TextColumn("Options", width="medium"),
+                "body": st.column_config.TextColumn("Body", help="Coupe, Cabriolet, Targa and so on."),
+                "history": st.column_config.TextColumn("History", help="Accidents, damage or title: Clean Carfax, Accident reported."),
                 "vin": st.column_config.TextColumn("VIN", help="Filled in from the link when the link contains it."),
                 "available": st.column_config.SelectboxColumn("For sale now", options=["", "yes", "no"],
                                                               help="For asking prices: yes while the car is listed, "

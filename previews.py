@@ -29,6 +29,7 @@ import requests
 from PIL import Image
 
 USER_AGENT = "DealSheetLinkPreview/1.0 (+https://github.com/Maniwar/deal-sheet)"
+VIN_API = "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/"       # NHTSA's public VIN decoder
 ALLOW_LOCAL = os.environ.get("DEALSHEET_ALLOW_LOCAL_PREVIEWS") == "1"   # tests only
 PAGE_LIMIT = 700_000
 IMAGE_LIMIT = 8_000_000
@@ -373,3 +374,23 @@ def crop_fraction(image_bytes: bytes, box, max_width: int = 1100) -> bytes | Non
     out = io.BytesIO()
     region.save(out, "JPEG", quality=82, optimize=True)
     return out.getvalue()
+
+
+
+def vin_trims(vin: str) -> list[str]:
+    """The trims NHTSA's public VIN decoder gives for a VIN: 'Carrera S / Carrera 4S' is two. [] when it cannot say."""
+    vin = re.sub(r"[^A-HJ-NPR-Z0-9]", "", str(vin or "").upper())
+    if len(vin) != 17:
+        return []
+    try:
+        reply = requests.get(os.environ.get("DEALSHEET_VIN_API", VIN_API) + vin, params={"format": "json"}, timeout=6,
+                             headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        row = (reply.json().get("Results") or [{}])[0]
+    except (requests.RequestException, ValueError, AttributeError, IndexError, TypeError):
+        return []
+    found: list[str] = []
+    for field in ("Trim", "Trim2"):
+        for part in re.split(r"(?<![wW])/", str(row.get(field) or "")):
+            if part.strip() and part.strip() not in found:
+                found.append(part.strip())
+    return found

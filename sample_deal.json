@@ -21,7 +21,8 @@
     "shape": "coupe",
     "layout": "rear",
     "options": "Adaptive cruise control\nHeated and ventilated seats\nSunroof\nPremium sound system\nKeyless entry",
-    "msrp": null
+    "msrp": null,
+    "history": "No accidents, clean title (TrueCar listing)"
   },
   "comps": [
     {
@@ -36,7 +37,9 @@
       "url": "https://bringatrailer.com/listing/2020-porsche-911-carrera-s-coupe-47/",
       "link_ok": true,
       "vin": "WP0AB2A98LS228716",
-      "options": "Sport Chrono, ceramic brakes (PCCB), sport exhaust, rear-axle steering"
+      "options": "Sport Chrono, ceramic brakes (PCCB), sport exhaust, rear-axle steering",
+      "history": "Clean Carfax",
+      "body": "Coupe"
     },
     {
       "use": true,
@@ -50,7 +53,9 @@
       "url": "https://bringatrailer.com/listing/2020-porsche-911-carrera-s-coupe-45/",
       "link_ok": true,
       "vin": "WP0AB2A90LS228175",
-      "options": "Premium Package, sunroof, Bose, adaptive cruise"
+      "options": "Premium Package, sunroof, Bose, adaptive cruise",
+      "history": "Accident-free Carfax",
+      "body": "Coupe"
     },
     {
       "use": true,
@@ -64,7 +69,8 @@
       "url": "https://bringatrailer.com/listing/2020-porsche-911-carrera-s-coupe-44/",
       "link_ok": true,
       "vin": "WP0AB2A94LS225781",
-      "options": "Premium, Sport Chrono and Sport packages, sunroof"
+      "options": "Premium, Sport Chrono and Sport packages, sunroof",
+      "body": "Coupe"
     },
     {
       "use": true,
@@ -78,7 +84,8 @@
       "url": "https://www.classic.com/veh/2020-porsche-911-carrera-s-coupe-wp0ab2a97ls225449-pzzr95p/",
       "link_ok": true,
       "vin": "WP0AB2A97LS225449",
-      "options": "Sport, Sport Chrono and Light Design packages"
+      "options": "Sport, Sport Chrono and Light Design packages",
+      "body": "Coupe"
     },
     {
       "use": false,
@@ -91,7 +98,8 @@
       "note": "Flagged as modified, so left out.",
       "url": "https://www.classic.com/veh/2020-porsche-911-carrera-s-wp0ab2a92ls226184-nKxrx7W/",
       "link_ok": true,
-      "vin": "WP0AB2A92LS226184"
+      "vin": "WP0AB2A92LS226184",
+      "body": "Coupe"
     },
     {
       "use": true,
@@ -120,7 +128,8 @@
       "options": "",
       "vin": "WP0AB2A90LS229942",
       "link_ok": null,
-      "img": ""
+      "img": "",
+      "body": "Coupe"
     },
     {
       "use": true,

@@ -147,6 +147,8 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
     for comp in sorted(comps, key=lambda c: (order[calc.comp_group(c)], not c["use"], c["price"])):
         group = calc.comp_group(comp)
         meta = []
+        if comp.get("body") and comp["body"].lower() not in comp["title"].lower():
+            meta.append(comp["body"])
         if comp.get("miles"):
             meta.append(f"{comp['miles']:,} mi")
         if comp.get("date"):
@@ -165,6 +167,8 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             "kind": calc.link_kind(url), "use": bool(comp["use"]), "linkOk": comp.get("link_ok"), "delta": delta,
             "img": comp.get("img") or "", "vin": comp.get("vin") or "",
             "seen": comp.get("seen") or "", "seenOn": comp.get("seen_on") or "",
+            "history": comp.get("history") or "", "histFlag": calc.history_flag(comp.get("history")),
+            "miles": comp.get("miles") or 0, "when": calc.date_key(comp.get("date")),
             "image": showcase.data_url(comp_photos.get(comp.get("img") or "") or comp_images.get(url)),
         })
 
@@ -185,12 +189,13 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "detailed": bool(detailed), "canDetail": bool(showcase.PRO_MODELS.get(shape["body"])),
         "modelKey": re.sub(r"[^a-z0-9]+", "-", f"{car.get('make') or ''} {car.get('model') or ''}".lower()).strip("-"),
         "modelName": " ".join(str(car.get(k) or "").strip() for k in ("make", "model")).strip(),
-        "find3d": " ".join(str(car.get(k) or "").strip() for k in ("make", "model", "trim")).strip(),
+        "find3d": " ".join(str(car.get(k) or "").strip() for k in ("make", "model", "trim", "body")).strip(),
         "sample": bool(flags.get("sample")), "hasCar": has_car,
         "title": calc.car_title(car) if has_car else "", "chips": chips,
         "seller": " · ".join(bit for bit in seller_bits if bit), "url": car.get("url") or "",
         "vin": calc.clean_vin(car.get("vin")) or str(car.get("vin") or "").strip(),
         "listed": bool(ask or car.get("url") or car.get("seller")),
+        "history": str(car.get("history") or "").strip(), "histFlag": calc.history_flag(car.get("history")),
         "ask": ask, "priceLabel": label, "priceValue": value, "priceText": text, "gap": gap,
         "offer": {"open": offer.get("open"), "target": offer.get("target"), "walk": offer.get("walk_away")},
         "money": {"tax": settings["tax_rate"], "fees": settings["fees"], "apr": settings["apr"],
@@ -304,10 +309,20 @@ button.opt{cursor:pointer}
 .shot.add b{font:300 26px/1 var(--sans)}
 .shot.add span{position:static;background:none;padding:0;color:var(--mute)}
 .opts{clear:both}
-/* a live 3D view of the actual car, in the model library's own viewer */
-.liveview{position:absolute;inset:4px 12px;border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.2);background:#0d0e11;box-shadow:0 18px 50px rgba(0,0,0,.5)}
+/* a live 3D view of the actual car, in the model library's viewer: no frame, edges dissolve into the studio */
+.liveview{position:absolute;inset:0;overflow:hidden;opacity:0;transition:opacity .7s;
+  -webkit-mask-image:linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 7%,#000 93%,transparent);-webkit-mask-composite:source-in;
+  mask-image:linear-gradient(to right,transparent,#000 5%,#000 95%,transparent),linear-gradient(to bottom,transparent,#000 7%,#000 93%,transparent);mask-composite:intersect}
+/* the viewer's backdrop is set to black, and the studio turns black with it, so there is no window edge to see */
+.live-blend .bg{background:#000}
+.live-blend .shade{opacity:0}
+.live-blend.stage{background:#000}
+.liveview.ready{opacity:1}
 .liveview[hidden]{display:none}
-.liveview iframe{display:block;width:100%;height:100%;border:0}
+.liveview iframe{display:block;width:100%;height:100%;border:0;background:transparent}
+/* without the viewer API it stays an honest framed window */
+.liveview.plain{inset:4px 12px;border-radius:18px;border:1px solid rgba(255,255,255,.2);background:#0d0e11;-webkit-mask-image:none;mask-image:none}
+.live3d .zone::before{content:"Loading the 3D model";position:absolute;inset:0;display:grid;place-items:center;font:500 13px var(--sans);color:var(--dim)}
 .live3d .gl{opacity:0!important;pointer-events:none}
 .live3d .zone{min-height:190px}
 .photo img{width:100%;height:100%;object-fit:cover;display:block}
@@ -415,6 +430,12 @@ button.opt{cursor:pointer}
 .c-note{margin-top:3px;font:400 12px/1.4 var(--sans);color:var(--dim)}
 .c-flag{margin-top:5px;font:500 11.5px/1.35 var(--sans);color:var(--warn)}
 .c-seen{margin-top:5px;font:500 11.5px/1.35 var(--sans);color:var(--warn)}.c-seen.ok{color:#7ee8bd}
+.c-hist{margin-top:4px;font:500 12px/1.35 var(--sans);color:var(--mute)}.c-hist.bad{color:#fca5a5}.c-hist.clean{color:#7ee8bd}
+.opt.bad{border-color:rgba(248,113,113,.6);color:#fecaca;background:rgba(248,113,113,.12)}
+.opt.good{border-color:rgba(52,211,153,.45);color:#a7f3d0;background:rgba(52,211,153,.08)}
+.sortrow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:14px;font:500 11.5px var(--sans);color:var(--dim)}
+.sortbtn{padding:5px 11px;border-radius:999px;border:1px solid var(--line);font:500 12px var(--sans);color:var(--mute)}
+.sortbtn.on{color:var(--ink);border-color:rgba(255,255,255,.55);background:rgba(255,255,255,.1)}
 .c-link{display:inline-flex;align-items:center;gap:6px;margin-top:8px;font:500 13px var(--sans);text-decoration:none;padding:6px 12px;border-radius:999px;background:var(--ink);color:#0b0c0e}
 .c-link small{font:400 11px var(--mono);opacity:.7}
 .scrim{position:absolute;inset:0;z-index:18;background:rgba(0,0,0,.45)}
@@ -488,7 +509,8 @@ button.opt{cursor:pointer}
   .tabs{grid-column:1/-1;justify-content:center}
   .dock{grid-column:1/-1;width:min(680px,100%);justify-self:center;padding-bottom:18px}
   .shot{display:none}
-  .liveview{inset:auto;top:6px;bottom:6px;left:50%;transform:translateX(-50%);width:min(700px,54%)}
+  .liveview,.liveview.plain{inset:auto;top:0;bottom:0;left:50%;transform:translateX(-50%);width:min(980px,78%)}
+  .has-photo .liveview{width:min(860px,calc(100% - 2*(clamp(200px,21vw,300px) + 64px)))}
   .photo:not([hidden]){display:block;right:40px;top:50%;transform:translateY(-50%);width:clamp(200px,21vw,300px);aspect-ratio:4/3}
   .sheet{left:auto;top:0;bottom:0;width:460px;height:100%;border-radius:0;border-top:0;border-left:1px solid rgba(255,255,255,.18);transform:translateX(103%)}
   .credit .long{display:inline}
@@ -617,6 +639,8 @@ function create(root) {
     else if (d.listed && !d.sample) shot = '<button type="button" class="shot add" aria-label="Add a photo of this car"><b>+</b><span>Add photo</span></button>';
     if (d.vin) row += vinChip(d.vin);
     else if (d.listed) row += '<span class="opt none">VIN not listed</span>';
+    if (d.history) row += `<span class="opt ${d.histFlag === "bad" ? "bad" : d.histFlag === "clean" ? "good" : ""}">${esc(d.history.length > 46 ? d.history.slice(0, 44) + "…" : d.history)}</span>`;
+    else if (d.listed) row += '<span class="opt none">Accident history not stated</span>';
     if ((c.options || []).length) row += c.options.slice(0, 3).map((o) => `<span class="opt">${esc(o)}</span>`).join("") + (c.options.length > 3 ? `<span class="opt">+${c.options.length - 3} more</span>` : "");
     else if (d.listed) row += '<button type="button" class="opt none addopts">Options missing: add</button>';
     if (c.msrp) row += `<span class="opt">Sticker ${esc(c.msrp)}</span>`;
@@ -736,7 +760,7 @@ function create(root) {
       : k.seen === "unknown" ? `<div class="c-seen">Not confirmed: this site does not let apps look. Open it to check it is still for sale.</div>`
       : '<div class="c-seen">Not checked yet. Tap Check they are still for sale.</div>';
     const text = `<div><span class="pill ${esc(k.group)}">${esc(k.label)}</span><span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
-      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.vin ? `<div>${vinChip(k.vin, "c-vin")}</div>` : ""}${seen}${flag}` +
+      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${k.vin ? `<div>${vinChip(k.vin, "c-vin")}</div>` : ""}${seen}${flag}` +
       (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">Open ${ARROW} <small>${esc(k.host)}</small></a>` : "") + "</div>";
     return big ? `<div class="card${k.use ? "" : " off"}">${text}${k.image ? `<img src="${esc(k.image)}" alt="" loading="lazy">` : "<span></span>"}</div>` : text;
   };
@@ -769,7 +793,11 @@ function create(root) {
   el.sheetTabs.onclick = (e) => { const b = e.target.closest(".tab"); if (b) { S.tab = b.dataset.tab; renderSheet(); } };
   function renderSheet() {
     const d = S.d, c = d.case || {}, [nSold, nSale] = counts(d);
-    const list = (groups, title) => { const rows = (d.comps || []).filter((k) => groups.includes(k.group)); return rows.length ? `<h3>${title} · ${rows.length}</h3>` + rows.map((k) => compCard(k, true)).join("") : ""; };
+    const sort = S.sort || (S.sort = { key: "price", dir: 1 });
+    const order = (x, y) => { const p = x[sort.key] || 0, q = y[sort.key] || 0; if (!p || !q) return (q ? 1 : 0) - (p ? 1 : 0); return (p - q) * sort.dir; };   /* cars missing the value go last */
+    const list = (groups, title) => { const rows = (d.comps || []).filter((k) => groups.includes(k.group)).sort(order); return rows.length ? `<h3>${title} · ${rows.length}</h3>` + rows.map((k) => compCard(k, true)).join("") : ""; };
+    const arrow = (key) => (sort.key === key ? (sort.dir > 0 ? " ↑" : " ↓") : "");
+    const sorter = `<div class="sortrow">Sort by ${[["price", "Price"], ["miles", "Miles"], ["when", "Date"]].map(([key, name]) => `<button type="button" class="sortbtn${sort.key === key ? " on" : ""}" data-sort="${key}">${name}${arrow(key)}</button>`).join("")}</div>`;
     el.sheetTabs.innerHTML = [["case", "The case"], ["comps", `Sold<b>${nSold}</b>`], ["sale", `For sale now<b>${nSale}</b>`], ["message", "Message"], ["model", "3D model"]].map(([id, t]) => `<button type="button" class="tab${S.tab === id ? " lead" : ""}" data-tab="${id}">${t}</button>`).join("");
     let h = "";
     if (S.tab === "case") {
@@ -792,6 +820,7 @@ function create(root) {
       }
     } else if (S.tab === "comps") {
       h = list(["sold"], "Completed sales") + list(["high_bid"], "Auctions that ended without a sale");
+      if (h) h = sorter + h;
       if (!h) h = '<div class="lead-sub">No completed sales yet. Search for some, or add comps under Edit and print.</div>';
       h += `<button type="button" class="btn ghost more" data-kind="sold"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sold" ? "Searching. This takes a minute or two." : "Search for more sales"}</button>`;
     } else if (S.tab === "sale") {
@@ -799,12 +828,13 @@ function create(root) {
       const tools = (nSale ? `<button type="button" class="btn ghost verify"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "verify" ? "Opening each page" : "Check they are still for sale"}</button> ` : "") +
         `<button type="button" class="btn ghost more" data-kind="sale"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sale" ? "Searching. This takes a minute or two." : "Search for more cars for sale"}</button>`;
       if (!nSale) h = '<div class="lead-sub">No cars for sale found yet. The search covers live auctions, enthusiast classifieds and dealers.</div>' + `<div>${tools}</div>` + h;
-      else h = '<div class="lead-sub">Other cars you could buy today, from live auctions, enthusiast classifieds and dealers. Asking prices sit above what cars sell for, so use these as alternatives and leverage, not as the price.</div>' + `<div>${tools}</div>` + h;
+      else h = '<div class="lead-sub">Other cars you could buy today, from live auctions, enthusiast classifieds and dealers. Asking prices sit above what cars sell for, so use these as alternatives and leverage, not as the price.</div>' + `<div>${tools}</div>` + sorter + h;
     } else if (S.tab === "message") {
       h = d.message ? `<div class="msg">${esc(d.message)}</div><button type="button" class="btn copy">Copy the message</button>` : '<div class="lead-sub">No message yet. Draft one under Edit and print, in the Sheet tab.</div>';
     }
     if (S.tab === "model") { renderModelTab(); return; }
     el.sheetBody.innerHTML = h; el.sheetBody.scrollTop = 0;
+    el.sheetBody.querySelectorAll(".sortbtn").forEach((b) => { b.onclick = () => { const key = b.dataset.sort; S.sort = S.sort.key === key ? { key, dir: -S.sort.dir } : { key, dir: key === "when" ? -1 : 1 }; const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; }; });
     const again = (name, value, flag) => { if (name === "more" && !S.d.connected) { toast("Connect your Anthropic API key first, in the bar at the bottom.", true); return; } S.moreBusy = flag; const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; post(name, value); };
     el.sheetBody.querySelectorAll(".more").forEach((b) => { b.onclick = () => again("more", { kind: b.dataset.kind, at: Date.now() }, b.dataset.kind); });
     const verify = el.sheetBody.querySelector(".verify");
@@ -841,21 +871,55 @@ function create(root) {
   const SK_SLOT = "dealsheet.sketchfab";
   const skApi = () => root.dataset.skfb || "https://api.sketchfab.com";
   const skSite = () => root.dataset.skfbSite || "https://sketchfab.com";
-  let liveKey = "";
+  /* The live model plays in Sketchfab's viewer. Its viewer API lets the page set the backdrop colour and frame
+     the whole car, so it sits in the studio instead of looking like a window on top of it. */
+  const LIVE_BG = [0, 0, 0];      /* black is the same in every colour space, so the page can match it exactly */
+  let liveKey = "", skLib = null;
   S.paintLive = () => paintLive();
+  const skLoad = () => skLib || (skLib = new Promise((ok, fail) => {
+    if (window.Sketchfab) { ok(); return; }
+    const s = document.createElement("script"); s.src = "https://static.sketchfab.com/api/sketchfab-viewer-1.12.1.js"; s.async = true;
+    s.onload = () => (window.Sketchfab ? ok() : fail(new Error("no viewer")));
+    s.onerror = () => { skLib = null; fail(new Error("blocked")); };
+    document.head.appendChild(s);
+  }));
+  function startLive(frame, uid) {
+    const plain = () => {                                   /* without the viewer API: an ordinary embed, shown as a framed window */
+      if (liveKey !== uid) return;
+      el.live.classList.add("plain", "ready"); root.classList.remove("live-blend");
+      frame.src = `${skSite()}/models/${encodeURIComponent(uid)}/embed?autostart=1&autospin=0.2&preload=1&ui_hint=0&ui_theme=dark&dnt=1`;
+    };
+    el.live.classList.remove("plain", "ready"); root.classList.remove("live-blend"); frame.removeAttribute("src");
+    if (root.dataset.skfbSite) { plain(); return; }
+    skLoad().then(() => {
+      if (liveKey !== uid) return;
+      new window.Sketchfab(frame).init(uid, {
+        autostart: 1, autospin: 0.2, preload: 1, camera: 0, scrollwheel: 0, ui_hint: 0, ui_theme: "dark", dnt: 1,
+        success: (api) => {
+          api.start();
+          api.addEventListener("viewerready", () => {
+            if (liveKey !== uid) return;
+            try { api.setBackground({ color: LIVE_BG }, () => {}); api.recenterCamera(() => {}); } catch (e) {}
+            el.live.classList.add("ready"); root.classList.add("live-blend");   /* the studio goes black to match the viewer */
+          });
+        },
+        error: plain,
+      });
+    }).catch(plain);
+    setTimeout(() => { if (liveKey === uid) el.live.classList.add("ready"); }, 9000);     /* never leave it hidden */
+  }
   async function paintLive() {
     const d = S.d; let rec = null;
     try { if (d.hasCar && !S.busy) rec = await store.get(modelSlot()); } catch (e) {}
     const frame = el.live.querySelector("iframe");
     if (rec && rec.embed) {
-      const src = `${skSite()}/models/${encodeURIComponent(rec.embed)}/embed?autostart=1&autospin=0.2&preload=1&ui_hint=0&ui_theme=dark&ui_ar=0&ui_help=0&ui_settings=0&ui_vr=0&ui_inspector=0&dnt=1`;
-      if (liveKey !== src) { liveKey = src; frame.src = src; }
       el.live.hidden = false; root.classList.add("live3d");
+      if (liveKey !== rec.embed) { liveKey = rec.embed; startLive(frame, rec.embed); }
       const credit = $(".credit");
       credit.innerHTML = `3D view: ${safeUrl(rec.url) ? `<a href="${esc(rec.url)}" target="_blank" rel="noopener">“${esc(rec.name)}”</a>` : "“" + esc(rec.name) + "”"} by ${esc(rec.author || "its artist")}, shown live from Sketchfab`;
       credit.hidden = false;
     } else if (liveKey || !el.live.hidden) {
-      liveKey = ""; frame.removeAttribute("src"); el.live.hidden = true; root.classList.remove("live3d");
+      liveKey = ""; frame.removeAttribute("src"); el.live.hidden = true; el.live.classList.remove("plain", "ready"); root.classList.remove("live3d", "live-blend");
     }
   }
   const skToken = () => { try { return localStorage.getItem(SK_SLOT) || ""; } catch (e) { return ""; } };
@@ -1050,6 +1114,7 @@ function create(root) {
   function paintPhoto(d) {
     const show = !S.busy && !!d.photo;
     el.photo.hidden = !show; if (show) el.photo.querySelector("img").src = d.photo;
+    root.classList.toggle("has-photo", show);
   }
   el.photo.onclick = () => { el.light.querySelector("img").src = S.d.photo; el.light.hidden = false; };
   el.light.onclick = () => { el.light.hidden = true; };

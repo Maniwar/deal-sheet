@@ -19,7 +19,7 @@ import json
 
 import anthropic
 
-from calc import car_facts, car_title, clean_comps, link_kind, money, normalize_url
+from calc import car_facts, car_title, clean_comps, link_kind, mark_other_trim, money, normalize_url
 
 MODELS = {
     "Sonnet 5.5 (balanced)": "claude-sonnet-5-5",
@@ -147,6 +147,7 @@ def _car_block(car: dict) -> str:
             lines.append(f"{label}: {car[key]}")
     options = [line.strip() for line in str(car.get("options") or "").splitlines() if line.strip()]
     lines.append("Options: " + ("; ".join(options) if options else "not listed"))
+    lines.append("Accident and title history: " + (str(car.get("history") or "").strip() or "not stated"))
     if car.get("msrp"):
         lines.append(f"Original sticker price: {money(car['msrp'])}")
     return "\n".join(lines)
@@ -164,6 +165,8 @@ def _comps_block(comps: list[dict]) -> str:
             bits.append(comp["source"])
         if comp.get("options"):
             bits.append(f"options: {comp['options']}")
+        if comp.get("history"):
+            bits.append(f"history: {comp['history']}")
         if comp.get("vin"):
             bits.append(f"VIN {comp['vin']}")
         if comp.get("note"):
@@ -208,6 +211,9 @@ LISTING_TOOL = {
                                        "dealer's description and feature lists, one per item, as written (for example "
                                        "Sport Chrono Package, ceramic brakes, sport exhaust). Leave out if none are shown."},
             "msrp": {"type": "integer", "description": "Original sticker price (MSRP with options) in whole US dollars, only if the listing states it."},
+            "history": {"type": "string", "description": "Accident and title history exactly as the listing states it, with the number of "
+                                                         "owners if given: for example 'No accidents reported, clean title, 2 owners' or "
+                                                         "'1 accident reported (Carfax)' or 'Salvage title'. Leave out if the listing says nothing."},
             "shape": {"type": "string", "enum": ["coupe", "convertible", "sedan", "hatch", "wagon", "suv", "truck", "van"],
                       "description": "Body type for the app's 3D picture only. Use the listing; if it does not say, use "
                                      "what is generally known about this model. Leave out if unsure."},
@@ -248,10 +254,14 @@ def read_listing(client, model: str, text: str = "", image: bytes | None = None,
         "facts with the record_listing tool.\n"
         "Rules: copy what the listing shows. Leave a field out when the listing does not show it. "
         "Never guess the transmission, body style or options. Read the whole listing, including the dealer's or "
-        "seller's description, comments and feature lists: options, packages, the VIN and the original sticker "
-        "price named anywhere in them count as shown, so record them. If the listing shows an old price "
+        "seller's description, comments and feature lists: options, packages, the VIN, the original sticker "
+        "price and any accident or title history named anywhere in them count as shown, so record them. If the listing shows an old price "
         "struck through and a new price, record the new price and mention the drop in notes. "
         "If the make or the model is not shown anywhere, record an empty string for it. "
+        "Get the trim exactly right, because it sets the price: a base car and an S, 4S, GTS or Turbo are different "
+        "trims. Look for it in the title, the description, the features and the VIN line, and prefer the most "
+        "specific one the listing states (if the title says Carrera and the description says Carrera S, it is a "
+        "Carrera S). "
         "A link's own words (for example a year, make and model in its path) count as shown. "
         "The page text may include other cars the site recommends: record only the car the page is about. "
         "If there is no listing at all, only a buyer's description of a car they want, record what they "
@@ -285,6 +295,10 @@ COMPS_TOOL = {
                         "status": {"type": "string", "enum": ["sold", "high_bid", "asking"],
                                    "description": "sold = completed sale. high_bid = auction ended, reserve not met. asking = list price."},
                         "title": {"type": "string", "description": "Year, model, trim and body as the source states them."},
+                        "body": {"type": "string", "description": "Body style as the source states it: Coupe, Cabriolet, Targa, Sedan and so on."},
+                        "trim": {"type": "string", "description": "Just the trim name as the source states it, e.g. Carrera S or M2 Competition. No body style, gearbox or packages. Empty if the source does not say."},
+                        "history": {"type": "string", "description": "Accident, damage or title history as the source states it: 'Clean Carfax', "
+                                                                    "'Accident reported', 'Salvage title', 'Paintwork on two panels'. Leave out if not stated."},
                         "miles": {"type": "integer"},
                         "price": {"type": "integer", "description": "Whole US dollars."},
                         "date": {"type": "string", "description": "Sale or listing date as the source gives it."},
@@ -382,6 +396,8 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "Trailer and Cars & Bids results, so use them to fill in prices, dates, options and VINs. The Classic "
         "Valuer shows prices in pounds: take the dollar price from another source.\n"
         "4. Auctions that ended without a sale (record as high_bid).\n"
+        f"   Then run plain searches the way a buyer would type them, e.g. \"{name} sold\" and \"{name} auction "
+        "result\", to catch sales on smaller sites.\n"
         "5. Do not spend searches on cars that are for sale now: a separate search covers those. If one turns "
         "up, record it as asking with available yes.\n"
         "Rules:\n"
@@ -393,11 +409,20 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "- Options move prices. When a source names a comp's notable options or its original sticker price, "
         "record them in options.\n"
         "- Record each comp's VIN when a source shows it. Classic.com vehicle addresses contain it.\n"
+        "- Record accident, damage or title history in history whenever a source states it (a clean Carfax, an "
+        "accident on the report, a branded title, paintwork).\n"
         "- Name the auction site as the source (Bring a Trailer, Cars & Bids) even when you found the sale "
         "through an aggregator.\n"
         "- Keep sold, high_bid and asking separate. An asking price is not a sale.\n"
         "- If a listing's page says sold or removed, record it as asking with available no, never as for sale.\n"
-        "- Match the transmission and body style. If a comp differs, say so in its note.\n"
+        "- Body style is a hard requirement: compare a coupe only with coupes, a cabriolet only with cabriolets, "
+        "a Targa only with Targas. Leave every other body style out. Record each comp's body style in body.\n"
+        "- Trim is a hard requirement too. A base car, an S, a 4S, a GTS and a Turbo are different cars at "
+        "different prices (a Carrera is not a Carrera S). Record only the buyer's exact trim. Only if you find "
+        "fewer than three exact matches may you add the nearest trims, and each of those needs a note that "
+        "starts with 'Different trim' so it is kept out of the numbers.\n"
+        "- Match the drivetrain (rear-wheel or all-wheel drive) and the transmission. If one of those differs, "
+        "say so in the comp's note.\n"
         "- Classic.com snippets show a placeholder '6865 mi' before the real mileage. Use the second figure.\n"
         "- Convert foreign prices only when the source gives a US dollar figure; otherwise skip the comp.\n"
         "- Be thorough: record every completed sale and no-sale of a matching car that the results show, up to "
@@ -407,6 +432,8 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
 
 def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
     name = car_title(car) or "this car"
+    place = str(car.get("location") or "").strip()
+    near = f" and \"{name} for sale {place}\"" if place else ""
     return (
         f"Today is {today}. Find cars like this one that a buyer could buy right now.\n\n"
         f"{_car_block(car)}\n\n"
@@ -418,6 +445,8 @@ def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
         "Porsche, Rennlist Marketplace and the PCA Mart; use the equivalents for other makes).\n"
         "3. The maker's own pre-owned finder and franchised dealers' own sites, including certified cars.\n"
         "4. Listing sites: Cars.com, Autotrader, CarGurus, duPont Registry and Autotrader Classics.\n"
+        f"5. Plain searches the way a buyer would type them, e.g. \"{name} for sale\"{near}, to catch independent "
+        "dealers and smaller sites.\n"
         "Rules:\n"
         "- Only cars that are for sale today. Skip anything whose page or snippet says sold, ended or removed, and "
         "skip results that look more than about 45 days old unless they show the car is still listed.\n"
@@ -428,10 +457,14 @@ def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
         "date when the source shows it.\n"
         "- For an auction that is still open, price is the current bid and the note must start with 'Live "
         "auction' and give the end date, for example 'Live auction, ends Nov 18. Price is the current bid.'\n"
-        "- Match the generation, trim, body style and transmission where you can. If a car differs, say so in "
-        "its note.\n"
+        "- Body style is a hard requirement: a coupe buyer sees only coupes, a cabriolet buyer only cabriolets, "
+        "a Targa buyer only Targas. Record each car's body style in body.\n"
+        "- Trim is a hard requirement too: a Carrera is not a Carrera S, a base car is not an S or a GTS. Record "
+        "only the buyer's exact trim. Only if you find fewer than three may you add the nearest trims, each with "
+        "a note that starts with 'Different trim'.\n"
+        "- Match the generation, drivetrain and transmission where you can. If a car differs, say so in its note.\n"
         "- Record miles, VIN, options and the seller (the dealer's name, or 'private seller') when shown. Name "
-        "the site as the source.\n"
+        "the site as the source. Record accident, damage or title history in history whenever it is stated.\n"
         "- Record only what the search results show. Never fill a gap from memory.\n"
         "- Be thorough: record every matching car that is for sale now that the results show, up to about 20, "
         "nearest matches first. Use every search you have. In the summary say how many came from live auctions, "
@@ -447,7 +480,8 @@ def _known_note(known) -> str:
             "again:\n" + "\n".join(f"- {link}" for link in links))
 
 
-def _research(client, model: str, prompt: str, max_searches: int, max_rounds: int, problem: str) -> dict:
+def _research(client, model: str, prompt: str, max_searches: int, max_rounds: int, problem: str,
+              car: dict | None = None) -> dict:
     """Run one web research turn that ends in a record_comps call."""
     tools = [
         {"type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": max_searches},
@@ -461,7 +495,10 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
         seen_urls |= _search_urls(response)
         recorded = _tool_input(response, "record_comps")
         if isinstance(recorded, dict):
-            comps = clean_comps(recorded.get("comps") or [])
+            rows = [row for row in (recorded.get("comps") or []) if isinstance(row, dict)]
+            for row in rows:                       # another trim is another car: it stays, labelled and switched off
+                mark_other_trim(car or {}, row)
+            comps = clean_comps(rows)
             for comp in comps:
                 comp["link_ok"] = normalize_url(comp["url"]) in seen_urls if comp["url"] else False
             return {
@@ -487,7 +524,7 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
     """Search the web for completed sales. Returns {'comps': [...], 'summary': str, 'searched': int}."""
     today = today or dt.date.today().strftime("%B %d, %Y")
     return _research(client, model, _research_prompt(car, today, max_searches) + _known_note(known), max_searches, max_rounds,
-                     "The comp research did not finish. Try again, or add comps by hand.")
+                     "The comp research did not finish. Try again, or add comps by hand.", car=car)
 
 
 def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_rounds: int = 6,
@@ -495,7 +532,7 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
     """Search the web for cars like this one that are for sale now: live auctions, classifieds and dealers."""
     today = today or dt.date.today().strftime("%B %d, %Y")
     result = _research(client, model, _for_sale_prompt(car, today, max_searches) + _known_note(known), max_searches, max_rounds,
-                       "The search for cars for sale did not finish.")
+                       "The search for cars for sale did not finish.", car=car)
     # price-guide sites mirror other sites' listings and keep them up after the car has gone
     result["comps"] = [comp for comp in result["comps"] if comp["status"] == "asking"
                        and not any(site in comp["url"].lower() for site in ("kbb.com/", "jdpower.com/"))]
@@ -541,6 +578,10 @@ def suggest_offer(client, model: str, car: dict, comps: list[dict]) -> dict:
         "more than a plain one, so do not treat them as equal. Say so in the reasons when it changes the number. "
         "If the subject car's options are not listed, make one pushback line a reminder to get the window "
         "sticker or build sheet before agreeing a price.\n"
+        "History matters. A car with an accident, damage or a branded title is worth clearly less than a clean "
+        "one, so weigh a comp's history against the subject car's and say so in a reason when it moves the number. "
+        "If the subject car's history is not stated, make one pushback line a reminder to see the Carfax or "
+        "AutoCheck before agreeing a price.\n"
         "Comps marked 'for sale now' are other cars the buyer could buy today. Asking prices sit above sale "
         "prices, so do not anchor on them, but when a comparable car is listed for less, or several sit unsold, "
         "say so in a reason or a pushback line: it is leverage.\n"
