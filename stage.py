@@ -158,11 +158,13 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             delta = f"{money(abs(comp['price'] - ask))} {'under' if comp['price'] < ask else 'over'} ask"
         url = comp.get("url") or ""
         cards.append({
-            "status": comp["status"], "group": group, "label": names[group], "price": comp["price"],
+            "status": comp["status"], "group": group, "price": comp["price"],
+            "label": "Live auction" if group == "live" and str(comp.get("note") or "").lower().startswith("live auction") else names[group],
             "priceText": money(comp["price"]), "title": comp["title"], "meta": " · ".join(meta),
             "note": comp.get("note") or "", "options": comp.get("options") or "", "url": url, "host": calc.host_of(url),
             "kind": calc.link_kind(url), "use": bool(comp["use"]), "linkOk": comp.get("link_ok"), "delta": delta,
             "img": comp.get("img") or "", "vin": comp.get("vin") or "",
+            "seen": comp.get("seen") or "", "seenOn": comp.get("seen_on") or "",
             "image": showcase.data_url(comp_photos.get(comp.get("img") or "") or comp_images.get(url)),
         })
 
@@ -217,6 +219,7 @@ HTML = r"""
   <section class="head"></section>
   <section class="zone">
     <button class="photo" type="button" hidden aria-label="Open the listing photo"><img alt=""></button>
+    <div class="liveview" hidden><iframe title="3D model of this car" allow="autoplay; fullscreen; xr-spatial-tracking" referrerpolicy="no-referrer"></iframe></div>
     <div class="progress" hidden></div>
     <div class="empty" hidden></div>
   </section>
@@ -301,6 +304,12 @@ button.opt{cursor:pointer}
 .shot.add b{font:300 26px/1 var(--sans)}
 .shot.add span{position:static;background:none;padding:0;color:var(--mute)}
 .opts{clear:both}
+/* a live 3D view of the actual car, in the model library's own viewer */
+.liveview{position:absolute;inset:4px 12px;border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.2);background:#0d0e11;box-shadow:0 18px 50px rgba(0,0,0,.5)}
+.liveview[hidden]{display:none}
+.liveview iframe{display:block;width:100%;height:100%;border:0}
+.live3d .gl{opacity:0!important;pointer-events:none}
+.live3d .zone{min-height:190px}
 .photo img{width:100%;height:100%;object-fit:cover;display:block}
 .credit{margin:7px 6px 0;text-align:center;font:400 9.5px/1.3 var(--sans);color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .credit a{color:#8e949f}
@@ -405,6 +414,7 @@ button.opt{cursor:pointer}
 .c-meta{margin-top:2px;font:400 12px/1.4 var(--sans);color:var(--mute)}
 .c-note{margin-top:3px;font:400 12px/1.4 var(--sans);color:var(--dim)}
 .c-flag{margin-top:5px;font:500 11.5px/1.35 var(--sans);color:var(--warn)}
+.c-seen{margin-top:5px;font:500 11.5px/1.35 var(--sans);color:var(--warn)}.c-seen.ok{color:#7ee8bd}
 .c-link{display:inline-flex;align-items:center;gap:6px;margin-top:8px;font:500 13px var(--sans);text-decoration:none;padding:6px 12px;border-radius:999px;background:var(--ink);color:#0b0c0e}
 .c-link small{font:400 11px var(--mono);opacity:.7}
 .scrim{position:absolute;inset:0;z-index:18;background:rgba(0,0,0,.45)}
@@ -437,9 +447,23 @@ button.opt{cursor:pointer}
 .btn[disabled]{opacity:.55}
 .optbox,.linkbox{width:100%;margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--ink);font:400 16px/1.4 var(--sans)}
 .optbox{resize:vertical}
+.optrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}.optrow .btn{margin-top:0}
+.optthumb{position:relative;width:40px;height:40px;border-radius:9px;overflow:hidden;border:1px solid rgba(255,255,255,.35)}
+.optthumb img{width:100%;height:100%;object-fit:cover;display:block}
+.optdrop{position:absolute;inset:0;background:rgba(0,0,0,.5);color:#fff;font:700 16px var(--sans)}
 .linkrow{display:flex;align-items:center;gap:8px;margin-top:10px}.linkrow .linkbox{flex:1;min-width:0;margin-top:0}.linkrow .btn{margin-top:0}
 .steps{margin:0;padding-left:20px;font:400 14px/1.5 var(--sans);color:var(--mute)}.steps li{margin-top:10px}.steps b{color:var(--ink)}
 .choice{display:flex;flex-wrap:wrap;gap:8px}.choice .btn{margin-top:0}
+.skgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+.skitem{display:block;text-align:left;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:rgba(255,255,255,.04)}
+.skitem.busy{opacity:.5}
+.skitem img,.skitem .noimg{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;background:#15171b}
+.skitem b{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;padding:8px 10px 0;font:500 12.5px/1.3 var(--sans);color:var(--ink)}
+.skitem span:last-child{display:block;padding:2px 10px 9px;font:400 11px/1.3 var(--sans);color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tiny{margin-top:8px;font:400 11.5px/1.45 var(--sans);color:var(--dim)}.tiny a{color:var(--mute)}
+.textbtn{font:400 11.5px var(--sans);color:var(--mute);text-decoration:underline}
+.skask b{color:var(--ink)}.skask a{color:#f0d9a8}
+@media (min-width:900px){.skgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .lightbox{position:absolute;inset:0;z-index:30;background:rgba(0,0,0,.9);display:grid;place-items:center;padding:16px}
 .lightbox img{max-width:100%;max-height:100%;border-radius:14px}
 .toast{position:absolute;z-index:25;left:50%;top:58px;transform:translateX(-50%);width:max-content;max-width:calc(100% - 28px);padding:11px 15px;border-radius:14px;background:rgba(20,21,25,.96);border:1px solid rgba(255,255,255,.22);font:400 13.5px/1.45 var(--sans);box-shadow:0 14px 40px rgba(0,0,0,.55)}
@@ -447,8 +471,8 @@ button.opt{cursor:pointer}
 
 /* phones: keep the whole screen in view by trimming the second lines first, then the car's room */
 /* phones: the chips stay on one line and scroll sideways, so the bar at the bottom stays in view */
-@media (max-width:899px){.opts{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin-right:-18px;padding-right:18px}.opts::-webkit-scrollbar{display:none}.opts>*{flex:none}}
-@media (max-height:840px) and (max-width:899px){.stage{grid-template-rows:auto auto minmax(118px,1fr) auto auto auto auto}.zone{min-height:118px}.sub{-webkit-line-clamp:1}.note .fine{display:none}.dock{padding-top:8px}.tabs{padding-top:8px;min-height:44px}}
+@media (max-width:899px){.head .opts{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin-right:-18px;padding-right:18px}.head .opts::-webkit-scrollbar{display:none}.head .opts>*{flex:none}}
+@media (max-height:840px) and (max-width:899px){.stage{grid-template-rows:auto auto minmax(118px,1fr) auto auto auto auto}.zone{min-height:118px}.live3d .zone{min-height:190px}.sub{-webkit-line-clamp:1}.note .fine{display:none}.dock{padding-top:8px}.tabs{padding-top:8px;min-height:44px}}
 @media (max-height:700px){.why{-webkit-line-clamp:1}}
 /* wide screens: title left, price right, the sheet becomes a side panel */
 @media (min-width:900px){
@@ -464,6 +488,7 @@ button.opt{cursor:pointer}
   .tabs{grid-column:1/-1;justify-content:center}
   .dock{grid-column:1/-1;width:min(680px,100%);justify-self:center;padding-bottom:18px}
   .shot{display:none}
+  .liveview{inset:auto;top:6px;bottom:6px;left:50%;transform:translateX(-50%);width:min(700px,54%)}
   .photo:not([hidden]){display:block;right:40px;top:50%;transform:translateY(-50%);width:clamp(200px,21vw,300px);aspect-ratio:4/3}
   .sheet{left:auto;top:0;bottom:0;width:460px;height:100%;border-radius:0;border-top:0;border-left:1px solid rgba(255,255,255,.18);transform:translateX(103%)}
   .credit .long{display:inline}
@@ -528,7 +553,7 @@ function create(root) {
   const S = { d: {}, offer: {}, busy: false, shot: "", tab: "", outbox: [], waiting: false, remember: true };
   const el = { garage: $(".garage"), head: $(".head"), verdict: $(".verdict"), rail: $(".rail"), legend: $(".legend"), track: $(".track"), nums: $(".nums"),
     tabs: $(".tabs"), dock: $(".dockbar"), pop: $(".pop"), sheet: $(".sheet"), sheetTabs: $(".sheet-tabs"), sheetBody: $(".sheet-body"),
-    scrim: $(".scrim"), light: $(".lightbox"), toast: $(".toast"), photo: $(".photo"), progress: $(".progress"), empty: $(".empty") };
+    scrim: $(".scrim"), light: $(".lightbox"), toast: $(".toast"), photo: $(".photo"), progress: $(".progress"), empty: $(".empty"), live: $(".liveview") };
 
   /* one message to Python at a time: each one makes the app run again */
   const post = (name, value) => { S.outbox.push([name, value]); pump(); };
@@ -707,8 +732,11 @@ function create(root) {
   const compCard = (k, big) => {
     const url = safeUrl(k.url);
     const flag = k.kind === "page" ? '<div class="c-flag">This link opens a results page, not this car.</div>' : (k.linkOk === false ? '<div class="c-flag">Link not confirmed. Open it before you cite it.</div>' : "");
+    const seen = k.group !== "live" ? "" : k.seen === "live" ? `<div class="c-seen ok">Checked ${esc(k.seenOn)}: the page still shows it for sale.</div>`
+      : k.seen === "unknown" ? `<div class="c-seen">Not confirmed: this site does not let apps look. Open it to check it is still for sale.</div>`
+      : '<div class="c-seen">Not checked yet. Tap Check they are still for sale.</div>';
     const text = `<div><span class="pill ${esc(k.group)}">${esc(k.label)}</span><span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
-      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.vin ? `<div>${vinChip(k.vin, "c-vin")}</div>` : ""}${flag}` +
+      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.vin ? `<div>${vinChip(k.vin, "c-vin")}</div>` : ""}${seen}${flag}` +
       (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">Open ${ARROW} <small>${esc(k.host)}</small></a>` : "") + "</div>";
     return big ? `<div class="card${k.use ? "" : " off"}">${text}${k.image ? `<img src="${esc(k.image)}" alt="" loading="lazy">` : "<span></span>"}</div>` : text;
   };
@@ -748,9 +776,14 @@ function create(root) {
       h += `<div class="lead-line">${esc(c.headline || "")}</div>${c.sub ? `<div class="lead-sub">${esc(c.sub)}</div>` : ""}`;
       if ((c.reasons || []).length) h += "<h3>The evidence</h3>" + c.reasons.map((r, i) => `<div class="ev"><span class="n">${i + 1}</span><span class="t">${esc(r.text)}</span>${(r.links || []).filter((l) => safeUrl(l.url)).map((l) => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} ${ARROW}</a>`).join("")}</div>`).join("");
       h += "<h3>Options</h3>";
-      if ((c.options || []).length) h += `<div class="opts">${c.options.map((o) => `<span class="opt">${esc(o)}</span>`).join("")}${c.msrp ? `<span class="opt">Sticker ${esc(c.msrp)}</span>` : ""}</div>`;
-      else h += '<div class="hintbox">No options were read for this car, and they can move the price by thousands. If the listing has a dealer description, paste it here. Otherwise ask the seller for the window sticker or build sheet.</div>' +
-        `<textarea class="optbox" rows="3" placeholder="Paste the dealer's description or the options list"></textarea><button type="button" class="btn readopts"${S.optBusy ? " disabled" : ""}>${S.optBusy ? "Reading the description" : "Read the options"}</button>`;
+      const have = (c.options || []).length > 0;
+      if (have) h += `<div class="opts">${c.options.map((o) => `<span class="opt">${esc(o)}</span>`).join("")}${c.msrp ? `<span class="opt">Sticker ${esc(c.msrp)}</span>` : ""}</div>`;
+      else h += '<div class="hintbox">No options were read for this car, and they can move the price by thousands. Add a picture of the window sticker, or paste the dealer\'s description.</div>';
+      if (have && !S.optOpen) h += '<button type="button" class="btn ghost optmore">Add more from a sticker or description</button>';
+      else h += `<textarea class="optbox" rows="3" placeholder="Paste the dealer's description, or paste a picture of the window sticker"></textarea>` +
+        `<input type="file" class="optfile" accept="image/*" hidden><div class="optrow"><button type="button" class="btn ghost optpic">${S.optShot ? "Change the picture" : "Add a sticker picture"}</button>` +
+        `${S.optShot ? `<span class="optthumb"><img src="${esc(S.optShot)}" alt=""><button type="button" class="optdrop" aria-label="Remove the picture">×</button></span>` : ""}` +
+        `<button type="button" class="btn readopts"${S.optBusy ? " disabled" : ""}>${S.optBusy ? "Reading" : "Read the options"}</button></div>`;
       if ((c.pushback || []).length) h += "<h3>What the seller will say</h3>" + c.pushback.map((p) => `<div class="say"><div class="q">${esc(p.say)}</div>${p.reply ? `<div class="a">${esc(p.reply)}</div>` : ""}</div>`).join("");
       if (c.summary || (c.sources || []).length) {
         h += "<h3>What the search found</h3>";
@@ -759,24 +792,44 @@ function create(root) {
       }
     } else if (S.tab === "comps") {
       h = list(["sold"], "Completed sales") + list(["high_bid"], "Auctions that ended without a sale");
-      if (!h) h = '<div class="lead-sub">No completed sales yet. Add a car with the bar at the bottom, or add comps under Edit and print.</div>';
+      if (!h) h = '<div class="lead-sub">No completed sales yet. Search for some, or add comps under Edit and print.</div>';
+      h += `<button type="button" class="btn ghost more" data-kind="sold"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sold" ? "Searching. This takes a minute or two." : "Search for more sales"}</button>`;
     } else if (S.tab === "sale") {
       h = list(["live"], "For sale now") + list(["ended"], "Listings that have sold or gone");
-      if (!nSale) h = '<div class="lead-sub">No cars for sale were found yet. The next search looks for at least three current listings. You can also add one under Edit and print.</div>' + h;
-      else h = '<div class="lead-sub">Other cars you could buy today. Asking prices sit above what cars actually sell for, so use these as alternatives and leverage, not as the price.</div>' + h;
+      const tools = (nSale ? `<button type="button" class="btn ghost verify"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "verify" ? "Opening each page" : "Check they are still for sale"}</button> ` : "") +
+        `<button type="button" class="btn ghost more" data-kind="sale"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sale" ? "Searching. This takes a minute or two." : "Search for more cars for sale"}</button>`;
+      if (!nSale) h = '<div class="lead-sub">No cars for sale found yet. The search covers live auctions, enthusiast classifieds and dealers.</div>' + `<div>${tools}</div>` + h;
+      else h = '<div class="lead-sub">Other cars you could buy today, from live auctions, enthusiast classifieds and dealers. Asking prices sit above what cars sell for, so use these as alternatives and leverage, not as the price.</div>' + `<div>${tools}</div>` + h;
     } else if (S.tab === "message") {
       h = d.message ? `<div class="msg">${esc(d.message)}</div><button type="button" class="btn copy">Copy the message</button>` : '<div class="lead-sub">No message yet. Draft one under Edit and print, in the Sheet tab.</div>';
     }
     if (S.tab === "model") { renderModelTab(); return; }
     el.sheetBody.innerHTML = h; el.sheetBody.scrollTop = 0;
-    const readopts = el.sheetBody.querySelector(".readopts");
-    if (readopts) readopts.onclick = () => {
-      const text = el.sheetBody.querySelector(".optbox").value.trim();
-      if (!S.d.connected) { toast("Connect your Anthropic API key first, in the bar at the bottom.", true); return; }
-      if (text.length < 8) { toast("Paste the dealer's description first.", true); return; }
-      S.optBusy = true; readopts.disabled = true; readopts.textContent = "Reading the description";
-      post("options", { text });
-    };
+    const again = (name, value, flag) => { if (name === "more" && !S.d.connected) { toast("Connect your Anthropic API key first, in the bar at the bottom.", true); return; } S.moreBusy = flag; const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; post(name, value); };
+    el.sheetBody.querySelectorAll(".more").forEach((b) => { b.onclick = () => again("more", { kind: b.dataset.kind, at: Date.now() }, b.dataset.kind); });
+    const verify = el.sheetBody.querySelector(".verify");
+    if (verify) verify.onclick = () => again("verify", { at: Date.now() }, "verify");
+    const optbox = el.sheetBody.querySelector(".optbox"), readopts = el.sheetBody.querySelector(".readopts");
+    const more = el.sheetBody.querySelector(".optmore");
+    if (more) more.onclick = () => { S.optOpen = true; const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; };
+    if (optbox) {
+      if (S.optText) optbox.value = S.optText;
+      optbox.oninput = () => { S.optText = optbox.value; };
+      const attach = async (blob) => { try { S.optShot = await shrink(blob); const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; } catch (e) { toast("That picture could not be read. Try a PNG or JPG.", true); } };
+      optbox.addEventListener("paste", (e) => { const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/")); if (item) { e.preventDefault(); attach(item.getAsFile()); } });
+      const pick = el.sheetBody.querySelector(".optfile");
+      el.sheetBody.querySelector(".optpic").onclick = () => pick.click();
+      pick.onchange = () => { if (pick.files[0]) attach(pick.files[0]); };
+      const drop = el.sheetBody.querySelector(".optdrop");
+      if (drop) drop.onclick = () => { S.optShot = ""; const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; };
+      readopts.onclick = () => {
+        const text = optbox.value.trim();
+        if (!S.d.connected) { toast("Connect your Anthropic API key first, in the bar at the bottom.", true); return; }
+        if (text.length < 8 && !S.optShot) { toast("Add a picture of the sticker or paste the description first.", true); return; }
+        S.optBusy = true; readopts.disabled = true; readopts.textContent = "Reading";
+        post("options", { text, image: S.optShot || "" });
+      };
+    }
     const copy = el.sheetBody.querySelector(".copy");
     if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(S.d.message); copy.textContent = "Copied"; } catch (e) { toast("Could not copy. Select the text and copy it by hand.", true); } };
   }
@@ -784,36 +837,119 @@ function create(root) {
   /* ---------- a 3D model of the actual car: the person finds and loads it; it stays on their device ---------- */
   const modelSlot = () => "glb:" + (S.d.modelKey || S.d.activeId || "");
   const isGlb = (buf) => buf.byteLength > 12 && new DataView(buf).getUint32(0, true) === 0x46546c67;
+  /* models come straight from Sketchfab's library: the person searches, taps one, and it downloads into this browser */
+  const SK_SLOT = "dealsheet.sketchfab";
+  const skApi = () => root.dataset.skfb || "https://api.sketchfab.com";
+  const skSite = () => root.dataset.skfbSite || "https://sketchfab.com";
+  let liveKey = "";
+  S.paintLive = () => paintLive();
+  async function paintLive() {
+    const d = S.d; let rec = null;
+    try { if (d.hasCar && !S.busy) rec = await store.get(modelSlot()); } catch (e) {}
+    const frame = el.live.querySelector("iframe");
+    if (rec && rec.embed) {
+      const src = `${skSite()}/models/${encodeURIComponent(rec.embed)}/embed?autostart=1&autospin=0.2&preload=1&ui_hint=0&ui_theme=dark&ui_ar=0&ui_help=0&ui_settings=0&ui_vr=0&ui_inspector=0&dnt=1`;
+      if (liveKey !== src) { liveKey = src; frame.src = src; }
+      el.live.hidden = false; root.classList.add("live3d");
+      const credit = $(".credit");
+      credit.innerHTML = `3D view: ${safeUrl(rec.url) ? `<a href="${esc(rec.url)}" target="_blank" rel="noopener">“${esc(rec.name)}”</a>` : "“" + esc(rec.name) + "”"} by ${esc(rec.author || "its artist")}, shown live from Sketchfab`;
+      credit.hidden = false;
+    } else if (liveKey || !el.live.hidden) {
+      liveKey = ""; frame.removeAttribute("src"); el.live.hidden = true; root.classList.remove("live3d");
+    }
+  }
+  const skToken = () => { try { return localStorage.getItem(SK_SLOT) || ""; } catch (e) { return ""; } };
+  const mb = (n) => (n ? (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + " MB" : "");
   async function renderModelTab() {
     let rec = null;
     try { rec = await store.get(modelSlot()); } catch (e) {}
     if (S.tab !== "model") return;
     const d = S.d, name = d.modelName || "this car";
-    const find = "https://sketchfab.com/search?features=downloadable&type=models&q=" + encodeURIComponent(d.find3d || d.title || "car");
+    const sk = S.skfb || (S.skfb = {});
+    if (sk.key !== (d.modelKey || d.activeId)) Object.assign(sk, { key: d.modelKey || d.activeId, q: d.find3d || d.title || "", items: null, busy: false, ask: "", pulling: "" });
+    const site = "https://sketchfab.com/search?features=downloadable&type=models&q=" + encodeURIComponent(sk.q || name);
     const builtIn = d.model ? "the built-in concept coupe" : "a simple shape for this body type";
-    el.sheetBody.innerHTML = `<div class="lead-line">${rec ? "Showing your 3D model" : "Showing " + builtIn}</div>` +
-      `<div class="lead-sub">${rec ? esc(rec.name) + " · " + (rec.file.byteLength / 1048576).toFixed(1) + " MB" : "Load a 3D model of the actual car and it takes the place of this one."}</div>` +
-      `<h3>Use a model of the actual car</h3>` +
-      `<ol class="steps"><li>Find one you like and download it as <b>GLB</b>.<br><a class="btn ghost" href="${esc(find)}" target="_blank" rel="noopener">Find a 3D model of ${esc(name)} ${ARROW}</a></li>` +
-      `<li>Load it here.<br><input type="file" class="glb" accept=".glb,model/gltf-binary" hidden><button type="button" class="btn pick">${rec ? "Choose a different file" : "Choose the .glb file"}</button>` +
-      `<div class="linkrow"><input type="url" class="linkbox" placeholder="or paste a link to a .glb file" inputmode="url"><button type="button" class="btn ghost loadlink">Load</button></div></li></ol>` +
-      (rec ? `<div><button type="button" class="btn ghost turn">Turn 90°</button> <button type="button" class="btn ghost drop">Remove</button></div>` +
+    const card = (m) => `<button type="button" class="skitem${sk.pulling === m.uid ? " busy" : ""}" data-uid="${esc(m.uid)}">${m.thumb ? `<img src="${esc(m.thumb)}" alt="" loading="lazy">` : '<span class="noimg"></span>'}<b>${esc(m.name)}</b><span>${esc(m.author)}${m.size ? " · " + mb(m.size) : ""}</span></button>`;
+    const live = rec && rec.embed, mine = rec && rec.file;
+    el.sheetBody.innerHTML = `<div class="lead-line">${live ? "Showing a live 3D model" : mine ? "Showing your 3D model" : "Showing " + builtIn}</div>` +
+      `<div class="lead-sub">${live ? "“" + esc(rec.name) + "” by " + esc(rec.author || "its artist") : mine ? esc(rec.name) + " · " + mb(rec.file.byteLength) : "Find a 3D model of the actual car and it takes the place of this one. No account needed."}</div>` +
+      (live ? `<div><button type="button" class="btn ghost drop">Remove</button></div>` + (rec.down ? `<div class="tiny"><button type="button" class="textbtn skdown" data-uid="${esc(rec.embed)}">Have a Sketchfab account? Download it into the studio instead</button></div>` : "") : "") +
+      (mine ? `<div><button type="button" class="btn ghost turn">Turn 90°</button> <button type="button" class="btn ghost drop">Remove</button></div>` +
         `<h3>Credit shown under the car</h3><textarea class="credit-text" rows="2" placeholder="“Model name” by Artist, CC BY 4.0, link">${esc(rec.credit || "")}</textarea><button type="button" class="btn ghost save">Save the credit</button>` : "") +
-      `<div class="hintbox">The file is kept in this browser, on this device only. It is never uploaded to the app or stored in it, and it is used for every ${esc(name)} in your garage. Use models you have the right to use, and credit the artist the way their licence asks.</div>` +
+      `<h3>${rec ? "Pick a different model" : "Find a model of the actual car"}</h3>` +
+      `<form class="linkrow skform"><input type="search" class="linkbox skq" value="${esc(sk.q)}" placeholder="Make and model" enterkeyhint="search"><button type="submit" class="btn sksearch"${sk.busy ? " disabled" : ""}>${sk.busy ? "Searching" : "Find models"}</button></form>` +
+      (sk.ask ? `<div class="hintbox skask"><b>One-time step.</b> Downloads need a free Sketchfab account. Paste your API token and the model downloads straight away. <a href="https://sketchfab.com/settings/password" target="_blank" rel="noopener">Get your token ${ARROW}</a>` +
+        `<div class="linkrow"><input type="password" class="linkbox sktoken" placeholder="Sketchfab API token" autocomplete="off"><button type="button" class="btn sksave">Download</button></div><div class="tiny">Kept in this browser only and sent only to Sketchfab.</div></div>` : "") +
+      (sk.items ? (sk.items.length ? `<div class="skgrid">${sk.items.map(card).join("")}</div><div class="tiny">Tap a model to show it on the main screen. It plays in Sketchfab's own viewer, with the artist's name on it, and nothing is downloaded.</div>`
+        : '<div class="lead-sub">No models came back. Try fewer words, for example just the make and model.</div>') : "") +
+      `<h3>Or load a file you already have</h3><input type="file" class="glb" accept=".glb,model/gltf-binary" hidden><button type="button" class="btn ghost pick">Choose a .glb file</button>` +
+      `<div class="linkrow"><input type="url" class="linkbox linkurl" placeholder="or paste a link to a .glb file" inputmode="url"><button type="button" class="btn ghost loadlink">Load</button></div>` +
+      `<div class="hintbox">Your choice is kept in this browser, on this device only. Nothing is uploaded to the app or stored in it, and it is used for every ${esc(name)} in your garage. Use models you have the right to use, and keep the artist's credit.</div>` +
+      `<div class="tiny"><a href="${esc(site)}" target="_blank" rel="noopener">Open the full library ${ARROW}</a>${skToken() ? ' · <button type="button" class="textbtn skforget">Forget my Sketchfab token</button>' : ""}</div>` +
       (d.canDetail ? `<h3>Built-in car</h3><div class="choice"><button type="button" class="btn ghost${d.detailed ? "" : " on"}" data-detail="0">Simple shape</button><button type="button" class="btn ghost${d.detailed ? " on" : ""}" data-detail="1">Concept coupe</button></div>` : "");
-    el.sheetBody.scrollTop = 0;
-    const file = el.sheetBody.querySelector(".glb"), refresh = () => { renderModelTab(); if (S.scene) S.scene.reload(S.d); };
-    const keep = async (buf, label) => {
-      if (buf.byteLength > 80 * 1048576) { toast("That file is over 80 MB, which is too heavy for a phone. Pick a smaller one.", true); return; }
-      if (!isGlb(buf)) { toast("That is not a GLB file. When you download the model, pick the GLB format.", true); return; }
-      try { await store.set(modelSlot(), { name: label, file: buf, credit: rec ? rec.credit : "", turn: 0 }); refresh(); toast("Loaded. Add the artist's credit so it shows under the car."); }
-      catch (e) { toast("That file could not be saved on this device.", true); }
+    const file = el.sheetBody.querySelector(".glb"), refresh = () => { renderModelTab(); paintLive(); if (S.scene) S.scene.reload(S.d); };
+    const keep = async (buf, label, credit) => {
+      if (buf.byteLength > 80 * 1048576) { toast("That model is over 80 MB, which is too heavy for a phone. Pick a smaller one.", true); return false; }
+      if (!isGlb(buf)) { toast("That is not a GLB file. Pick the GLB format when you download a model.", true); return false; }
+      try { await store.set(modelSlot(), { name: label, file: buf, credit: credit || (rec && rec.credit) || "", turn: 0 }); refresh(); toast(credit ? "Loaded. The artist's credit is under the car." : "Loaded. Add the artist's credit so it shows under the car."); return true; }
+      catch (e) { toast("That model could not be saved on this device.", true); return false; }
     };
-    el.sheetBody.querySelector(".pick").onclick = () => file.click();
-    file.onchange = async () => { const f = file.files[0]; if (f) keep(await f.arrayBuffer(), f.name); };
     const on = (q, fn) => { const b = el.sheetBody.querySelector(q); if (b) b.onclick = fn; };
+    /* search the library */
+    el.sheetBody.querySelector(".skform").onsubmit = async (e) => {
+      e.preventDefault();
+      sk.q = el.sheetBody.querySelector(".skq").value.trim(); if (!sk.q || sk.busy) return;
+      sk.busy = true; sk.items = null; renderModelTab();
+      try {
+        const res = await fetch(`${skApi()}/v3/search?type=models&count=12&q=${encodeURIComponent(sk.q)}`);
+        if (!res.ok) throw new Error("status " + res.status);
+        const data = await res.json();
+        sk.items = (data.results || []).filter((m) => m && m.uid).map((m) => {
+          const imgs = (((m.thumbnails || {}).images) || []).slice().sort((x, y) => (x.width || 0) - (y.width || 0));
+          const im = imgs.find((i) => (i.width || 0) >= 240) || imgs[imgs.length - 1] || {};
+          return { uid: String(m.uid), name: m.name || "Model", author: ((m.user || {}).displayName || (m.user || {}).username || "unknown artist"), thumb: safeUrl(im.url) || "", size: 0, down: !!m.isDownloadable, url: safeUrl(m.viewerUrl) || "" };
+        });
+      } catch (err) { sk.items = null; toast("The model library could not be reached. Check your connection and try again.", true); }
+      sk.busy = false; renderModelTab();
+    };
+    /* download the one that was tapped */
+    const pull = async (uid) => {
+      const token = skToken();
+      if (!token) { sk.ask = uid; renderModelTab(); el.sheetBody.scrollTop = 0; return; }
+      if (sk.pulling) return;
+      sk.pulling = uid; sk.ask = ""; renderModelTab(); toast("Downloading the model", false, 60000);
+      try {
+        let res = await fetch(`${skApi()}/v3/models/${encodeURIComponent(uid)}/download`, { headers: { Authorization: "Token " + token } });
+        if (res.status === 401) res = await fetch(`${skApi()}/v3/models/${encodeURIComponent(uid)}/download`, { headers: { Authorization: "Bearer " + token } });
+        if (res.status === 401 || res.status === 403) { try { localStorage.removeItem(SK_SLOT); } catch (e) {} sk.pulling = ""; sk.ask = uid; renderModelTab(); toast("Sketchfab did not accept that token, or this model is not open for download. Paste the token again or pick another model.", true); return; }
+        if (!res.ok) throw new Error("status " + res.status);
+        const links = await res.json(), glb = links.glb;
+        if (!glb || !glb.url) { sk.pulling = ""; renderModelTab(); toast("This model has no GLB download. Pick another one.", true); return; }
+        if ((glb.size || 0) > 80 * 1048576) { sk.pulling = ""; renderModelTab(); toast("That model is " + mb(glb.size) + ", too heavy for a phone. Pick a smaller one.", true); return; }
+        const buf = await (await fetch(glb.url)).arrayBuffer();
+        let info = {};
+        try { info = await (await fetch(`${skApi()}/v3/models/${encodeURIComponent(uid)}`)).json(); } catch (e) {}
+        const hit = (sk.items || []).find((m) => m.uid === uid) || {};
+        const title = info.name || hit.name || "3D model", by = ((info.user || {}).displayName || (info.user || {}).username || hit.author || "unknown artist");
+        const lic = ((info.license || {}).label || "licence on its page");
+        sk.pulling = "";
+        await keep(buf, title, `“${title}” by ${by}, ${lic}, ${info.viewerUrl || "https://sketchfab.com/3d-models/" + uid}`);
+      } catch (err) { sk.pulling = ""; renderModelTab(); toast("The download did not finish. Try again, or pick another model.", true); }
+    };
+    /* tap a result: it plays on the main screen in the library's own viewer */
+    el.sheetBody.querySelectorAll(".skitem").forEach((b) => { b.onclick = async () => {
+      const m = (sk.items || []).find((x) => x.uid === b.dataset.uid); if (!m) return;
+      try { await store.set(modelSlot(), { embed: m.uid, name: m.name, author: m.author, url: m.url || skSite() + "/3d-models/" + m.uid, down: m.down }); refresh(); closeSheet(); toast("Showing “" + m.name + "” live. Drag it to look around."); }
+      catch (e) { toast("That choice could not be saved on this device.", true); }
+    }; });
+    on(".skdown", () => pull(el.sheetBody.querySelector(".skdown").dataset.uid));
+    on(".sksave", () => { const v = el.sheetBody.querySelector(".sktoken").value.trim(); if (v.length < 8) { toast("Paste your Sketchfab API token first.", true); return; } try { localStorage.setItem(SK_SLOT, v); } catch (e) {} const uid = sk.ask; sk.ask = ""; pull(uid); });
+    on(".skforget", () => { try { localStorage.removeItem(SK_SLOT); } catch (e) {} renderModelTab(); toast("Sketchfab token forgotten on this device."); });
+    /* a file or a link the person already has */
+    on(".pick", () => file.click());
+    file.onchange = async () => { const f = file.files[0]; if (f) keep(await f.arrayBuffer(), f.name); };
     on(".loadlink", async () => {
-      const url = el.sheetBody.querySelector(".linkbox").value.trim();
+      const url = el.sheetBody.querySelector(".linkurl").value.trim();
       if (!/^https:\/\//i.test(url)) { toast("Paste a link that starts with https://", true); return; }
       toast("Loading the model");
       try {
@@ -880,16 +1016,18 @@ function create(root) {
   const focusBar = () => { const f = el.dock.querySelector("textarea, input[type=password]"); if (f) f.focus(); };
   function setShot(url) { S.shot = url; const t = el.dock.querySelector(".thumb"); if (t) { t.hidden = !url; if (url) t.querySelector("img").src = url; } }
   /* shrink a picture in the browser before it is sent: long screenshots keep their length */
+  /* a picture, made small enough to send: long screenshots keep their length so the text stays readable */
+  async function shrink(blob) {
+    const bmp = await createImageBitmap(blob);
+    let w = bmp.width, h = bmp.height, k = 1;
+    if (h > 2.2 * w) k = Math.min(1, 1080 / w, 15000 / h); else k = Math.min(1, 2200 / Math.max(w, h));
+    const c = document.createElement("canvas"); c.width = Math.round(w * k); c.height = Math.round(h * k);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.86);
+  }
   async function takeImage(blob) {
     if (!blob) return;
-    try {
-      const bmp = await createImageBitmap(blob);
-      let w = bmp.width, h = bmp.height, k = 1;
-      if (h > 2.2 * w) k = Math.min(1, 1080 / w, 15000 / h); else k = Math.min(1, 2200 / Math.max(w, h));
-      const c = document.createElement("canvas"); c.width = Math.round(w * k); c.height = Math.round(h * k);
-      c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
-      setShot(c.toDataURL("image/jpeg", 0.86));
-    } catch (e) { toast("That picture could not be read. Try a PNG or JPG screenshot.", true); }
+    try { setShot(await shrink(blob)); } catch (e) { toast("That picture could not be read. Try a PNG or JPG screenshot.", true); }
   }
   root.addEventListener("dragover", (e) => { e.preventDefault(); });
   root.addEventListener("drop", (e) => { e.preventDefault(); const f = [...(e.dataTransfer?.files || [])].find((x) => x.type.startsWith("image/")); if (f && S.d.connected) takeImage(f); });
@@ -996,7 +1134,8 @@ function create(root) {
   let noticeKey = "";
   S.update = (d) => {
     S.d = d; S.waiting = false; clearTimeout(S.waitTimer);
-    if (S.optBusy && d.seq !== S.optSeq) S.optBusy = false;
+    if (S.moreBusy && d.seq !== S.optSeq) { S.moreBusy = ""; if (S.tab === "comps" || S.tab === "sale") { const y = el.sheetBody.scrollTop; setTimeout(() => { renderSheet(); el.sheetBody.scrollTop = y; }, 0); } }
+    if (S.optBusy && d.seq !== S.optSeq) { S.optBusy = false; if (!d.error) { S.optShot = ""; S.optText = ""; S.optOpen = false; } if (S.tab === "case") renderSheet(); }
     S.optSeq = d.seq;
     if (S.busy && d.seq !== S.sentSeq && !d.busy) {
       S.busy = false;
@@ -1008,7 +1147,7 @@ function create(root) {
     const notes = (d.notices || []).join(" ");
     if (notes && notes !== noticeKey && !d.error) toast(notes, false, 12000);
     noticeKey = notes;
-    paintAll(); keyAndGarage(d); pump();
+    paintAll(); paintLive(); keyAndGarage(d); pump();
   };
 
   /* ---------- 3D ---------- */
@@ -1302,6 +1441,7 @@ function makeScene(THREE, addons, root, S) {
     if (!addons) return;
     store.get("glb:" + (d.modelKey || d.activeId || "")).catch(() => null).then((rec) => {
       if (carKey !== key) return;
+      if (rec && rec.embed) { if (S.paintLive) S.paintLive(); return; }   /* shown live by the page, in the library's viewer */
       if (rec && rec.file) loadOwn(rec, key); else if (d.model && d.model.url) loadModel(d, key);
     });
   }
@@ -1338,7 +1478,7 @@ function makeScene(THREE, addons, root, S) {
     if (!root.isConnected) { alive = false; ro.disconnect(); io.disconnect(); renderer.dispose(); if (root.__st) root.__st.scene = null; return; }
     requestAnimationFrame(frame);
     const dt = Math.min((now - last) / 1000, 0.05); last = now;
-    if (!visible || document.hidden) return;
+    if (!visible || document.hidden || root.classList.contains("live3d")) return;   /* nothing to draw while a live model covers the car */
     t += dt;
     if (!down) { angle += vel; vel *= 0.93; if (!calm && now - held > 3500 && !busy) angle += dt * 0.09; }
     const slide = Math.max(0, 1 - (now - slideFrom) / 1250), ease = slide * slide * slide;

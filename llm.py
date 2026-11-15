@@ -382,9 +382,8 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "Trailer and Cars & Bids results, so use them to fill in prices, dates, options and VINs. The Classic "
         "Valuer shows prices in pounds: take the dollar price from another source.\n"
         "4. Auctions that ended without a sale (record as high_bid).\n"
-        "5. Cars for sale right now: at least three current listings of close matches (dealer sites, the maker's "
-        "pre-owned finder, Cars.com, Autotrader, CarGurus), each with its own page, price, miles and VIN. "
-        "Record them as asking with available yes. The buyer wants to see what else is on the market today.\n"
+        "5. Do not spend searches on cars that are for sale now: a separate search covers those. If one turns "
+        "up, record it as asking with available yes.\n"
         "Rules:\n"
         "- Record only prices, dates and miles that appear in the search results. Never estimate or "
         "fill a gap from memory.\n"
@@ -401,20 +400,60 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "- Match the transmission and body style. If a comp differs, say so in its note.\n"
         "- Classic.com snippets show a placeholder '6865 mi' before the real mileage. Use the second figure.\n"
         "- Convert foreign prices only when the source gives a US dollar figure; otherwise skip the comp.\n"
-        "- Aim for 8 to 14 comps: completed sales first, then three to five cars for sale now. Fewer good ones "
-        "beat many weak ones."
+        "- Be thorough: record every completed sale and no-sale of a matching car that the results show, up to "
+        "about 25, not just a handful. Use every search you have. Leave out only cars that clearly do not match."
     )
 
 
-def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rounds: int = 6,
-                   today: str | None = None) -> dict:
-    """Search the web for comps. Returns {'comps': [...], 'summary': str, 'searched': int}."""
-    today = today or dt.date.today().strftime("%B %d, %Y")
+def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
+    name = car_title(car) or "this car"
+    return (
+        f"Today is {today}. Find cars like this one that a buyer could buy right now.\n\n"
+        f"{_car_block(car)}\n\n"
+        f"Search the web (you have up to {max_searches} searches), then call record_comps once.\n"
+        "Where to look, in this order:\n"
+        f"1. Auctions that are open now: Bring a Trailer, Cars & Bids and PCARMARKET, e.g. \"bringatrailer.com "
+        f"{name} live auction\". Also Hagerty Marketplace and Collecting Cars.\n"
+        "2. Enthusiast classifieds for this make: the main owners' forum marketplace and club classifieds (for a "
+        "Porsche, Rennlist Marketplace and the PCA Mart; use the equivalents for other makes).\n"
+        "3. The maker's own pre-owned finder and franchised dealers' own sites, including certified cars.\n"
+        "4. Listing sites: Cars.com, Autotrader, CarGurus, duPont Registry and Autotrader Classics.\n"
+        "Rules:\n"
+        "- Only cars that are for sale today. Skip anything whose page or snippet says sold, ended or removed, and "
+        "skip results that look more than about 45 days old unless they show the car is still listed.\n"
+        "- Do not use price guides or summary pages (Kelley Blue Book, Edmunds, J.D. Power), mirror copies of a "
+        "listing on such sites, or any results page. Each car needs the exact URL of its own page: an auction "
+        "lot, a classified ad or a dealer's vehicle page.\n"
+        "- Record each car as status asking with available yes. Put the date it was listed or last updated in "
+        "date when the source shows it.\n"
+        "- For an auction that is still open, price is the current bid and the note must start with 'Live "
+        "auction' and give the end date, for example 'Live auction, ends Nov 18. Price is the current bid.'\n"
+        "- Match the generation, trim, body style and transmission where you can. If a car differs, say so in "
+        "its note.\n"
+        "- Record miles, VIN, options and the seller (the dealer's name, or 'private seller') when shown. Name "
+        "the site as the source.\n"
+        "- Record only what the search results show. Never fill a gap from memory.\n"
+        "- Be thorough: record every matching car that is for sale now that the results show, up to about 20, "
+        "nearest matches first. Use every search you have. In the summary say how many came from live auctions, "
+        "enthusiast classifieds and dealers, and name any of those where you found nothing."
+    )
+
+
+def _known_note(known) -> str:
+    links = [str(link) for link in (known or []) if link][:40]
+    if not links:
+        return ""
+    return ("\n\nThe buyer already has the cars on these pages. Search for different ones and do not record these "
+            "again:\n" + "\n".join(f"- {link}" for link in links))
+
+
+def _research(client, model: str, prompt: str, max_searches: int, max_rounds: int, problem: str) -> dict:
+    """Run one web research turn that ends in a record_comps call."""
     tools = [
         {"type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": max_searches},
         COMPS_TOOL,
     ]
-    messages = [{"role": "user", "content": _research_prompt(car, today, max_searches)}]
+    messages = [{"role": "user", "content": prompt}]
     seen_urls: set[str] = set()
     for _ in range(max_rounds):
         response = _create(client, effort="medium", model=model, max_tokens=16000, tools=tools,
@@ -440,7 +479,29 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
             "content": "Now call the record_comps tool with the comps from your search results. "
                        "Use only URLs that appeared in those results. Do not reply in text.",
         })
-    raise LLMError("The comp research did not finish. Try again, or add comps by hand.")
+    raise LLMError(problem)
+
+
+def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rounds: int = 6,
+                   today: str | None = None, known=None) -> dict:
+    """Search the web for completed sales. Returns {'comps': [...], 'summary': str, 'searched': int}."""
+    today = today or dt.date.today().strftime("%B %d, %Y")
+    return _research(client, model, _research_prompt(car, today, max_searches) + _known_note(known), max_searches, max_rounds,
+                     "The comp research did not finish. Try again, or add comps by hand.")
+
+
+def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_rounds: int = 6,
+                      today: str | None = None, known=None) -> dict:
+    """Search the web for cars like this one that are for sale now: live auctions, classifieds and dealers."""
+    today = today or dt.date.today().strftime("%B %d, %Y")
+    result = _research(client, model, _for_sale_prompt(car, today, max_searches) + _known_note(known), max_searches, max_rounds,
+                       "The search for cars for sale did not finish.")
+    # price-guide sites mirror other sites' listings and keep them up after the car has gone
+    result["comps"] = [comp for comp in result["comps"] if comp["status"] == "asking"
+                       and not any(site in comp["url"].lower() for site in ("kbb.com/", "jdpower.com/"))]
+    for comp in result["comps"]:
+        comp["available"] = comp.get("available") or "yes"
+    return result
 
 
 # ---------- 3. suggest an offer ----------

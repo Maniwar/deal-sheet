@@ -80,7 +80,10 @@ def clean_comp(row: dict) -> dict | None:
     if status not in STATUSES:
         status = "asking"
     use = row.get("use")
-    use = True if _missing(use) else bool(use)
+    if _missing(use):                # a live auction's current bid is not a price, so it starts switched off
+        use = not (status == "asking" and text("note").lower().startswith("live auction"))
+    else:
+        use = bool(use)
     link_ok = row.get("link_ok")
     if _missing(link_ok):
         link_ok = None
@@ -99,6 +102,8 @@ def clean_comp(row: dict) -> dict | None:
         "options": text("options"),
         "vin": clean_vin(text("vin")) or find_vin(text("url")),
         "available": _yes_no(text("available")) if status == "asking" else "",
+        "seen": text("seen") if text("seen") in ("live", "gone", "unknown") and status == "asking" else "",
+        "seen_on": text("seen_on") if status == "asking" else "",
     }
 
 

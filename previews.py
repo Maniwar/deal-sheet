@@ -247,6 +247,59 @@ def read_page(url: str, max_width: int = 1100) -> dict:
         session.close()
 
 
+# Words a listing page uses once the car has sold or the ad has been taken down.
+_GONE_WORDS = ("has been sold", "vehicle is sold", "this car is sold", "no longer available", "no longer for sale",
+               "no longer listed", "listing has ended", "listing has expired", "listing expired", "listing not found",
+               "vehicle not found", "auction ended", "bidding has ended", "sold for $", "this listing is unavailable",
+               "this one is gone", "this car is gone", "this vehicle is gone", "vehicle has been removed",
+               "listing has been removed", "ad has expired", "this ad is no longer")
+
+
+def listing_state(url: str) -> str:
+    """Whether a for-sale page still shows the car: 'live', 'gone' (sold or removed) or 'unknown'.
+
+    'unknown' covers every case where the site would not let the app read the page. Nothing here
+    tries to get past a refusal.
+    """
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,*/*;q=0.5"})
+    try:
+        if not is_safe_url(url) or not _allowed(url, session):
+            return "unknown"
+        status, _, content_type, body = _get(url, PAGE_LIMIT, session)
+        if status in (404, 410):
+            return "gone"
+        if status != 200 or content_type.lower().startswith("image/"):
+            return "unknown"
+        page = body.decode("utf-8", "replace")
+        text = re.sub(r"\s+", " ", html.unescape(_TAG.sub(" ", _HIDDEN.sub(" ", page)))).lower()[:80000]
+        return "gone" if any(word in text for word in _GONE_WORDS) else "live"
+    except Exception:
+        return "unknown"
+    finally:
+        session.close()
+
+
+def listing_states(urls: list[str], budget: float = 16.0) -> dict[str, str]:
+    """`listing_state` for several links at once, within a time budget. Links that run out of time are 'unknown'."""
+    unique = list(dict.fromkeys(url for url in urls if url))[:16]
+    states = {url: "unknown" for url in unique}
+    if not unique:
+        return states
+    pool = ThreadPoolExecutor(max_workers=6)
+    try:
+        futures = {pool.submit(listing_state, url): url for url in unique}
+        done, _ = wait(futures, timeout=budget)
+        for future in done:
+            try:
+                states[futures[future]] = future.result()
+            except Exception:
+                pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return states
+
+
 def _cached(url: str, max_width: int) -> tuple[bool, bytes | None]:
     with _lock:
         entry = _cache.get((url, max_width))

@@ -55,7 +55,7 @@ CAR_FIELDS = ["year", "make", "model", "trim", "body", "transmission", "drivetra
 NUMBER_FIELDS = {"year", "miles", "price", "msrp"}
 SELLER_TYPES = ["", "dealer", "private", "auction"]
 COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img", "options", "vin",
-                "available"]
+                "available", "seen", "seen_on"]
 DOT = " \u00b7 "
 QR_SIZES = {"Large (1.1 in)": 82, "Extra large (1.5 in)": 108}
 EMPTY_DEAL = {"car": {}, "comps": [], "offer": {}, "summary": "", "message": "", "sample": False}
@@ -248,6 +248,55 @@ def run_garage_actions(actions: list[dict]) -> None:
 
 # ---------------------------------------------------------------- one step: link or screenshot to a full deal
 
+def check_listings(comps: list[dict]) -> dict:
+    """Open each for-sale page, where its site allows, and record whether it still shows the car.
+
+    Sets `seen` (live, gone or unknown) and `seen_on` on each comp, and moves a car whose page says
+    sold or removed out of the for-sale list. Returns how many were live, gone and unknown.
+    """
+    listed = [comp for comp in comps if calc.comp_group(comp) == "live" and comp["url"]]
+    states = previews.listing_states([comp["url"] for comp in listed])
+    today = dt.date.today().strftime("%b %-d")
+    count = {"live": 0, "gone": 0, "unknown": 0}
+    for comp in listed:
+        state = states.get(comp["url"], "unknown")
+        comp["seen"], comp["seen_on"] = state, today
+        count[state] += 1
+        if state == "gone":
+            comp["available"] = "no"
+            if "sold or gone" not in comp["note"]:
+                comp["note"] = ("The page now says it has sold or gone. " + comp["note"]).strip()
+    return count
+
+
+def checked_note(count: dict) -> str:
+    total = sum(count.values())
+    if not total:
+        return ""
+    bits = []
+    if count["live"]:
+        bits.append(f"{count['live']} still listed")
+    if count["gone"]:
+        bits.append(f"{count['gone']} already sold or gone")
+    if count["unknown"]:
+        bits.append(f"{count['unknown']} on sites that do not let apps look, so open those to confirm")
+    return f"The app opened {total} for-sale page{'s' if total != 1 else ''}: " + ", ".join(bits) + "."
+
+
+def research_market(client, model: str, car: dict, max_searches: int) -> dict:
+    """Completed sales, then cars for sale now, then a check that each for-sale page still shows its car."""
+    result = llm.research_comps(client, model, car, max_searches=max_searches)
+    comps, summary = list(result["comps"]), result["summary"]
+    try:
+        sale = llm.research_for_sale(client, model, car, max_searches=min(max_searches, 8))
+    except llm.LLMError:
+        sale = {"comps": [], "summary": "The search for cars for sale now did not finish. Use Search for more in the For sale now tab to retry it."}
+    seen = {calc.normalize_url(comp["url"]) for comp in comps if comp["url"]}
+    comps += [comp for comp in sale["comps"] if not comp["url"] or calc.normalize_url(comp["url"]) not in seen]
+    note = checked_note(check_listings(comps))
+    return {"comps": comps, "summary": " ".join(part for part in (summary, sale["summary"], note) if part).strip()}
+
+
 def tidy_car(found: dict) -> dict:
     """What Claude read from a listing, as the app's car fields."""
     car = {}
@@ -319,7 +368,7 @@ def build_deal(client, model: str, link: str, shot: bytes | None, max_searches: 
 
     say(2)
     try:
-        result = llm.research_comps(client, model, car, max_searches=max_searches)
+        result = research_market(client, model, car, max_searches)
     except llm.LLMError as exc:
         notes.append(f"The comps search stopped: {exc}")
         return deal, notes
@@ -362,7 +411,7 @@ def init_state() -> None:
     ss["apr"] = 5.39
     ss["down"] = 25000.0
     ss["months"] = 72
-    ss["max_searches"] = 8
+    ss["max_searches"] = 12
     ss["qr_label"] = next(iter(QR_SIZES))
     ss["api_key"] = ""          # the visitor's own key: memory only, never saved
     ss["auto_photo"] = None     # car photo cut out of a listing screenshot
@@ -492,7 +541,7 @@ def current_offer() -> dict:
 
 # The settings the browser keeps between visits, with the limits each one must stay inside.
 PREF_NUMBERS = {"tax_rate": (float, 0.0, 15.0), "fees": (float, 0.0, 1e7), "apr": (float, 0.0, 30.0),
-                "down": (float, 0.0, 1e8), "months": (int, 0, 120), "max_searches": (int, 3, 15)}
+                "down": (float, 0.0, 1e8), "months": (int, 0, 120), "max_searches": (int, 3, 20)}
 PREF_SWITCHES = ("want_photos", "detailed_car")
 
 
@@ -538,7 +587,7 @@ def comps_frame(comps: list[dict]) -> pd.DataFrame:
     frame["use"] = frame["use"].astype("boolean").fillna(True).astype(bool)
     for column in ("price", "miles"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Int64")
-    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available"):
+    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available", "seen", "seen_on"):
         frame[column] = frame[column].astype("string").fillna("")
     return frame
 
@@ -625,6 +674,10 @@ def stage_event(name: str) -> None:
         ss["_prefs_restore"] = value
     elif name == "options":
         ss["_options_request"] = value
+    elif name == "more":
+        ss["_more_request"] = value
+    elif name == "verify":
+        ss["_verify_request"] = value
     elif name == "photo":
         ss["_photo_request"] = value
     elif name == "detail":
@@ -656,16 +709,54 @@ def handle_stage_requests(progress_slot) -> None:
             ss["_pending"] = pending
         else:
             ss["stage_error"] = "That picture could not be read. Try another one."
+    for slot in ("_more_request", "_verify_request"):
+        request = ss.get(slot)
+        if not request:
+            continue
+        entry = ss["garage"].get(ss["active"]) or {}             # the car on screen, as last drawn
+        the_car, have = entry.get("car") or {}, calc.clean_comps(entry.get("comps") or [])
+        if slot == "_verify_request":                            # look at each for-sale page again
+            note = checked_note(check_listings(have))
+            ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
+            ss["notices"] = [note or "There are no for-sale listings to check yet."]
+        elif not ss["api_key"]:
+            ss["stage_error"] = "Connect your Anthropic API key first."
+        else:                                                    # search again, for cars not already found
+            wants_sale = str(request.get("kind") or "") == "sale"
+            known = [comp["url"] for comp in have if comp["url"]]
+            searches, the_client, the_model = int(ss["max_searches"]), llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]]
+            try:
+                if wants_sale:
+                    found = llm.research_for_sale(the_client, the_model, the_car, max_searches=min(searches, 8), known=known)
+                else:
+                    found = llm.research_comps(the_client, the_model, the_car, max_searches=searches, known=known)
+            except llm.LLMError as exc:
+                ss["stage_error"] = str(exc)
+            else:
+                seen = {calc.normalize_url(url) for url in known}
+                fresh = [comp for comp in found["comps"] if not comp["url"] or calc.normalize_url(comp["url"]) not in seen]
+                note = checked_note(check_listings(fresh)) if wants_sale else ""
+                ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have}
+                what = "car for sale" if wants_sale else "sale"
+                ss["notices"] = [(f"Found {len(fresh)} more {what}{'s' if len(fresh) != 1 and not wants_sale else ''}. {note}".strip()
+                                  if fresh else "The search found nothing new this time.")]
+        ss.pop(slot, None)
+        ss["build_seq"] += 1
     request = ss.get("_options_request")
-    if request:                                    # a dealer description pasted on the main screen
+    if request:                                    # a window sticker picture or a dealer description, added on the main screen
         text = str(request.get("text") or "").strip()
+        picture = as_bytes(request.get("image"))
         if not ss["api_key"]:
             ss["stage_error"] = "Connect your Anthropic API key first."
-        elif len(text) < 8:
-            ss["stage_error"] = "Paste the dealer's description first."
+        elif len(text) < 8 and not picture:
+            ss["stage_error"] = "Add a picture of the sticker or paste the description first."
         else:
             try:
-                found = tidy_car(llm.read_listing(llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]], text=text))
+                shots = images_for_api(picture, "image/jpeg") if picture else []
+                found = tidy_car(llm.read_listing(
+                    llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]], images=shots,
+                    text="This is the car's window sticker or the dealer's description of it, not a full listing. "
+                         "Record every option and package it names, the original sticker price and the VIN.\n\n" + text))
             except llm.LLMError as exc:
                 ss["stage_error"] = str(exc)
             else:
@@ -679,9 +770,9 @@ def handle_stage_requests(progress_slot) -> None:
                     pending = ss.get("_pending") or {}
                     pending["car_extra"] = extra
                     ss["_pending"] = pending
-                    ss["notices"] = ["Added the options from the description."]
+                    ss["notices"] = ["Added the options" + (" and the sticker price." if extra.get("msrp") else ".")]
                 else:
-                    ss["stage_error"] = "No options were named in that text."
+                    ss["stage_error"] = "No options could be read from that. Try a sharper picture or paste the text."
         ss.pop("_options_request", None)
         ss["build_seq"] += 1
     request = ss.get("_key_try")
@@ -750,7 +841,7 @@ with st.sidebar:
     else:
         st.caption("Not connected. Paste your Anthropic API key in the bar at the bottom of the main screen.")
     st.selectbox("Claude model", list(llm.MODELS), key="model_label")
-    st.slider("Web searches per research run", 3, 15, key="max_searches",
+    st.slider("Web searches per research run", 3, 20, key="max_searches",
               help="Each search is billed by the API. More searches find more comps.")
 
     st.markdown("### Money")
@@ -979,9 +1070,9 @@ with tab_comps:
         can_research = client is not None and bool(car.get("model"))
         if left.button("Research comps on the web", type="primary", width="stretch", disabled=not can_research,
                        help=None if can_research else (needs_key if client is None else "Fill in the car first.")):
-            with st.spinner("Searching auction results and listings. This takes a minute or two."):
+            with st.spinner("Searching auction results, then cars for sale now. This takes two or three minutes."):
                 try:
-                    result = llm.research_comps(client, model, car, max_searches=int(ss["max_searches"]))
+                    result = research_market(client, model, car, int(ss["max_searches"]))
                 except llm.LLMError as exc:
                     st.error(str(exc))
                 else:
@@ -1138,7 +1229,7 @@ flags = {
     "message": ss["message_text"], "summary": ss["research_summary"],
     "prefs": current_prefs(), "prefs_ask": not ss["prefs_asked"],
 }
-stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail")
+stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail", "more", "verify")
 with stage_box:
     STAGE(
         data=json.dumps(stage.build_payload(

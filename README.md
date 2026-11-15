@@ -20,7 +20,7 @@ what that car has been selling for and gives you a typical sale price, the comps
 - **The car.** A 3D car in the listing's paint color that you can drag to spin: a simple shape of the
   right body type (coupe, convertible, sedan, hatchback, wagon, SUV, pickup or van), or, for coupes,
   a detailed concept coupe if you pick it (see Credits). Neither is a model of any maker's design.
-  To see the actual car in 3D, load a model of it yourself in the **3D model** tab (see below).
+  To see the actual car in 3D, pick a model of it in the **3D model** tab (see below).
 - **The listing photo.** The listing's own picture sits beside the title on a phone and beside the
   car on a wide screen. Tap it to see it large. If the site would not give the app a picture, tap
   **Add photo**.
@@ -35,12 +35,16 @@ what that car has been selling for and gives you a typical sale price, the comps
   monthly payment follow. Tap a dot to see that car.
 - **Options.** The car's options and original sticker price are read from the listing, including
   the dealer's description, and shown under the title; comps carry theirs too, and the offer
-  reasoning accounts for the difference. When none were read, tap **Options missing: add** and paste
-  the dealer's description, or ask the seller for the window sticker.
+  reasoning accounts for the difference. You can add options at any time under **The case**: paste
+  or pick a picture of the window sticker, or paste the dealer's description.
 - **VINs.** The car's VIN shows under the title and each comp's VIN on its card; tap one to copy it.
   When a listing leaves the VIN out, the app says so. Comp VINs are also read out of links that
   contain them (Classic.com's do).
-- **Sold, and for sale now.** Completed sales and the cars you could buy today are separate lists.
+- **Sold, and for sale now.** Completed sales and the cars you could buy today are separate lists,
+  each with a **Search for more** button that looks for cars not already found. For-sale cars come
+  from live auctions, enthusiast classifieds and dealers. The app opens each for-sale page, where
+  the site allows it, and moves a car to "sold or gone" when its page says so; **Check they are
+  still for sale** does that again. Each card says whether its page was checked.
   Each comp has a button that opens that car's own page. A link that opens a list of
   results instead of one car is flagged on the screen and on the PDF, and is never offered as the
   proof link for a point in the case.
@@ -127,8 +131,13 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
 ## What to expect from the web research
 
 - Results come from Claude's web search tool, so they are search results, not page scrapes.
-- Every run searches Bring a Trailer and Cars & Bids first, then other auction sites, then at least
-  three cars that are for sale right now. The case shows how many comps came from each place, including "none" for those two.
+- Every run searches Bring a Trailer and Cars & Bids first, then other auction sites. A second
+  search then looks for cars for sale right now: live auctions (Bring a Trailer, Cars & Bids,
+  PCARMARKET), enthusiast classifieds (for a Porsche, Rennlist and the PCA Mart), the maker's
+  pre-owned finder, dealers and listing sites. Price-guide mirrors such as KBB are left out because
+  they keep listings up after the car has gone.
+- The app cannot open sites that block automated visits, so some for-sale cars are marked "not
+  confirmed". Open those yourself. The case shows how many comps came from each place, including "none" for those two.
 - Every comp is labeled sold, high bid or asking, and its link is checked against the URLs the
   search actually returned. A link that was not in the results is flagged.
 - Claude is told to record each car's own page, never a results page, and the app checks the link's
@@ -144,12 +153,13 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   The credit shows under the car whenever the model is on screen.
 - **three.js** and its glTF loader (MIT), **DM Sans** and **JetBrains Mono** (SIL Open Font License).
 
-**A 3D model of the actual car.** The app does not ship models of real cars. You can add one for
-yourself in the **3D model** tab: **Find a 3D model** opens a search for downloadable models of the
-car, you download one as GLB, then choose the file (or paste a link to a `.glb`) and type the credit
-its licence asks for. The file is kept in your browser on your device only. It is never uploaded to
-the app or stored in it, it is used for every car of that make and model in your garage, and its
-credit shows under the car. Use only models whose licence allows it.
+**A 3D model of the actual car.** The app does not ship models of real cars. In the **3D model** tab,
+**Find models** searches Sketchfab's public library and shows the results in the app. Tap one and
+it plays on the main screen in Sketchfab's own viewer, with the artist's name on it: no account,
+and nothing is downloaded or stored in the app. With a free Sketchfab account you can instead
+download a model into the studio (paste your API token once), or load a `.glb` file or link you
+already have. Your choice is kept in your browser on your device only and is used for every car of
+that make and model in your garage. Use only models whose licence allows it.
 
 To bundle another model with the app, put a `.glb` in `static/models/`, add it to `PRO_MODELS` in
 `showcase.py` with its credit, and name its body-paint material `Paint`.
