@@ -852,11 +852,13 @@ def handle_stage_requests(progress_slot) -> None:
         elif not ss["api_key"]:
             ss["stage_error"] = "Connect your Anthropic API key first."
         else:                                                    # search again, for cars not already found
-            wants_sale = str(request.get("kind") or "") == "sale"
+            wants_sale, refresh = str(request.get("kind") or "") == "sale", str(request.get("kind") or "") == "all"
             known = [comp["url"] for comp in have if comp["url"]]
             searches, the_client, the_model = int(ss["max_searches"]), llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]]
             try:
-                if wants_sale:
+                if refresh:                                      # every search again, as for a new car
+                    found = research_market(the_client, the_model, the_car, searches, progress=progress)
+                elif wants_sale:
                     found = llm.research_for_sale(the_client, the_model, the_car, max_searches=min(searches, 8), known=known,
                                                   progress=progress)
                 else:
@@ -870,13 +872,30 @@ def handle_stage_requests(progress_slot) -> None:
                 both, _ = drop_spare_trims(have + fresh)       # with enough exact matches now, other trims go, old ones too
                 stays = {id(comp) for comp in both}
                 have, fresh = [comp for comp in have if id(comp) in stays], [comp for comp in fresh if id(comp) in stays]
-                if wants_sale and fresh:
-                    progress.say("Opening each new page to see whether the car is still there")
-                note = checked_note(check_listings(fresh)) if wants_sale else ""
-                ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have}
-                what = "car for sale" if wants_sale else "sale"
-                ss["notices"] = [(f"Found {len(fresh)} more {what}{'s' if len(fresh) != 1 and not wants_sale else ''}. {note}".strip()
-                                  if fresh else "The search found nothing new this time.")]
+                if refresh:
+                    back = 0
+                    for comp in have:                          # a sale set aside only because its page left out a detail of the trim line
+                        row = {**comp, "trim": ""}
+                        if calc.ease_trim_mark(the_car, row):
+                            comp["note"], comp["use"], back = row["note"], True, back + 1
+                    if any(calc.comp_group(comp) == "live" for comp in have):
+                        progress.say("Opening the for-sale pages you already had, to see whether each car is still there")
+                    note = checked_note(check_listings(have))  # the new ones were opened by the search itself
+                    sold = sum(comp["status"] != "asking" for comp in fresh)
+                    bits = [f"{sold} more sale{'s' if sold != 1 else ''} and no-sales" if sold else "",
+                            f"{len(fresh) - sold} more for sale" if len(fresh) - sold else "",
+                            f"{back} sale{'s' if back != 1 else ''} counted again that had been set aside over a trim detail" if back else ""]
+                    found_text = ", ".join(bit for bit in bits if bit)
+                    ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have, "summary": found["summary"]}
+                    ss["notices"] = [f"Refreshed: {found_text or 'nothing new this time'}. {note}".strip()]
+                else:
+                    if wants_sale and fresh:
+                        progress.say("Opening each new page to see whether the car is still there")
+                    note = checked_note(check_listings(fresh)) if wants_sale else ""
+                    ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have}
+                    what = "car for sale" if wants_sale else "sale"
+                    ss["notices"] = [(f"Found {len(fresh)} more {what}{'s' if len(fresh) != 1 and not wants_sale else ''}. {note}".strip()
+                                      if fresh else "The search found nothing new this time.")]
         ss.pop(slot, None)
         progress_slot.empty()
         if progress.lines:

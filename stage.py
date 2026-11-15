@@ -889,6 +889,10 @@ function create(root) {
         if (c.summary) h += `<div class="lead-sub">${esc(c.summary)}</div>`;
         if ((c.log || []).length) h += `<details class="byhand steplog"><summary>Every step of the last search (${c.log.length})</summary><div class="livelog">${c.log.map((t) => `<div>${esc(t)}</div>`).join("")}</div></details>`;
       }
+      /* every search again for this car, in one tap */
+      h += "<h3>Refresh</h3>" + (h.includes("keyform") ? "" : keyAsk) +
+        `<div><button type="button" class="btn ghost more" data-kind="all"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "all" ? "Searching" : "Refresh results"}</button></div>` +
+        '<div class="tiny">Runs every search again for this car: sales, no-sales and cars for sale now. What you have stays, new finds are added, and each for-sale page is opened again.</div>' + liveLog(S.moreBusy === "all");
     } else if (S.tab === "comps") {
       const rows = list(["sold"], "Sales counted in the typical price", (k) => k.use) +
         (() => { const out = (d.comps || []).filter((k) => k.group === "sold" && !k.use); if (!out.length) return "";
@@ -1692,7 +1696,7 @@ function create(root) {
       if (lost) toast(out ? (saved ? "The app restarted. Reconnecting and sending that again." : "The app restarted and lost your key. Paste it again and your request is sent.") : "The app restarted, so that was lost. Tap it again.", !saved || !out);
     }
     if (d.sid) S.sid = d.sid;
-    if (S.moreBusy && d.seq !== S.optSeq) { S.moreBusy = ""; if (S.tab === "comps" || S.tab === "sale") { const y = el.sheetBody.scrollTop; setTimeout(() => { renderSheet(); el.sheetBody.scrollTop = y; }, 0); } }
+    if (S.moreBusy && d.seq !== S.optSeq) { S.moreBusy = ""; if (S.tab === "comps" || S.tab === "sale" || S.tab === "case") { const y = el.sheetBody.scrollTop; setTimeout(() => { renderSheet(); el.sheetBody.scrollTop = y; }, 0); } }
     if (S.optBusy && d.seq !== S.optSeq) { S.optBusy = false; if (!d.error) { S.optShot = ""; S.optText = ""; S.optOpen = false; } if (S.tab === "case") renderSheet(); }
     if (S.msgBusy && d.seq !== S.optSeq) S.msgBusy = "";
     S.optSeq = d.seq;
