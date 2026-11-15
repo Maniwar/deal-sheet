@@ -66,7 +66,17 @@ what that car has been selling for and gives you a typical sale price, the comps
 - **What it is doing.** While it works, the screen shows each step as it happens: the car it read,
   each search as it is sent ("Cars & Bids: searching ..."), how many pages came back and from
   where, how many cars each site gave, and a running clock.
-- **Garage.** Each car you add is a chip at the top. Tap one to switch.
+- **Only the sales that count.** The Sold tab lists the sales counted in the typical price, and the
+  number on the tab is those. A car of another trim is dropped when there are three or more exact
+  matches. When exact matches are scarce it is kept as a guide to the range, not counted, and
+  folded away under "Show N not counted" with the reason on each card. **Count it** and **Leave it
+  out** move a sale between the two.
+- **What each site gave.** "What the search found" lists every site that was searched with the
+  number of cars it gave, or the reason it did not finish, and **Every step of the last search**
+  opens the full list of searches that were run.
+- **Garage.** Each car you add is a chip at the top. Tap one to switch. The sample car stays until
+  you remove it; **Remove this car** is at the bottom of Car details. Cars are saved in this
+  browser on this device, so a phone and a computer each have their own garage.
 - **Edit and print**, below the main screen: correct any detail of the car, the comps or the offer
   by hand, and make the PDF. The PDF prints every link in full beside a large QR code. The seller
   copy leaves out your target, walk-away price and notes.

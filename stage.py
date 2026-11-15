@@ -137,6 +137,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "pushback": [split_pushback(str(item)) for item in offer.get("pushback") or []],
         "options": options, "msrp": money(car["msrp"]) if car.get("msrp") else "",
         "summary": str(flags.get("summary") or ""),
+        "log": [str(line)[:200] for line in (flags.get("log") or [])][-200:],
         "sources": calc.source_counts(comps) if comps else [],
     }
 
@@ -144,7 +145,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
     order = {"sold": 0, "live": 1, "high_bid": 2, "ended": 3}
     names = {"sold": "Sold", "live": "For sale", "high_bid": "No sale", "ended": "Listing ended"}
     cards = []
-    for comp in sorted(comps, key=lambda c: (order[calc.comp_group(c)], not c["use"], c["price"])):
+    for idx, comp in sorted(enumerate(comps), key=lambda p: (order[calc.comp_group(p[1])], not p[1]["use"], p[1]["price"])):
         group = calc.comp_group(comp)
         meta = []
         if comp.get("body") and comp["body"].lower() not in comp["title"].lower():
@@ -165,6 +166,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             "priceText": money(comp["price"]), "title": comp["title"], "meta": " · ".join(meta),
             "note": comp.get("note") or "", "options": comp.get("options") or "", "url": url, "host": calc.host_of(url),
             "kind": calc.link_kind(url), "use": bool(comp["use"]), "linkOk": comp.get("link_ok"), "delta": delta,
+            "idx": idx, "why": "" if comp["use"] else ("a different trim" if "different trim" in str(comp.get("note") or "").lower() else "switched off"),
             "img": comp.get("img") or "", "vin": comp.get("vin") or "",
             "seen": comp.get("seen") or "", "seenOn": comp.get("seen_on") or "",
             "history": comp.get("history") or "", "histFlag": calc.history_flag(comp.get("history")),
@@ -493,7 +495,9 @@ button.opt{cursor:pointer}
 .say .a::before{content:"You: ";color:#7ee8bd;font-weight:500}
 .hintbox{margin-top:8px;padding:11px 13px;border-radius:14px;border:1px solid rgba(245,184,74,.4);background:rgba(245,184,74,.07);font:400 13.5px/1.45 var(--sans);color:#f0d9a8}
 .card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:13px 0;border-bottom:1px solid rgba(255,255,255,.08)}
-.card.off{opacity:.45}
+.card.off>div>:not(.pill):not(div:last-child),.card.off>img{opacity:.62}
+.pill.out{margin-left:6px;color:var(--warn);border-color:rgba(245,184,74,.5);letter-spacing:.06em}
+.usebtn{display:inline-block;margin-top:8px;font-size:12.5px}
 .card img{width:92px;height:68px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}
 .credit-text{width:100%;margin-top:2px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--ink);font:400 14px/1.4 var(--sans);resize:vertical}
 .msgbox{min-height:230px;font-size:15px;line-height:1.5;resize:vertical}
@@ -503,6 +507,8 @@ button.opt{cursor:pointer}
 .carform .fld .linkbox{margin-top:4px}
 .carform .wide,.carform>.btn{grid-column:1/-1}
 .carform>.btn{justify-self:start;margin-top:4px}
+.dropzone{margin-top:22px;padding-top:6px;border-top:1px solid var(--line)}
+.steplog .livelog{max-height:300px;overflow:auto}
 .byhand{margin-top:18px}
 .byhand summary{cursor:pointer;list-style:none;font:500 13.5px var(--sans);color:var(--mute);text-decoration:underline;text-underline-offset:3px}
 .byhand summary::-webkit-details-marker{display:none}
@@ -810,9 +816,10 @@ function create(root) {
     const seen = k.group !== "live" ? "" : k.seen === "live" ? `<div class="c-seen ok">Checked ${esc(k.seenOn)}: the page still shows it for sale.</div>`
       : k.seen === "unknown" ? `<div class="c-seen">Not confirmed: this site does not let apps look. Open it to check it is still for sale.</div>`
       : '<div class="c-seen">Not checked yet. Tap Check they are still for sale.</div>';
-    const text = `<div><span class="pill ${esc(k.group)}">${esc(k.label)}</span><span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
+    const out = big && k.group === "sold" && !k.use, flip = big && k.group === "sold" ? `<button type="button" class="textbtn usebtn" data-i="${k.idx}" data-price="${k.price}" data-use="${k.use ? 0 : 1}">${k.use ? "Leave it out" : "Count it"}</button>` : "";
+    const text = `<div><span class="pill ${esc(k.group)}">${esc(k.label)}</span>${out ? `<span class="pill out">Not counted: ${esc(k.why)}</span>` : ""}<span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
       `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div><div>${k.vin ? vinChip(k.vin, "c-vin") : '<span class="vin none c-vin"><b>VIN</b>not found</span>'}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${seen}${flag}` +
-      (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">Open ${ARROW} <small>${esc(k.host)}</small></a>` : "") + "</div>";
+      (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">Open ${ARROW} <small>${esc(k.host)}</small></a>` : "") + (flip ? `<div>${flip}</div>` : "") + "</div>";
     return big ? `<div class="card${k.use ? "" : " off"}">${text}${k.image ? `<img src="${esc(k.image)}" alt="" loading="lazy">` : "<span></span>"}</div>` : text;
   };
   function showComp(i, dot) {
@@ -826,7 +833,7 @@ function create(root) {
   root.addEventListener("pointerdown", (e) => { if (!el.pop.hidden && !e.target.closest(".pop") && !e.target.closest(".dot")) { el.pop.hidden = true; el.track.querySelectorAll(".dot.sel").forEach((x) => x.classList.remove("sel")); } });
 
   /* ---------- tabs and the sheet ---------- */
-  const counts = (d) => [(d.comps || []).filter((k) => k.group === "sold").length, (d.comps || []).filter((k) => k.group === "live").length];
+  const counts = (d) => [(d.comps || []).filter((k) => k.group === "sold" && k.use).length, (d.comps || []).filter((k) => k.group === "live").length];
   function paintTabs(d) {
     if (S.busy || !d.hasCar) { el.tabs.innerHTML = ""; return; }
     const c = d.case || {}, [nSold, nSale] = counts(d);
@@ -847,7 +854,7 @@ function create(root) {
     const d = S.d, c = d.case || {}, [nSold, nSale] = counts(d);
     const sort = S.sort || (S.sort = { key: "price", dir: 1 });
     const order = (x, y) => { const p = x[sort.key] || 0, q = y[sort.key] || 0; if (!p || !q) return (q ? 1 : 0) - (p ? 1 : 0); return (p - q) * sort.dir; };   /* cars missing the value go last */
-    const list = (groups, title) => { const rows = (d.comps || []).filter((k) => groups.includes(k.group)).sort(order); return rows.length ? `<h3>${title} · ${rows.length}</h3>` + rows.map((k) => compCard(k, true)).join("") : ""; };
+    const list = (groups, title, only, lead) => { const rows = (d.comps || []).filter((k) => groups.includes(k.group) && (!only || only(k))).sort(order); return rows.length ? `<h3>${title} · ${rows.length}</h3>${lead || ""}` + rows.map((k) => compCard(k, true)).join("") : ""; };
     const arrow = (key) => (sort.key === key ? (sort.dir > 0 ? " ↑" : " ↓") : "");
     const sorter = `<div class="sortrow">Sort by ${[["price", "Price"], ["miles", "Miles"], ["when", "Date"]].map(([key, name]) => `<button type="button" class="sortbtn${sort.key === key ? " on" : ""}" data-sort="${key}">${name}${arrow(key)}</button>`).join("")}</div>`;
     el.sheetTabs.innerHTML = [["case", "The case"], ["comps", `Sold<b>${nSold}</b>`], ["sale", `For sale now<b>${nSale}</b>`], ["message", "Message"], ["car", "Car details"], ["model", "3D model"]].map(([id, t]) => `<button type="button" class="tab${S.tab === id ? " lead" : ""}" data-tab="${id}">${t}</button>`).join("");
@@ -876,13 +883,18 @@ function create(root) {
         `${S.optShot ? `<span class="optthumb"><img src="${esc(S.optShot)}" alt=""><button type="button" class="optdrop" aria-label="Remove the picture">×</button></span>` : ""}` +
         `<button type="button" class="btn readopts"${S.optBusy ? " disabled" : ""}>${S.optBusy ? "Reading" : "Read the options"}</button></div>`;
       if ((c.pushback || []).length) h += "<h3>What the seller will say</h3>" + c.pushback.map((p) => `<div class="say"><div class="q">${esc(p.say)}</div>${p.reply ? `<div class="a">${esc(p.reply)}</div>` : ""}</div>`).join("");
-      if (c.summary || (c.sources || []).length) {
+      if (c.summary || (c.sources || []).length || (c.log || []).length) {
         h += "<h3>What the search found</h3>";
         if ((c.sources || []).length) h += `<div class="srcs">${c.sources.map((s) => `<span class="src${s.n ? "" : " zero"}">${esc(s.name)}<b>${s.n || "none"}</b></span>`).join("")}</div>`;
         if (c.summary) h += `<div class="lead-sub">${esc(c.summary)}</div>`;
+        if ((c.log || []).length) h += `<details class="byhand steplog"><summary>Every step of the last search (${c.log.length})</summary><div class="livelog">${c.log.map((t) => `<div>${esc(t)}</div>`).join("")}</div></details>`;
       }
     } else if (S.tab === "comps") {
-      const rows = list(["sold"], "Completed sales") + list(["high_bid"], "Auctions that ended without a sale");
+      const rows = list(["sold"], "Sales counted in the typical price", (k) => k.use) +
+        (() => { const out = (d.comps || []).filter((k) => k.group === "sold" && !k.use); if (!out.length) return "";
+          const why = out.every((k) => k.why === "a different trim") ? "a different trim" : out.every((k) => k.why === "switched off") ? "switched off" : "a different trim or switched off";
+          return `<details class="byhand leftout"${S.outOpen ? " open" : ""}><summary>Show ${out.length} not counted (${why})</summary><div class="lead-sub">Left out of the typical price. They are only kept when exact matches are scarce, as a guide to the range. Tap Count it to include one.</div>${out.sort(order).map((k) => compCard(k, true)).join("")}</details>`; })() +
+        list(["high_bid"], "Auctions that ended without a sale");
       const find = `<button type="button" class="btn${rows ? " ghost" : ""} more" data-kind="sold"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sold" ? "Searching" : rows ? "Search for more sales" : "Search for sales"}</button>`;
       h = (rows ? sorter + rows : '<div class="lead-line">No completed sales yet</div><div class="lead-sub">The search goes through Cars &amp; Bids, Bring a Trailer, the other auction sites and then the wider web.</div>') +
         keyAsk + `<div>${find}</div>` + liveLog(S.moreBusy === "sold") + byHand("sold");
@@ -907,7 +919,8 @@ function create(root) {
       h = d.hasCar
         ? `<div class="lead-line">Car details</div><div class="lead-sub">Fix anything the listing got wrong. Comps are matched to the year, model, trim and body style.</div><form class="carform carfacts">` +
           fields.map(([k, label, num]) => `<label class="fld${k === "history" || k === "vin" ? " wide" : ""}"><span>${label}</span><input class="linkbox" name="${k}" value="${esc(e[k] || "")}" autocomplete="off"${num ? ' inputmode="numeric"' : ""}${k === "vin" ? ' autocapitalize="characters" spellcheck="false"' : ""}></label>`).join("") +
-          `<button type="submit" class="btn">Save</button></form>`
+          `<button type="submit" class="btn">Save</button></form>` +
+          `<div class="dropzone"><button type="button" class="btn ghost dropcar">${d.sample ? "Remove the sample car" : "Remove this car from the garage"}</button></div>`
         : '<div class="lead-sub">Add a car first: paste a listing link or a screenshot in the bar on the main screen, or just name the car.</div>';
     }
     if (S.tab === "model") { renderModelTab(); return; }
@@ -946,8 +959,19 @@ function create(root) {
       const go = facts.querySelector("button"); go.disabled = true; go.textContent = "Saving";
       post("car", { ...out, at: Date.now() });
     };
+    const leftout = el.sheetBody.querySelector(".leftout");
+    if (leftout) leftout.ontoggle = () => { S.outOpen = leftout.open; };
+    /* count a sale in the typical price, or leave it out */
+    el.sheetBody.querySelectorAll(".usebtn").forEach((b) => { b.onclick = () => { b.disabled = true; b.textContent = "Saving"; post("usecomp", { i: +b.dataset.i, price: +b.dataset.price, use: b.dataset.use === "1", at: Date.now() }); }; });
+    /* take this car out of the garage: a second tap confirms */
+    const dropcar = el.sheetBody.querySelector(".dropcar");
+    if (dropcar) dropcar.onclick = () => {
+      if (dropcar.dataset.sure) { dropcar.disabled = true; closeSheet(); post("remove", { id: S.d.activeId || "", at: Date.now() }); return; }
+      dropcar.dataset.sure = "1"; dropcar.textContent = "Tap again to remove it";
+      setTimeout(() => { if (dropcar.isConnected) { delete dropcar.dataset.sure; dropcar.textContent = S.d.sample ? "Remove the sample car" : "Remove this car from the garage"; } }, 4000);
+    };
     /* a sale or a listing the person knows of */
-    el.sheetBody.querySelectorAll(".byhand").forEach((box) => { const kind = box.querySelector(".handform").dataset.kind; box.ontoggle = () => { if (box.open) S.handOpen = kind; else if (S.handOpen === kind) S.handOpen = ""; }; });
+    el.sheetBody.querySelectorAll(".byhand").forEach((box) => { const form = box.querySelector(".handform"); if (!form) return; const kind = form.dataset.kind; box.ontoggle = () => { if (box.open) S.handOpen = kind; else if (S.handOpen === kind) S.handOpen = ""; }; });
     el.sheetBody.querySelectorAll(".handform").forEach((f) => { f.onsubmit = (e) => {
       e.preventDefault();
       const v = Object.fromEntries([...f.querySelectorAll("input")].map((box) => [box.name, box.value.trim()]));

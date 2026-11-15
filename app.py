@@ -208,7 +208,7 @@ def run_garage_actions(actions: list[dict]) -> None:
         return next((c for c in order if mark(garage[c]) == wanted), "")
 
     def add(deal: dict, from_file: bool = False) -> None:
-        if not deal.get("sample"):                    # a real car replaces the sample
+        if not deal.get("sample") and ss.get("hide_sample"):     # the sample was removed once: it stays out of the way
             for car_id in [c for c in order if garage[c].get("sample")]:
                 drop(car_id)
         if from_file and same_car(deal):              # already here: show it instead of adding a copy
@@ -216,6 +216,9 @@ def run_garage_actions(actions: list[dict]) -> None:
             return
         kept_id = str(deal.pop("_id", "") or "")           # a car brought back from the browser keeps its id
         car_id = kept_id if re.fullmatch(r"[0-9a-f]{6,16}", kept_id) and kept_id not in garage else uuid.uuid4().hex[:8]
+        steps = deal.pop("log", None)                      # every step of the search that built it, to read back later
+        if steps:
+            ss.setdefault("logs", {})[car_id] = list(steps)[-200:]
         garage[car_id] = deal
         order.append(car_id)
         ss["active"] = car_id
@@ -241,6 +244,9 @@ def run_garage_actions(actions: list[dict]) -> None:
             ss["active"] = action["switch"]
         elif "remove" in action:
             drop(action["remove"])
+    if ss.get("hide_sample") and len(order) > 1:           # removed once, so it does not come back beside real cars
+        for car_id in [c for c in order if garage[c].get("sample")]:
+            drop(car_id)
     if not order:
         add(dict(EMPTY_DEAL))
     if ss["active"] not in garage:
@@ -267,6 +273,23 @@ def settle_trim(car: dict) -> str:
         return ""
     car["trim"], note = calc.trim_from_vin(car, previews.vin_trims(vin))
     return note
+
+
+def drop_spare_trims(comps: list[dict]) -> tuple[list[dict], int]:
+    """Leave out cars of another trim when there are enough exact matches. Returns (kept, how many were dropped).
+
+    A car of another trim is only worth showing as context when exact matches are scarce. With three or
+    more exact sales, the other-trim sales go; the same for cars for sale.
+    """
+    def other(comp: dict) -> bool:
+        return "different trim" in comp["note"].lower()
+
+    enough = {
+        "sold": sum(comp["status"] == "sold" and not other(comp) for comp in comps) >= 3,
+        "asking": sum(comp["status"] == "asking" and not other(comp) for comp in comps) >= 3,
+    }
+    kept = [comp for comp in comps if not (other(comp) and enough["asking" if comp["status"] == "asking" else "sold"])]
+    return kept, len(comps) - len(kept)
 
 
 def check_listings(comps: list[dict]) -> dict:
@@ -339,6 +362,7 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     seen = {calc.normalize_url(comp["url"]) for comp in comps if comp["url"]}
     comps += [comp for comp in sale["comps"] if not comp["url"] or calc.normalize_url(comp["url"]) not in seen]
     comps, dropped = same_body_only(car, comps)
+    comps, spare = drop_spare_trims(comps)
     tell("Opening each for-sale page to see whether the car is still there")
     note = checked_note(check_listings(comps))
     if note:
@@ -346,8 +370,10 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     if dropped:
         note = f"{dropped} car{'s' if dropped != 1 else ''} of a different body style {'were' if dropped != 1 else 'was'} left out. {note}".strip()
     off_trim = sum("different trim" in comp["note"].lower() for comp in comps)
-    if off_trim:
-        note = f"{off_trim} car{'s' if off_trim != 1 else ''} of another trim {'are' if off_trim != 1 else 'is'} shown switched off. {note}".strip()
+    if off_trim:                    # exact matches were scarce, so these stay as context
+        note = f"Exact matches were scarce, so {off_trim} car{'s' if off_trim != 1 else ''} of another trim {'are' if off_trim != 1 else 'is'} kept for context and not counted. {note}".strip()
+    if spare:
+        note = f"{spare} car{'s' if spare != 1 else ''} of another trim {'were' if spare != 1 else 'was'} left out. {note}".strip()
     return {"comps": comps, "summary": " ".join(part for part in (summary, sale["summary"], note) if part).strip()}
 
 
@@ -486,6 +512,7 @@ def init_state() -> None:
     ss["auto_photo"] = None     # car photo cut out of a listing screenshot
     ss["comp_photos"] = {}      # comp photos cut out of page screenshots, by id
     ss["want_photos"] = True
+    ss["hide_sample"] = False    # the sample car stays in the garage until the person removes it
     ss["detailed_car"] = False   # coupes show the simple shape unless the concept coupe is chosen
     ss["key_ver"] = 0
     ss["buyer"] = secret("BUYER_NAME")
@@ -615,7 +642,7 @@ def current_offer() -> dict:
 # The settings the browser keeps between visits, with the limits each one must stay inside.
 PREF_NUMBERS = {"tax_rate": (float, 0.0, 15.0), "fees": (float, 0.0, 1e7), "apr": (float, 0.0, 30.0),
                 "down": (float, 0.0, 1e8), "months": (int, 0, 120), "max_searches": (int, 3, 20)}
-PREF_SWITCHES = ("want_photos", "detailed_car")
+PREF_SWITCHES = ("want_photos", "detailed_car", "hide_sample")
 PREFS_VERSION = 2                    # 2: Haiku became the default model
 OLD_DEFAULT_MODEL = "Sonnet 5.5 (balanced)"
 
@@ -642,6 +669,8 @@ def apply_prefs(saved: dict) -> None:
     for key in PREF_SWITCHES:
         if isinstance(saved.get(key), bool):
             ss[key] = saved[key]
+    if ss["hide_sample"]:
+        queue({"tidy": True})                        # the garage drops the sample at the end of this run
     if isinstance(saved.get("buyer"), str) and saved["buyer"].strip():
         ss["buyer"] = saved["buyer"].strip()[:60]
     # Settings saved before the default changed hold the old default, which nobody chose: let the new one apply.
@@ -757,6 +786,12 @@ def stage_event(name: str) -> None:
         ss["_verify_request"] = value
     elif name == "photo":
         ss["_photo_request"] = value
+    elif name == "remove":                          # take the car on screen out of the garage
+        if (ss["garage"].get(ss["active"]) or {}).get("sample"):
+            ss["hide_sample"] = True
+        queue({"remove": ss["active"]})
+    elif name == "usecomp":
+        ss["_usecomp_request"] = value
     elif name == "message":
         ss["_message_request"] = value
     elif name == "car":
@@ -823,6 +858,9 @@ def handle_stage_requests(progress_slot) -> None:
                 seen = {calc.normalize_url(url) for url in known}
                 fresh = [comp for comp in found["comps"] if not comp["url"] or calc.normalize_url(comp["url"]) not in seen]
                 fresh, _ = same_body_only(the_car, fresh)
+                both, _ = drop_spare_trims(have + fresh)       # with enough exact matches now, other trims go, old ones too
+                stays = {id(comp) for comp in both}
+                have, fresh = [comp for comp in have if id(comp) in stays], [comp for comp in fresh if id(comp) in stays]
                 if wants_sale and fresh:
                     progress.say("Opening each new page to see whether the car is still there")
                 note = checked_note(check_listings(fresh)) if wants_sale else ""
@@ -832,6 +870,8 @@ def handle_stage_requests(progress_slot) -> None:
                                   if fresh else "The search found nothing new this time.")]
         ss.pop(slot, None)
         progress_slot.empty()
+        if progress.lines:
+            ss.setdefault("logs", {})[ss["active"]] = list(progress.lines)[-200:]
         ss["build_seq"] += 1
     request = ss.pop("_car_request", None)
     if isinstance(request, dict):                  # the car's facts, corrected on the main screen
@@ -851,6 +891,16 @@ def handle_stage_requests(progress_slot) -> None:
             has_comps = bool((ss["garage"].get(ss["active"]) or {}).get("comps"))
             ss["notices"] = ["Saved. The comps were found for the car as it was, so search again in the Sold tab to match them."
                              if moved and has_comps else "Saved."]
+        ss["build_seq"] += 1
+    request = ss.pop("_usecomp_request", None)
+    if isinstance(request, dict):                  # count a sale in the typical price, or leave it out
+        have = calc.clean_comps((ss["garage"].get(ss["active"]) or {}).get("comps") or [])
+        at = calc.to_int(request.get("i"))
+        if at is not None and 0 <= at < len(have) and have[at]["price"] == calc.to_int(request.get("price")):
+            have[at]["use"] = bool(request.get("use"))
+            ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
+        else:
+            ss["stage_error"] = "That car has moved in the list. Try again."
         ss["build_seq"] += 1
     request = ss.pop("_addcomp_request", None)
     if isinstance(request, dict):                  # a sale or a listing the buyer knows of, added on the main screen
@@ -968,6 +1018,7 @@ def handle_stage_requests(progress_slot) -> None:
                                          progress=progress)
             progress_slot.empty()
             if new_deal:
+                new_deal["log"] = list(progress.lines)
                 queue({"add": new_deal})
                 ss["notices"] = notes
             else:
@@ -1374,7 +1425,8 @@ def short_name(deal_car: dict) -> str:
 garage_chips, kept = [], []
 for car_id in ss["garage_order"]:
     entry = ss["garage"][car_id]
-    garage_chips.append({"id": car_id, "label": short_name(entry.get("car") or {}), "active": car_id == ss["active"]})
+    garage_chips.append({"id": car_id, "active": car_id == ss["active"],
+                         "label": ("Sample: " if entry.get("sample") else "") + short_name(entry.get("car") or {})})
     if not entry.get("sample"):
         kept.append({"id": car_id, "deal": plain(entry)})
 has_real_car = any((ss["garage"][c].get("car") or {}).get("make") or (ss["garage"][c].get("car") or {}).get("model")
@@ -1389,9 +1441,10 @@ flags = {
     "key_error": ss.pop("key_error", ""), "key_forgotten": ss["key_forgotten"], "sample": ss["is_sample"],
     "message": ss["message_text"], "summary": ss["research_summary"],
     "prefs": current_prefs(), "prefs_ask": not ss["prefs_asked"], "sid": ss["sid"],
+    "log": (ss.get("logs") or {}).get(ss["active"]) or [],
 }
 stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail", "more", "verify",
-                "message", "car", "addcomp")
+                "message", "car", "addcomp", "remove", "usecomp")
 with stage_box:
     STAGE(
         data=json.dumps(stage.build_payload(

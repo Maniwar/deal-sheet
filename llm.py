@@ -118,7 +118,7 @@ class Progress:
             pass
 
 
-def _watch(event, kinds: dict, parts: dict, progress: Progress, label: str) -> None:
+def _watch(event, kinds: dict, parts: dict, progress: Progress, label: str, stream=None) -> None:
     """Turn one streamed event into a line for the screen: each search as it is sent, and what came back."""
     kind, index = getattr(event, "type", ""), getattr(event, "index", None)
     if kind == "content_block_start":
@@ -141,13 +141,16 @@ def _watch(event, kinds: dict, parts: dict, progress: Progress, label: str) -> N
             progress.say(f"{label}: writing up what it found")
     elif kind == "content_block_delta" and getattr(event.delta, "type", "") == "input_json_delta":
         parts[index] = parts.get(index, "") + (getattr(event.delta, "partial_json", "") or "")
-    elif kind == "content_block_stop" and kinds.get(index) == "server_tool_use" and index in parts:
+    elif kind == "content_block_stop" and kinds.get(index) == "server_tool_use":
+        query = ""
         try:
-            query = json.loads(parts.pop(index) or "{}").get("query")
+            query = json.loads(parts.pop(index, "") or "{}").get("query") or ""
         except ValueError:
-            query = ""
-        if query:
-            progress.say(f"{label}: searching “{query}”")
+            pass
+        if not query and stream is not None:       # the query did not come in pieces: read it off the finished block
+            block = stream.current_message_snapshot.content[index]
+            query = (getattr(block, "input", None) or {}).get("query") or ""
+        progress.say(f"{label}: searching “{query}”" if query else f"{label}: searching")
 
 
 def _create_live(client, progress: Progress, label: str, kwargs: dict):
@@ -157,7 +160,7 @@ def _create_live(client, progress: Progress, label: str, kwargs: dict):
     with client.messages.stream(**kwargs) as stream:
         for event in stream:
             try:
-                _watch(event, kinds, parts, progress, label)
+                _watch(event, kinds, parts, progress, label, stream)
             except Exception:                  # never let the commentary break the request
                 pass
         return stream.get_final_message()
@@ -667,63 +670,64 @@ def _site_prompt(car: dict, today: str, site: str, max_searches: int, limited: b
 
 def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rounds: int = 6,
                    today: str | None = None, known=None, progress: Progress | None = None) -> dict:
-    """Search the web for completed sales. Returns {'comps': [...], 'summary': str, 'searched': int}.
+    """Search the web for completed sales.
 
-    With eight or more searches to spend, each auction site gets its own search first and the wider web
-    comes last; with fewer, it is one search of the whole web.
+    Each auction site gets its own search, limited to that site, and the wider web comes last. Returns
+    {'comps': [...], 'summary': str, 'searched': int, 'passes': [{'site', 'found', 'error'}]}: the
+    summary says what each site gave, so a site that found nothing or did not finish is plain to see.
     """
     today = today or dt.date.today().strftime("%B %d, %Y")
     problem = "The comp research did not finish. Try again, or add comps by hand."
-    budget = int(max_searches)
+    each = max(2, int(max_searches) // (len(AUCTION_SITES) + 1))        # every site gets at least two searches
 
-    def wide(searches: int) -> dict:
+    def wide() -> dict:
+        searches = max(2, int(max_searches) - each * len(AUCTION_SITES))
         return _research(client, model, _research_prompt(car, today, searches) + _known_note(known), searches, max_rounds,
                          problem, car=car, never=MIRROR_SITES, progress=progress, label="Wider web")
 
-    if budget < 8:
-        return wide(budget)
-    each = max(2, budget // (len(AUCTION_SITES) + 1))
-
-    def one_site(entry) -> dict:
-        site, domains = entry
-        label = site if len(domains) == 1 else "Other auction sites"
+    def one_site(site: str, domains: list[str], label: str) -> dict:
         try:
             return _research(client, model, _site_prompt(car, today, site, each) + _known_note(known), each, max_rounds,
                              problem, car=car, only=domains, progress=progress, label=label)
-        except LLMError:                       # a site the search tool cannot be limited to: name it in the searches instead
+        except LLMError as exc:                # a site the search tool cannot be limited to: name it in the searches instead
             if progress:
-                progress.say(f"{label}: could not be searched on its own, so trying it by name")
+                progress.say(f"{label}: a search limited to the site did not work ({exc}), so searching for it by name")
             return _research(client, model, _site_prompt(car, today, site, each, limited=False) + _known_note(known), each,
                              max_rounds, problem, car=car, never=MIRROR_SITES, progress=progress, label=label)
 
-    jobs = [lambda entry=entry: one_site(entry) for entry in AUCTION_SITES]
-    jobs.append(lambda: wide(max(2, budget - each * len(AUCTION_SITES))))
-    results, errors = [], []
+    jobs = [(site if len(domains) == 1 else "Other auction sites", site, domains) for site, domains in AUCTION_SITES]
     if progress:
-        progress.say("Searching each auction site on its own, then the wider web, two at a time")
+        progress.say("Searching one site at a time: " + ", ".join(label for label, _, _ in jobs) + ", then the wider web")
+    results, passes, first_error = [], [], None
     with ThreadPoolExecutor(max_workers=2) as pool:           # two at a time keeps a new key inside its rate limit
-        futures = [pool.submit(job) for job in jobs]
-        waiting = set(futures)
+        futures = [(label, pool.submit(one_site, site, domains, label)) for label, site, domains in jobs]
+        futures.append(("Wider web", pool.submit(wide)))
+        waiting = {future for _, future in futures}
         while waiting:                                        # the workers' lines are drawn from this thread
             _, waiting = wait(waiting, timeout=0.4)
             if progress:
                 progress.flush()
-        for future in futures:
+        for label, future in futures:
             try:
-                results.append(future.result())
+                result = future.result()
             except LLMError as exc:
-                errors.append(exc)
+                first_error = first_error or exc
+                passes.append({"site": label, "found": 0, "error": str(exc)})
                 if progress:
-                    progress.say(f"One search stopped: {exc}")
+                    progress.say(f"{label}: did not finish. {exc}")
+            else:
+                results.append(result)
+                passes.append({"site": label, "found": len(result["comps"]), "error": ""})
     if not results:
-        raise errors[0]
+        raise first_error
     comps = merge_comps(*[result["comps"] for result in results])
-    names = ", ".join(site for site, _ in AUCTION_SITES[:2])
-    lead = f"Searched {names} and the other auction sites one at a time, then the wider web."
-    if errors:
-        lead += f" {len(errors)} of those searches did not finish, so run Search for more sales to fill the gap."
-    last = results[-1]["summary"] if not errors or len(results) == len(jobs) else ""
-    return {"comps": comps, "summary": f"{lead} {last}".strip(), "searched": sum(result["searched"] for result in results)}
+    told = [f"{one['site']}: did not finish ({one['error']})" if one["error"] else f"{one['site']}: {one['found']}" for one in passes]
+    lead = "Each site was searched on its own. " + ". ".join(told) + ". A sale found on two sites is listed once."
+    if first_error:
+        lead += " Run Search for more sales to try the ones that did not finish again."
+    last = results[-1]["summary"] if not passes[-1]["error"] else ""
+    return {"comps": comps, "summary": f"{lead} {last}".strip(), "searched": sum(result["searched"] for result in results),
+            "passes": passes}
 
 
 def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_rounds: int = 6,
