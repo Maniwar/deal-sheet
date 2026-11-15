@@ -54,7 +54,8 @@ CAR_FIELDS = ["year", "make", "model", "trim", "body", "transmission", "drivetra
               "shape", "layout", "options", "msrp"]
 NUMBER_FIELDS = {"year", "miles", "price", "msrp"}
 SELLER_TYPES = ["", "dealer", "private", "auction"]
-COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img", "options", "vin"]
+COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img", "options", "vin",
+                "available"]
 DOT = " \u00b7 "
 QR_SIZES = {"Large (1.1 in)": 82, "Extra large (1.5 in)": 108}
 EMPTY_DEAL = {"car": {}, "comps": [], "offer": {}, "summary": "", "message": "", "sample": False}
@@ -367,7 +368,7 @@ def init_state() -> None:
     ss["auto_photo"] = None     # car photo cut out of a listing screenshot
     ss["comp_photos"] = {}      # comp photos cut out of page screenshots, by id
     ss["want_photos"] = True
-    ss["detailed_car"] = True
+    ss["detailed_car"] = False   # coupes show the simple shape unless the concept coupe is chosen
     ss["key_ver"] = 0
     ss["buyer"] = secret("BUYER_NAME")
     ss["model_label"] = next(iter(llm.MODELS))
@@ -434,6 +435,8 @@ def apply_pending() -> None:
         ss["is_sample"] = False
     if "auto_photo" in payload:
         ss["auto_photo"] = payload["auto_photo"]
+    if "car_extra" in payload:                     # options, sticker price or VIN added to the car on screen
+        set_car(payload["car_extra"], replace=False)
     if "add_comps" in payload:
         merged = list(payload.get("keep") or [])
         seen = {(calc.normalize_url(c["url"]), c["price"], c["title"]) for c in merged}
@@ -535,7 +538,7 @@ def comps_frame(comps: list[dict]) -> pd.DataFrame:
     frame["use"] = frame["use"].astype("boolean").fillna(True).astype(bool)
     for column in ("price", "miles"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Int64")
-    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin"):
+    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available"):
         frame[column] = frame[column].astype("string").fillna("")
     return frame
 
@@ -620,6 +623,12 @@ def stage_event(name: str) -> None:
         ss["_restore"] = value
     elif name == "prefs":
         ss["_prefs_restore"] = value
+    elif name == "options":
+        ss["_options_request"] = value
+    elif name == "photo":
+        ss["_photo_request"] = value
+    elif name == "detail":
+        ss["detailed_car"] = bool(value)          # set before the settings widgets are drawn
     elif name == "switch":
         queue({"switch": str(value)})
     elif name == "offer":
@@ -635,6 +644,46 @@ def handle_stage_requests(progress_slot) -> None:
     if request is not None:                      # runs before the settings widgets are drawn
         apply_prefs(request if isinstance(request, dict) else {})
         ss["prefs_asked"] = True
+    request = ss.pop("_photo_request", None)
+    if request:                                    # a photo of the car, added on the main screen
+        try:
+            pieces = images_for_api(as_bytes(request.get("image")) or b"", "image/jpeg")
+        except llm.LLMError:
+            pieces = []
+        if pieces:
+            pending = ss.get("_pending") or {}
+            pending["auto_photo"] = pieces[0][0]
+            ss["_pending"] = pending
+        else:
+            ss["stage_error"] = "That picture could not be read. Try another one."
+    request = ss.get("_options_request")
+    if request:                                    # a dealer description pasted on the main screen
+        text = str(request.get("text") or "").strip()
+        if not ss["api_key"]:
+            ss["stage_error"] = "Connect your Anthropic API key first."
+        elif len(text) < 8:
+            ss["stage_error"] = "Paste the dealer's description first."
+        else:
+            try:
+                found = tidy_car(llm.read_listing(llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]], text=text))
+            except llm.LLMError as exc:
+                ss["stage_error"] = str(exc)
+            else:
+                extra = {key: found[key] for key in ("options", "msrp", "vin")
+                         if found.get(key) and (key == "options" or not ss.get(f"car_{key}"))}
+                if extra.get("options"):
+                    have = [line.strip() for line in str(ss.get("car_options") or "").splitlines() if line.strip()]
+                    seen = {line.lower() for line in have}
+                    extra["options"] = "\n".join(have + [line for line in extra["options"].splitlines()
+                                                         if line.strip() and line.strip().lower() not in seen])
+                    pending = ss.get("_pending") or {}
+                    pending["car_extra"] = extra
+                    ss["_pending"] = pending
+                    ss["notices"] = ["Added the options from the description."]
+                else:
+                    ss["stage_error"] = "No options were named in that text."
+        ss.pop("_options_request", None)
+        ss["build_seq"] += 1
     request = ss.get("_key_try")
     if request:
         value = str(request.get("value") or "").strip()
@@ -715,9 +764,9 @@ with st.sidebar:
     st.markdown("### Photos and 3D")
     st.toggle("Load photos from listing pages", key="want_photos",
               help="Fetches each link's preview image, where the site allows it. Turn off to skip those requests.")
-    st.toggle("Detailed 3D car", key="detailed_car",
-              help="Coupes show a detailed, credited 3D model (a 4 MB download). Turn off for the simple shape, "
-                   "for example on a slow phone or connection.")
+    st.toggle("Concept coupe for coupes", key="detailed_car",
+              help="Shows a detailed, credited concept car (a 4 MB download) for coupes instead of the simple "
+                   "shape. Your own 3D file, loaded in the 3D model tab, always comes first.")
 
     st.markdown("### Garage file")
     st.caption("Your cars are saved in this browser and come back when you reopen the app. Save the garage to a "
@@ -841,13 +890,14 @@ uploaded_photo = car_photo.getvalue() if car_photo is not None else None
 # ----- 2. comps -----
 with tab_comps:
     actions_box = st.container()
-    with st.expander("Edit the comps table"):
-        st.caption("Untick Use to keep a comp off the sheet. Status must be sold, high_bid or asking.")
+    with st.expander("The comps table", expanded=True):
+        st.caption("Every comp with its VIN, link and options. Untick Use to keep a comp off the sheet. "
+                   "Status must be sold, high_bid or asking.")
         edited = st.data_editor(
             comps_frame(ss["comps_base"]),
             key=f"comps_editor_{ss['comps_ver']}",
             num_rows="dynamic", hide_index=True, width="stretch",
-            column_order=["use", "status", "price", "miles", "title", "date", "source", "url", "options", "note"],
+            column_order=["use", "status", "price", "miles", "title", "vin", "date", "source", "available", "url", "options", "note"],
             column_config={
                 "use": st.column_config.CheckboxColumn("Use", default=True, width="small"),
                 "status": st.column_config.SelectboxColumn("Status", options=list(calc.STATUSES), default="sold", required=True),
@@ -859,6 +909,9 @@ with tab_comps:
                 "url": st.column_config.TextColumn("Link", width="medium"),
                 "options": st.column_config.TextColumn("Options", width="medium"),
                 "vin": st.column_config.TextColumn("VIN", help="Filled in from the link when the link contains it."),
+                "available": st.column_config.SelectboxColumn("For sale now", options=["", "yes", "no"],
+                                                              help="For asking prices: yes while the car is listed, "
+                                                                   "no once the listing has sold or gone."),
                 "note": st.column_config.TextColumn("Note", width="medium"),
             },
         )
@@ -875,20 +928,24 @@ with tab_comps:
             new_title = a.text_input("Vehicle", placeholder="2020 Porsche 911 Carrera S Coupe")
             new_date = b.text_input("Date", placeholder="Jun 22, 2026")
             new_source = c.text_input("Source", placeholder="Bring a Trailer")
-            new_url = st.text_input("Link")
+            new_url = st.text_input("Link", help="The car's own page, not a results page.")
+            a, b = st.columns(2)
+            new_vin = a.text_input("VIN", help="Left blank, it is read from the link when the link contains it.")
+            new_options = b.text_input("Options", placeholder="Sport Chrono, sport exhaust")
             new_note = st.text_input("Note")
             if st.form_submit_button("Add comp", type="primary"):
                 if calc.to_int(new_price):
                     row = calc.clean_comp({"status": new_status, "price": new_price, "miles": new_miles,
                                            "title": new_title or calc.car_title(car), "date": new_date,
-                                           "source": new_source, "url": new_url, "note": new_note})
+                                           "source": new_source, "url": new_url, "note": new_note,
+                                           "vin": new_vin, "options": new_options})
                     ss["_pending"] = {"add_comps": [row], "keep": comps}
                     st.rerun()
                 else:
                     st.warning("Enter a price for the comp.")
 
     with st.expander("Add comps from a pasted page or screenshot"):
-        st.caption("Sites such as Classic.com and Bring a Trailer block automated visits. Open the page yourself, "
+        st.caption("Some sites, such as Classic.com, block automated visits. Open the page yourself, "
                    "then paste its text or a screenshot here. Claude turns it into comps and cuts each car's "
                    "photo out of the screenshot.")
         page_text = st.text_area("Page text", key="page_text", height=120)
@@ -931,8 +988,8 @@ with tab_comps:
                     ss["_pending"] = {"add_comps": result["comps"], "keep": comps, "summary": result["summary"]}
                     st.rerun()
         stats = calc.comp_stats(comps)
-        right.caption(f"{stats['sold_count']} sold and {stats['asking_count']} asking comps in use, shown in the gallery "
-                      "above. Web results are leads. Open each link and confirm it before you cite it.")
+        right.caption(f"{stats['sold_count']} sold and {stats['asking_count']} asking comps in use, shown on the main "
+                      "screen. Web results are leads. Open each link and confirm it before you cite it.")
         if ss["research_summary"]:
             put(f'<div class="ds-note"><b>What the search found.</b> {esc(ss["research_summary"])}</div>')
 
@@ -1081,6 +1138,7 @@ flags = {
     "message": ss["message_text"], "summary": ss["research_summary"],
     "prefs": current_prefs(), "prefs_ask": not ss["prefs_asked"],
 }
+stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail")
 with stage_box:
     STAGE(
         data=json.dumps(stage.build_payload(
@@ -1089,10 +1147,7 @@ with stage_box:
             persist=None if ss["fresh"] else {"cars": kept, "active": ss["active"]},
             detailed=bool(ss["detailed_car"]))),
         key="stage",
-        on_key_change=lambda: stage_event("key"), on_build_change=lambda: stage_event("build"),
-        on_switch_change=lambda: stage_event("switch"), on_offer_change=lambda: stage_event("offer"),
-        on_prefs_change=lambda: stage_event("prefs"),
-        on_restore_change=lambda: stage_event("restore"),
+        **{f"on_{name}_change": (lambda name=name: stage_event(name)) for name in stage_events},
     )
 
 with deal_file_box:

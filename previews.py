@@ -200,11 +200,11 @@ def _page_text(page: str) -> str:
             parts.append(f"{key}: {content}")
     structured = " ".join(block.strip() for block in _LD_JSON.findall(page))
     if structured:
-        parts.append("Structured data: " + re.sub(r"\s+", " ", structured)[:5000])
+        parts.append("Structured data: " + re.sub(r"\s+", " ", structured)[:12000])
     visible = html.unescape(_TAG.sub(" ", _HIDDEN.sub(" ", page)))
     visible = re.sub(r"\s+", " ", visible).strip()
     if visible:
-        parts.append("Page text: " + visible[:8000])
+        parts.append("Page text: " + visible[:40000])       # long enough to reach a dealer's description
     return "\n".join(parts)
 
 

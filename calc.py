@@ -98,6 +98,7 @@ def clean_comp(row: dict) -> dict | None:
         "img": text("img"),
         "options": text("options"),
         "vin": clean_vin(text("vin")) or find_vin(text("url")),
+        "available": _yes_no(text("available")) if status == "asking" else "",
     }
 
 
@@ -155,6 +156,23 @@ def source_counts(comps: list[dict]) -> list[dict]:
     first = [name for name, _ in _SOURCE_NAMES]
     rest = sorted((name for name in counts if name not in first), key=lambda name: (-counts[name], name.lower()))
     return [{"name": name, "n": counts[name]} for name in first + rest]
+
+
+def _yes_no(value: str) -> str:
+    """'yes', 'no' or '' for a listing that is for sale now, has ended, or is not known either way."""
+    word = value.strip().lower()
+    if word in ("yes", "true", "1", "live", "available", "for sale"):
+        return "yes"
+    if word in ("no", "false", "0", "sold", "ended", "removed"):
+        return "no"
+    return ""
+
+
+def comp_group(comp: dict) -> str:
+    """Which list a comp belongs in: 'sold', 'live' (for sale now), 'high_bid' (no sale) or 'ended' (a listing that is gone)."""
+    if comp["status"] == "asking":
+        return "ended" if comp.get("available") == "no" else "live"
+    return comp["status"]
 
 
 def clean_comps(rows) -> list[dict]:
@@ -281,6 +299,7 @@ _CAR_PAGES = {
     "pcarmarket.com": ("/auction/",),
     "cars.com": ("/vehicledetail/",),
     "autotrader.com": ("/cars-for-sale/vehicle/", "/cars-for-sale/vehicledetails"),
+    "classics.autotrader.com": ("/classic-cars/",),
     "cargurus.com": ("/details/", "listing=", "/vdp"),
     "edmunds.com": ("/vin/",),
     "carfax.com": ("/vehicle/",),
@@ -306,10 +325,13 @@ def link_kind(url: str) -> str:
     host = host_of(link).lower()
     rest = link.split("://", 1)[-1]
     path = "/" + rest.split("/", 1)[1] if "/" in rest else "/"
-    for site, marks in _CAR_PAGES.items():
-        if host == site or host.endswith("." + site):
-            # the marker has to be followed by something: /auctions/ alone is the list, not a car
-            return "car" if any(mark in path and path.split(mark, 1)[1].strip("/") for mark in marks) else "page"
+    sites = [site for site in _CAR_PAGES if host == site or host.endswith("." + site)]
+    if sites:
+        marks = _CAR_PAGES[max(sites, key=len)]            # the most specific site that matches
+        # the marker has to be followed by something: /auctions/ alone is the list, not a car
+        if any(mark in path and path.split(mark, 1)[1].strip("/") for mark in marks):
+            return "car"
+        return "car" if re.search(r"/\d{7,}/?$", path.split("?")[0]) else "page"   # a listing number ends the address
     if path.strip("/") == "":
         return "page"
     if re.search(r"[a-hj-npr-z0-9]{17}", path) and re.search(r"\d", path):     # a VIN in the address

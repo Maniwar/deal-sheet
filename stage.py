@@ -140,10 +140,12 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "sources": calc.source_counts(comps) if comps else [],
     }
 
-    # ---- comps, sold first
-    order = {"sold": 0, "high_bid": 1, "asking": 2}
+    # ---- comps: sold first, then cars for sale now, then auctions with no sale and listings that have gone
+    order = {"sold": 0, "live": 1, "high_bid": 2, "ended": 3}
+    names = {"sold": "Sold", "live": "For sale", "high_bid": "No sale", "ended": "Listing ended"}
     cards = []
-    for comp in sorted(comps, key=lambda c: (not c["use"], order[c["status"]], c["price"])):
+    for comp in sorted(comps, key=lambda c: (order[calc.comp_group(c)], not c["use"], c["price"])):
+        group = calc.comp_group(comp)
         meta = []
         if comp.get("miles"):
             meta.append(f"{comp['miles']:,} mi")
@@ -156,7 +158,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             delta = f"{money(abs(comp['price'] - ask))} {'under' if comp['price'] < ask else 'over'} ask"
         url = comp.get("url") or ""
         cards.append({
-            "status": comp["status"], "label": STATUS_NAME[comp["status"]], "price": comp["price"],
+            "status": comp["status"], "group": group, "label": names[group], "price": comp["price"],
             "priceText": money(comp["price"]), "title": comp["title"], "meta": " · ".join(meta),
             "note": comp.get("note") or "", "options": comp.get("options") or "", "url": url, "host": calc.host_of(url),
             "kind": calc.link_kind(url), "use": bool(comp["use"]), "linkOk": comp.get("link_ok"), "delta": delta,
@@ -178,6 +180,10 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "connected": bool(flags.get("connected")), "keyError": str(flags.get("key_error") or ""),
         "keyForgotten": bool(flags.get("key_forgotten")),
         "prefs": flags.get("prefs") or None, "prefsAsk": bool(flags.get("prefs_ask")),
+        "detailed": bool(detailed), "canDetail": bool(showcase.PRO_MODELS.get(shape["body"])),
+        "modelKey": re.sub(r"[^a-z0-9]+", "-", f"{car.get('make') or ''} {car.get('model') or ''}".lower()).strip("-"),
+        "modelName": " ".join(str(car.get(k) or "").strip() for k in ("make", "model")).strip(),
+        "find3d": " ".join(str(car.get(k) or "").strip() for k in ("make", "model", "trim")).strip(),
         "sample": bool(flags.get("sample")), "hasCar": has_car,
         "title": calc.car_title(car) if has_car else "", "chips": chips,
         "seller": " · ".join(bit for bit in seller_bits if bit), "url": car.get("url") or "",
@@ -273,6 +279,7 @@ a{color:inherit}
 .opts{display:flex;flex-wrap:wrap;align-items:center;gap:5px 6px;margin-top:8px}
 .opt{font:500 11.5px var(--sans);padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:#d5d9e0;background:rgba(255,255,255,.05);white-space:nowrap}
 .opt.none{border-color:rgba(245,184,74,.45);color:var(--warn);background:rgba(245,184,74,.06)}
+button.opt{cursor:pointer}
 .seller{font:400 12.5px var(--sans);color:var(--dim);margin-left:4px}
 .vin{font:500 11px var(--mono);letter-spacing:.02em;padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:#d5d9e0;background:rgba(255,255,255,.05);white-space:nowrap}
 .vin b{font:700 9px var(--sans);letter-spacing:.14em;color:var(--dim);margin-right:5px}
@@ -285,7 +292,15 @@ a{color:inherit}
 /* the car's part of the screen */
 .zone{pointer-events:none;min-height:140px}
 .zone>*{pointer-events:auto}
-.photo{position:absolute;right:14px;top:8px;width:74px;height:54px;border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.4);box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.photo{display:none;position:absolute;border-radius:16px;overflow:hidden;border:1px solid rgba(255,255,255,.4);box-shadow:0 18px 50px rgba(0,0,0,.55)}
+/* the listing's own photo: beside the title on phones, beside the car on wide screens */
+.shot{float:right;position:relative;width:118px;height:88px;margin:3px 0 6px 12px;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.38);box-shadow:0 10px 30px rgba(0,0,0,.5);background:rgba(255,255,255,.04)}
+.shot img{width:100%;height:100%;object-fit:cover;display:block}
+.shot span{position:absolute;left:6px;bottom:6px;font:700 8px var(--sans);letter-spacing:.12em;text-transform:uppercase;padding:3px 6px;border-radius:999px;background:rgba(0,0,0,.62);color:#fff}
+.shot.add{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border-style:dashed;box-shadow:none;color:var(--mute)}
+.shot.add b{font:300 26px/1 var(--sans)}
+.shot.add span{position:static;background:none;padding:0;color:var(--mute)}
+.opts{clear:both}
 .photo img{width:100%;height:100%;object-fit:cover;display:block}
 .credit{margin:7px 6px 0;text-align:center;font:400 9.5px/1.3 var(--sans);color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .credit a{color:#8e949f}
@@ -383,6 +398,7 @@ a{color:inherit}
 .pill{display:inline-block;font:700 9px var(--sans);letter-spacing:.14em;text-transform:uppercase;padding:3px 7px;border-radius:999px;border:1px solid var(--line);color:var(--mute)}
 .pill.sold{background:var(--ink);color:#0b0c0e;border-color:var(--ink)}
 .pill.high_bid{color:var(--warn);border-color:rgba(245,184,74,.5)}
+.pill.live{color:#7ee8bd;border-color:rgba(52,211,153,.5)}
 .c-price{font:500 20px var(--sans);font-variant-numeric:tabular-nums;margin-left:8px}
 .c-delta{float:right;font:400 11.5px var(--sans);color:var(--dim);margin-top:5px}
 .c-title{margin-top:6px;font:500 13.5px/1.3 var(--sans)}
@@ -417,12 +433,21 @@ a{color:inherit}
 .msg{white-space:pre-wrap;font:400 14.5px/1.5 var(--sans);padding:14px;border-radius:14px;border:1px solid var(--line);background:rgba(255,255,255,.04)}
 .btn{display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:9px 16px;border-radius:999px;background:var(--ink);color:#0b0c0e;font:700 13.5px var(--sans);text-decoration:none}
 .btn.ghost{background:transparent;color:var(--ink);border:1px solid rgba(255,255,255,.3)}
+.btn.ghost.on{background:rgba(255,255,255,.16);border-color:#fff}
+.btn[disabled]{opacity:.55}
+.optbox,.linkbox{width:100%;margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--ink);font:400 16px/1.4 var(--sans)}
+.optbox{resize:vertical}
+.linkrow{display:flex;align-items:center;gap:8px;margin-top:10px}.linkrow .linkbox{flex:1;min-width:0;margin-top:0}.linkrow .btn{margin-top:0}
+.steps{margin:0;padding-left:20px;font:400 14px/1.5 var(--sans);color:var(--mute)}.steps li{margin-top:10px}.steps b{color:var(--ink)}
+.choice{display:flex;flex-wrap:wrap;gap:8px}.choice .btn{margin-top:0}
 .lightbox{position:absolute;inset:0;z-index:30;background:rgba(0,0,0,.9);display:grid;place-items:center;padding:16px}
 .lightbox img{max-width:100%;max-height:100%;border-radius:14px}
 .toast{position:absolute;z-index:25;left:50%;top:58px;transform:translateX(-50%);width:max-content;max-width:calc(100% - 28px);padding:11px 15px;border-radius:14px;background:rgba(20,21,25,.96);border:1px solid rgba(255,255,255,.22);font:400 13.5px/1.45 var(--sans);box-shadow:0 14px 40px rgba(0,0,0,.55)}
 .toast.bad{border-color:rgba(245,184,74,.6);color:#f6dfae}
 
 /* phones: keep the whole screen in view by trimming the second lines first, then the car's room */
+/* phones: the chips stay on one line and scroll sideways, so the bar at the bottom stays in view */
+@media (max-width:899px){.opts{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin-right:-18px;padding-right:18px}.opts::-webkit-scrollbar{display:none}.opts>*{flex:none}}
 @media (max-height:840px) and (max-width:899px){.stage{grid-template-rows:auto auto minmax(118px,1fr) auto auto auto auto}.zone{min-height:118px}.sub{-webkit-line-clamp:1}.note .fine{display:none}.dock{padding-top:8px}.tabs{padding-top:8px;min-height:44px}}
 @media (max-height:700px){.why{-webkit-line-clamp:1}}
 /* wide screens: title left, price right, the sheet becomes a side panel */
@@ -438,7 +463,8 @@ a{color:inherit}
   .nums .s{display:block}
   .tabs{grid-column:1/-1;justify-content:center}
   .dock{grid-column:1/-1;width:min(680px,100%);justify-self:center;padding-bottom:18px}
-  .photo{right:40px;top:auto;bottom:18px;width:150px;height:104px}
+  .shot{display:none}
+  .photo:not([hidden]){display:block;right:40px;top:50%;transform:translateY(-50%);width:clamp(200px,21vw,300px);aspect-ratio:4/3}
   .sheet{left:auto;top:0;bottom:0;width:460px;height:100%;border-radius:0;border-top:0;border-left:1px solid rgba(255,255,255,.18);transform:translateX(103%)}
   .credit .long{display:inline}
 }
@@ -528,6 +554,23 @@ function create(root) {
     if (btn) btn.click();
   };
 
+  /* the listing photo opens large; with no photo, the tile adds one; the missing-options chip opens the case */
+  const photoPick = document.createElement("input"); photoPick.type = "file"; photoPick.accept = "image/*"; photoPick.hidden = true; root.appendChild(photoPick);
+  photoPick.onchange = async () => {
+    const f = photoPick.files[0]; photoPick.value = ""; if (!f) return;
+    try {
+      const bmp = await createImageBitmap(f), k = Math.min(1, 1400 / Math.max(bmp.width, bmp.height));
+      const c = document.createElement("canvas"); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+      c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+      post("photo", { image: c.toDataURL("image/jpeg", 0.86) });
+    } catch (e) { toast("That picture could not be read. Try a PNG or JPG.", true); }
+  };
+  el.head.addEventListener("click", (e) => {
+    const shot = e.target.closest(".shot");
+    if (shot) { if (shot.classList.contains("add")) photoPick.click(); else { el.light.querySelector("img").src = S.d.photo; el.light.hidden = false; } return; }
+    if (e.target.closest(".addopts")) { openSheet("case"); setTimeout(() => { const box = el.sheetBody.querySelector(".optbox"); if (box) { el.sheetBody.scrollTop = Math.max(0, box.offsetTop - 120); box.focus({ preventScroll: true }); } }, 380); }
+  });
+
   /* a VIN, shown in full; a tap copies it */
   const vinChip = (vin, cls) => `<button type="button" class="vin${cls ? " " + cls : ""}" data-vin="${esc(vin)}" title="Copy the VIN"><b>VIN</b>${esc(vin)}</button>`;
   root.addEventListener("click", (e) => {
@@ -544,13 +587,16 @@ function create(root) {
     if (!d.hasCar) { el.head.innerHTML = ""; return; }
     const c = d.case || {};
     let row = d.sample ? '<span class="tag">Sample car</span>' : "";
-    if ((c.options || []).length) row += c.options.slice(0, 3).map((o) => `<span class="opt">${esc(o)}</span>`).join("") + (c.options.length > 3 ? `<span class="opt">+${c.options.length - 3} more</span>` : "");
-    else if (d.listed) row += '<span class="opt none">Options not listed</span>';
-    if (c.msrp) row += `<span class="opt">Sticker ${esc(c.msrp)}</span>`;
+    let shot = "";
+    if (d.photo) shot = `<button type="button" class="shot" aria-label="Open the listing photo"><img src="${esc(d.photo)}" alt=""><span>Listing photo</span></button>`;
+    else if (d.listed && !d.sample) shot = '<button type="button" class="shot add" aria-label="Add a photo of this car"><b>+</b><span>Add photo</span></button>';
     if (d.vin) row += vinChip(d.vin);
     else if (d.listed) row += '<span class="opt none">VIN not listed</span>';
+    if ((c.options || []).length) row += c.options.slice(0, 3).map((o) => `<span class="opt">${esc(o)}</span>`).join("") + (c.options.length > 3 ? `<span class="opt">+${c.options.length - 3} more</span>` : "");
+    else if (d.listed) row += '<button type="button" class="opt none addopts">Options missing: add</button>';
+    if (c.msrp) row += `<span class="opt">Sticker ${esc(c.msrp)}</span>`;
     if (d.seller) row += `<span class="seller">${esc(d.seller)}</span>`;
-    el.head.innerHTML = `<h1 class="title">${esc(d.title)}</h1><div class="sub">${(d.chips || []).map(esc).join(" · ")}</div><div class="opts">${row}</div>`;
+    el.head.innerHTML = `${shot}<h1 class="title">${esc(d.title)}</h1><div class="sub">${(d.chips || []).map(esc).join(" · ")}</div><div class="opts">${row}</div>`;
   }
 
   /* ---------- price and the one-line case ---------- */
@@ -582,7 +628,7 @@ function create(root) {
     if (el.rail.hidden) { dotsKey = ""; return; }
     if (!S.dragging) S.offer = { open: d.offer.open || null, target: d.offer.target || null, walk: d.offer.walk || null };
     const width = el.track.clientWidth || 340;
-    const key = JSON.stringify([a.lo, a.hi, d.ask, a.median, Math.round(width / 40), !!(d.offer.target || d.offer.open), (d.comps || []).map((k) => [k.price, k.status, k.use])]);
+    const key = JSON.stringify([a.lo, a.hi, d.ask, a.median, Math.round(width / 40), !!(d.offer.target || d.offer.open), (d.comps || []).map((k) => [k.price, k.group, k.use])]);
     if (key !== dotsKey) {
       const fresh = dotsKey === "" || key.length !== dotsKey.length;
       dotsKey = key;
@@ -597,10 +643,10 @@ function create(root) {
         while (lv < 2 && placed.some((q) => q.lv === lv && Math.abs(q.x - x) < near)) lv++;
         placed.push({ x, lv }); level[i] = lv;
       });
-      h += comps.map((k, i) => `<button type="button" class="dot ${esc(k.status)}${k.use ? "" : " off"}${fresh ? "" : " in"}" data-i="${i}" style="left:${pos(k.price)}%;top:${40 - level[i] * 13}px" aria-label="${esc(k.label)} ${esc(k.priceText)}"></button>`).join("");
-      const has = (s) => comps.some((k) => k.status === s);
+      h += comps.map((k, i) => `<button type="button" class="dot ${esc(k.status)}${k.use && k.group !== "ended" ? "" : " off"}${fresh ? "" : " in"}" data-i="${i}" style="left:${pos(k.price)}%;top:${40 - level[i] * 13}px" aria-label="${esc(k.label)} ${esc(k.priceText)}"></button>`).join("");
+      const has = (s) => comps.some((k) => k.group === s);
       el.legend.innerHTML = (has("sold") ? '<span><i class="sold"></i>Sold</span>' : "") + (has("high_bid") ? '<span><i class="high_bid"></i>No sale</span>' : "") +
-        (has("asking") ? '<span><i class="asking"></i>Asking</span>' : "") + (a.median ? `<span><i class="med"></i>Median sale ${esc(a.medianText)}</span>` : "");
+        (has("live") ? '<span><i class="asking"></i>For sale now</span>' : "") + (a.median ? `<span><i class="med"></i>Median sale ${esc(a.medianText)}</span>` : "");
       h += '<button type="button" class="knob open" data-k="open" aria-label="Opening offer"></button><button type="button" class="knob walk" data-k="walk" aria-label="Walk-away price"></button><button type="button" class="knob target" data-k="target" aria-label="Target price"></button>';
       el.track.innerHTML = h;
       if (fresh) el.track.querySelectorAll(".dot").forEach((dot, i) => setTimeout(() => dot.classList.add("in"), 250 + i * 90));
@@ -661,7 +707,7 @@ function create(root) {
   const compCard = (k, big) => {
     const url = safeUrl(k.url);
     const flag = k.kind === "page" ? '<div class="c-flag">This link opens a results page, not this car.</div>' : (k.linkOk === false ? '<div class="c-flag">Link not confirmed. Open it before you cite it.</div>' : "");
-    const text = `<div><span class="pill ${esc(k.status)}">${esc(k.label)}</span><span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
+    const text = `<div><span class="pill ${esc(k.group)}">${esc(k.label)}</span><span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
       `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.vin ? `<div>${vinChip(k.vin, "c-vin")}</div>` : ""}${flag}` +
       (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">Open ${ARROW} <small>${esc(k.host)}</small></a>` : "") + "</div>";
     return big ? `<div class="card${k.use ? "" : " off"}">${text}${k.image ? `<img src="${esc(k.image)}" alt="" loading="lazy">` : "<span></span>"}</div>` : text;
@@ -677,11 +723,13 @@ function create(root) {
   root.addEventListener("pointerdown", (e) => { if (!el.pop.hidden && !e.target.closest(".pop") && !e.target.closest(".dot")) { el.pop.hidden = true; el.track.querySelectorAll(".dot.sel").forEach((x) => x.classList.remove("sel")); } });
 
   /* ---------- tabs and the sheet ---------- */
+  const counts = (d) => [(d.comps || []).filter((k) => k.group === "sold").length, (d.comps || []).filter((k) => k.group === "live").length];
   function paintTabs(d) {
     if (S.busy || !d.hasCar) { el.tabs.innerHTML = ""; return; }
-    const c = d.case || {}, n = (d.comps || []).length;
+    const c = d.case || {}, [nSold, nSale] = counts(d);
     el.tabs.innerHTML = `<button type="button" class="tab${(c.reasons || []).length ? " lead" : ""}" data-tab="case">The case</button>` +
-      `<button type="button" class="tab" data-tab="comps">Comps<b>${n}</b></button>` +
+      `<button type="button" class="tab" data-tab="comps">Sold<b>${nSold}</b></button>` +
+      `<button type="button" class="tab" data-tab="sale">For sale now<b>${nSale}</b></button>` +
       `<button type="button" class="tab" data-tab="message">Message</button>` +
       `<button type="button" class="tab" data-tab="model">3D model</button>` +
       `<button type="button" class="tab" data-tab="details">Edit and print ↓</button>`;
@@ -692,15 +740,17 @@ function create(root) {
   $(".close").onclick = closeSheet; el.scrim.onclick = closeSheet;
   el.sheetTabs.onclick = (e) => { const b = e.target.closest(".tab"); if (b) { S.tab = b.dataset.tab; renderSheet(); } };
   function renderSheet() {
-    const d = S.d, c = d.case || {}, n = (d.comps || []).length;
-    el.sheetTabs.innerHTML = [["case", "The case"], ["comps", `Comps<b>${n}</b>`], ["message", "Message"], ["model", "3D model"]].map(([id, t]) => `<button type="button" class="tab${S.tab === id ? " lead" : ""}" data-tab="${id}">${t}</button>`).join("");
+    const d = S.d, c = d.case || {}, [nSold, nSale] = counts(d);
+    const list = (groups, title) => { const rows = (d.comps || []).filter((k) => groups.includes(k.group)); return rows.length ? `<h3>${title} · ${rows.length}</h3>` + rows.map((k) => compCard(k, true)).join("") : ""; };
+    el.sheetTabs.innerHTML = [["case", "The case"], ["comps", `Sold<b>${nSold}</b>`], ["sale", `For sale now<b>${nSale}</b>`], ["message", "Message"], ["model", "3D model"]].map(([id, t]) => `<button type="button" class="tab${S.tab === id ? " lead" : ""}" data-tab="${id}">${t}</button>`).join("");
     let h = "";
     if (S.tab === "case") {
       h += `<div class="lead-line">${esc(c.headline || "")}</div>${c.sub ? `<div class="lead-sub">${esc(c.sub)}</div>` : ""}`;
       if ((c.reasons || []).length) h += "<h3>The evidence</h3>" + c.reasons.map((r, i) => `<div class="ev"><span class="n">${i + 1}</span><span class="t">${esc(r.text)}</span>${(r.links || []).filter((l) => safeUrl(l.url)).map((l) => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} ${ARROW}</a>`).join("")}</div>`).join("");
       h += "<h3>Options</h3>";
       if ((c.options || []).length) h += `<div class="opts">${c.options.map((o) => `<span class="opt">${esc(o)}</span>`).join("")}${c.msrp ? `<span class="opt">Sticker ${esc(c.msrp)}</span>` : ""}</div>`;
-      else h += '<div class="hintbox">The listing does not show this car\'s options. On a car like this they can move the price by thousands. Ask the seller for the window sticker or build sheet before you rely on these numbers.</div>';
+      else h += '<div class="hintbox">No options were read for this car, and they can move the price by thousands. If the listing has a dealer description, paste it here. Otherwise ask the seller for the window sticker or build sheet.</div>' +
+        `<textarea class="optbox" rows="3" placeholder="Paste the dealer's description or the options list"></textarea><button type="button" class="btn readopts"${S.optBusy ? " disabled" : ""}>${S.optBusy ? "Reading the description" : "Read the options"}</button>`;
       if ((c.pushback || []).length) h += "<h3>What the seller will say</h3>" + c.pushback.map((p) => `<div class="say"><div class="q">${esc(p.say)}</div>${p.reply ? `<div class="a">${esc(p.reply)}</div>` : ""}</div>`).join("");
       if (c.summary || (c.sources || []).length) {
         h += "<h3>What the search found</h3>";
@@ -708,43 +758,74 @@ function create(root) {
         if (c.summary) h += `<div class="lead-sub">${esc(c.summary)}</div>`;
       }
     } else if (S.tab === "comps") {
-      h = n ? (d.comps || []).map((k) => compCard(k, true)).join("") : '<div class="lead-sub">No comps yet. Add a car with the bar at the bottom, or add comps under Edit and print.</div>';
+      h = list(["sold"], "Completed sales") + list(["high_bid"], "Auctions that ended without a sale");
+      if (!h) h = '<div class="lead-sub">No completed sales yet. Add a car with the bar at the bottom, or add comps under Edit and print.</div>';
+    } else if (S.tab === "sale") {
+      h = list(["live"], "For sale now") + list(["ended"], "Listings that have sold or gone");
+      if (!nSale) h = '<div class="lead-sub">No cars for sale were found yet. The next search looks for at least three current listings. You can also add one under Edit and print.</div>' + h;
+      else h = '<div class="lead-sub">Other cars you could buy today. Asking prices sit above what cars actually sell for, so use these as alternatives and leverage, not as the price.</div>' + h;
     } else if (S.tab === "message") {
       h = d.message ? `<div class="msg">${esc(d.message)}</div><button type="button" class="btn copy">Copy the message</button>` : '<div class="lead-sub">No message yet. Draft one under Edit and print, in the Sheet tab.</div>';
     }
     if (S.tab === "model") { renderModelTab(); return; }
     el.sheetBody.innerHTML = h; el.sheetBody.scrollTop = 0;
+    const readopts = el.sheetBody.querySelector(".readopts");
+    if (readopts) readopts.onclick = () => {
+      const text = el.sheetBody.querySelector(".optbox").value.trim();
+      if (!S.d.connected) { toast("Connect your Anthropic API key first, in the bar at the bottom.", true); return; }
+      if (text.length < 8) { toast("Paste the dealer's description first.", true); return; }
+      S.optBusy = true; readopts.disabled = true; readopts.textContent = "Reading the description";
+      post("options", { text });
+    };
     const copy = el.sheetBody.querySelector(".copy");
     if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(S.d.message); copy.textContent = "Copied"; } catch (e) { toast("Could not copy. Select the text and copy it by hand.", true); } };
   }
 
-  /* ---------- your own 3D file for this car, kept on this device ---------- */
-  const modelSlot = () => "model:" + (S.d.activeId || "");
+  /* ---------- a 3D model of the actual car: the person finds and loads it; it stays on their device ---------- */
+  const modelSlot = () => "glb:" + (S.d.modelKey || S.d.activeId || "");
+  const isGlb = (buf) => buf.byteLength > 12 && new DataView(buf).getUint32(0, true) === 0x46546c67;
   async function renderModelTab() {
     let rec = null;
     try { rec = await store.get(modelSlot()); } catch (e) {}
     if (S.tab !== "model") return;
-    const builtIn = S.d.model ? "the built-in concept coupe" : "a simple shape for this body type";
-    el.sheetBody.innerHTML = `<div class="lead-line">${rec ? "Showing your file" : "Showing " + builtIn}</div>` +
-      `<div class="lead-sub">${rec ? esc(rec.name) + " · " + (rec.file.byteLength / 1048576).toFixed(1) + " MB" : "You can show your own 3D model of this car instead."}</div>` +
-      `<h3>Your own model</h3><input type="file" class="glb" accept=".glb,model/gltf-binary" hidden>` +
-      `<button type="button" class="btn pick">${rec ? "Choose a different file" : "Choose a .glb file"}</button>` +
-      (rec ? ` <button type="button" class="btn ghost turn">Turn 90°</button> <button type="button" class="btn ghost drop">Remove</button>` +
+    const d = S.d, name = d.modelName || "this car";
+    const find = "https://sketchfab.com/search?features=downloadable&type=models&q=" + encodeURIComponent(d.find3d || d.title || "car");
+    const builtIn = d.model ? "the built-in concept coupe" : "a simple shape for this body type";
+    el.sheetBody.innerHTML = `<div class="lead-line">${rec ? "Showing your 3D model" : "Showing " + builtIn}</div>` +
+      `<div class="lead-sub">${rec ? esc(rec.name) + " · " + (rec.file.byteLength / 1048576).toFixed(1) + " MB" : "Load a 3D model of the actual car and it takes the place of this one."}</div>` +
+      `<h3>Use a model of the actual car</h3>` +
+      `<ol class="steps"><li>Find one you like and download it as <b>GLB</b>.<br><a class="btn ghost" href="${esc(find)}" target="_blank" rel="noopener">Find a 3D model of ${esc(name)} ${ARROW}</a></li>` +
+      `<li>Load it here.<br><input type="file" class="glb" accept=".glb,model/gltf-binary" hidden><button type="button" class="btn pick">${rec ? "Choose a different file" : "Choose the .glb file"}</button>` +
+      `<div class="linkrow"><input type="url" class="linkbox" placeholder="or paste a link to a .glb file" inputmode="url"><button type="button" class="btn ghost loadlink">Load</button></div></li></ol>` +
+      (rec ? `<div><button type="button" class="btn ghost turn">Turn 90°</button> <button type="button" class="btn ghost drop">Remove</button></div>` +
         `<h3>Credit shown under the car</h3><textarea class="credit-text" rows="2" placeholder="“Model name” by Artist, CC BY 4.0, link">${esc(rec.credit || "")}</textarea><button type="button" class="btn ghost save">Save the credit</button>` : "") +
-      `<div class="hintbox">The file stays on this device and is not uploaded. Use only models you have the right to use, and credit the artist the way their licence asks.</div>`;
+      `<div class="hintbox">The file is kept in this browser, on this device only. It is never uploaded to the app or stored in it, and it is used for every ${esc(name)} in your garage. Use models you have the right to use, and credit the artist the way their licence asks.</div>` +
+      (d.canDetail ? `<h3>Built-in car</h3><div class="choice"><button type="button" class="btn ghost${d.detailed ? "" : " on"}" data-detail="0">Simple shape</button><button type="button" class="btn ghost${d.detailed ? " on" : ""}" data-detail="1">Concept coupe</button></div>` : "");
     el.sheetBody.scrollTop = 0;
     const file = el.sheetBody.querySelector(".glb"), refresh = () => { renderModelTab(); if (S.scene) S.scene.reload(S.d); };
-    el.sheetBody.querySelector(".pick").onclick = () => file.click();
-    file.onchange = async () => {
-      const f = file.files[0]; if (!f) return;
-      if (f.size > 80 * 1048576) { toast("That file is over 80 MB, which is too heavy for a phone. Pick a smaller one.", true); return; }
-      try { await store.set(modelSlot(), { name: f.name, file: await f.arrayBuffer(), credit: rec ? rec.credit : "", turn: 0 }); refresh(); }
+    const keep = async (buf, label) => {
+      if (buf.byteLength > 80 * 1048576) { toast("That file is over 80 MB, which is too heavy for a phone. Pick a smaller one.", true); return; }
+      if (!isGlb(buf)) { toast("That is not a GLB file. When you download the model, pick the GLB format.", true); return; }
+      try { await store.set(modelSlot(), { name: label, file: buf, credit: rec ? rec.credit : "", turn: 0 }); refresh(); toast("Loaded. Add the artist's credit so it shows under the car."); }
       catch (e) { toast("That file could not be saved on this device.", true); }
     };
+    el.sheetBody.querySelector(".pick").onclick = () => file.click();
+    file.onchange = async () => { const f = file.files[0]; if (f) keep(await f.arrayBuffer(), f.name); };
     const on = (q, fn) => { const b = el.sheetBody.querySelector(q); if (b) b.onclick = fn; };
+    on(".loadlink", async () => {
+      const url = el.sheetBody.querySelector(".linkbox").value.trim();
+      if (!/^https:\/\//i.test(url)) { toast("Paste a link that starts with https://", true); return; }
+      toast("Loading the model");
+      try {
+        const res = await fetch(url, { credentials: "omit" });
+        if (!res.ok) throw new Error("status " + res.status);
+        keep(await res.arrayBuffer(), decodeURIComponent(url.split("?")[0].split("/").pop() || "model.glb"));
+      } catch (e) { toast("That site does not let the app load the file from a link. Download it and choose the file instead.", true); }
+    });
     on(".turn", async () => { rec.turn = ((rec.turn || 0) + 1) % 4; await store.set(modelSlot(), rec); refresh(); });
     on(".drop", async () => { await store.del(modelSlot()); refresh(); });
     on(".save", async () => { rec.credit = el.sheetBody.querySelector(".credit-text").value.trim(); await store.set(modelSlot(), rec); refresh(); });
+    el.sheetBody.querySelectorAll("[data-detail]").forEach((b) => { b.onclick = () => { if (!b.classList.contains("on")) post("detail", b.dataset.detail === "1"); }; });
   }
 
   /* ---------- the bar: a key first, then cars ---------- */
@@ -915,6 +996,8 @@ function create(root) {
   let noticeKey = "";
   S.update = (d) => {
     S.d = d; S.waiting = false; clearTimeout(S.waitTimer);
+    if (S.optBusy && d.seq !== S.optSeq) S.optBusy = false;
+    S.optSeq = d.seq;
     if (S.busy && d.seq !== S.sentSeq && !d.busy) {
       S.busy = false;
       if (d.error) toast(d.error, true, 12000);
@@ -1210,14 +1293,14 @@ function makeScene(THREE, addons, root, S) {
     })().catch((e) => { console.warn("Deal Sheet: that 3D file could not be opened.", e); if (S.toastOut) S.toastOut("That 3D file could not be opened. If it is Draco-compressed, download the plain glTF Binary (.glb) version instead."); });
   }
   function setCar(d, force) {
-    const key = d.hasCar ? JSON.stringify([d.activeId, d.shape, d.paint, d.cabin, d.model ? d.model.url : ""]) : "none";
+    const key = d.hasCar ? JSON.stringify([d.activeId, d.modelKey, d.shape, d.paint, d.cabin, d.model ? d.model.url : ""]) : "none";
     if (key === carKey && !force) return;
     const first = carKey === ""; carKey = key; showCredit(null);
     if (!d.hasCar) { for (const holder of [upright, mirrored]) while (holder.children.length) { const old = holder.children.pop(); if (holder === upright) dispose(old); } root.dataset.car = "none"; return; }
     place(buildShape(d.paint || "#8a9099", d.shape), true); root.dataset.car = "shape";
     if (!first) angle = -0.62;
     if (!addons) return;
-    store.get("model:" + (d.activeId || "")).catch(() => null).then((rec) => {
+    store.get("glb:" + (d.modelKey || d.activeId || "")).catch(() => null).then((rec) => {
       if (carKey !== key) return;
       if (rec && rec.file) loadOwn(rec, key); else if (d.model && d.model.url) loadModel(d, key);
     });
@@ -1228,11 +1311,17 @@ function makeScene(THREE, addons, root, S) {
     const R = root.getBoundingClientRect(), Z = zone.getBoundingClientRect();
     const W = Math.max(R.width, 10), H = Math.max(R.height, 10), zw = Math.max(Z.width, 10), zh = Math.max(Z.height, 10);
     renderer.setSize(W, H, false);
-    const perUnit = Math.min(zw / 6.7, zh / 2.75);                      /* pixels one metre of car should cover */
+    let perUnit = Math.min(zw / 6.7, zh / 2.75), cx = Z.left - R.left + zw / 2;   /* pixels one metre of car should cover */
+    const card = zone.querySelector(".photo");                         /* the listing photo beside the car: make room for it */
+    if (card && card.offsetWidth) {
+      const edge = card.getBoundingClientRect().left - R.left - 18, room = edge - (Z.left - R.left);
+      if (cx + perUnit * 3.1 > edge && room > 200) { perUnit = Math.min(perUnit, room / 6.7); cx = Z.left - R.left + room / 2; }
+    }
     const D = H / (2 * Math.tan((camera.fov * Math.PI) / 360) * perUnit);
     camera.aspect = W / H; camera.position.set(0, D * 0.17 + 0.5, D); camera.lookAt(0, 0.72, 0);
-    camera.setViewOffset(W, H, W / 2 - (Z.left - R.left + zw / 2), H / 2 - (Z.top - R.top + zh * 0.5), W, H);
+    camera.setViewOffset(W, H, W / 2 - cx, H / 2 - (Z.top - R.top + zh * 0.5), W, H);
     camera.updateProjectionMatrix();
+    renderer.render(scene, camera);                                     /* a resize clears the canvas: draw at once */
   }
 
   let down = null;

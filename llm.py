@@ -168,6 +168,8 @@ def _comps_block(comps: list[dict]) -> str:
             bits.append(f"VIN {comp['vin']}")
         if comp.get("note"):
             bits.append(f"note: {comp['note']}")
+        if comp["status"] == "asking":
+            bits.append("listing has ended" if comp.get("available") == "no" else "for sale now")
         if comp.get("url"):
             bits.append(comp["url"])
             if link_kind(comp["url"]) == "page":
@@ -202,8 +204,9 @@ LISTING_TOOL = {
             "url": {"type": "string"},
             "notes": {"type": "string", "description": "Price drops, title status or condition notes, in one or two sentences."},
             "options": {"type": "array", "items": {"type": "string"},
-                        "description": "Factory options and packages the listing names, one per item, as written "
-                                       "(for example Sport Chrono Package, ceramic brakes, sport exhaust). Leave out if none are shown."},
+                        "description": "Factory options and packages the listing names anywhere, including the "
+                                       "dealer's description and feature lists, one per item, as written (for example "
+                                       "Sport Chrono Package, ceramic brakes, sport exhaust). Leave out if none are shown."},
             "msrp": {"type": "integer", "description": "Original sticker price (MSRP with options) in whole US dollars, only if the listing states it."},
             "shape": {"type": "string", "enum": ["coupe", "convertible", "sedan", "hatch", "wagon", "suv", "truck", "van"],
                       "description": "Body type for the app's 3D picture only. Use the listing; if it does not say, use "
@@ -244,7 +247,9 @@ def read_listing(client, model: str, text: str = "", image: bytes | None = None,
         "This is a used-car listing (a screenshot, the text of its page, its link, or a mix). Record its "
         "facts with the record_listing tool.\n"
         "Rules: copy what the listing shows. Leave a field out when the listing does not show it. "
-        "Never guess the transmission, body style or options. If the listing shows an old price "
+        "Never guess the transmission, body style or options. Read the whole listing, including the dealer's or "
+        "seller's description, comments and feature lists: options, packages, the VIN and the original sticker "
+        "price named anywhere in them count as shown, so record them. If the listing shows an old price "
         "struck through and a new price, record the new price and mention the drop in notes. "
         "If the make or the model is not shown anywhere, record an empty string for it. "
         "A link's own words (for example a year, make and model in its path) count as shown. "
@@ -258,7 +263,7 @@ def read_listing(client, model: str, text: str = "", image: bytes | None = None,
     if url.strip():
         prompt += "\n\nListing link: " + url.strip()[:600]
     if text.strip():
-        prompt += "\n\nListing text:\n" + text.strip()[:14000]
+        prompt += "\n\nListing text:\n" + text.strip()[:60000]
     content.append({"type": "text", "text": prompt})
     return _call_tool(client, model, LISTING_TOOL, content, max_tokens=8000, effort="low",
                       problem="Claude did not return listing details. Try a clearer screenshot or paste the text.")
@@ -290,6 +295,9 @@ COMPS_TOOL = {
                                                               "vehicle page. Never a search, category or market page."},
                         "options": {"type": "string", "description": "Notable factory options or the original sticker price, if the source states them."},
                         "vin": {"type": "string", "description": "The car's 17-character VIN, when the source or its address shows it."},
+                        "available": {"type": "string", "enum": ["yes", "no", "unknown"],
+                                      "description": "For an asking price only: yes when the car is for sale right now, "
+                                                     "no when its page says sold or removed."},
                         "note": {"type": "string", "description": "Transmission, modifications or caveats. One short sentence."},
                     },
                     "required": ["status", "title", "price", "url"],
@@ -374,7 +382,9 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "Trailer and Cars & Bids results, so use them to fill in prices, dates, options and VINs. The Classic "
         "Valuer shows prices in pounds: take the dollar price from another source.\n"
         "4. Auctions that ended without a sale (record as high_bid).\n"
-        "5. Current asking prices for close matches, including certified cars.\n"
+        "5. Cars for sale right now: at least three current listings of close matches (dealer sites, the maker's "
+        "pre-owned finder, Cars.com, Autotrader, CarGurus), each with its own page, price, miles and VIN. "
+        "Record them as asking with available yes. The buyer wants to see what else is on the market today.\n"
         "Rules:\n"
         "- Record only prices, dates and miles that appear in the search results. Never estimate or "
         "fill a gap from memory.\n"
@@ -387,10 +397,12 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "- Name the auction site as the source (Bring a Trailer, Cars & Bids) even when you found the sale "
         "through an aggregator.\n"
         "- Keep sold, high_bid and asking separate. An asking price is not a sale.\n"
+        "- If a listing's page says sold or removed, record it as asking with available no, never as for sale.\n"
         "- Match the transmission and body style. If a comp differs, say so in its note.\n"
         "- Classic.com snippets show a placeholder '6865 mi' before the real mileage. Use the second figure.\n"
         "- Convert foreign prices only when the source gives a US dollar figure; otherwise skip the comp.\n"
-        "- Aim for 6 to 12 comps. Fewer good ones beat many weak ones."
+        "- Aim for 8 to 14 comps: completed sales first, then three to five cars for sale now. Fewer good ones "
+        "beat many weak ones."
     )
 
 
@@ -468,6 +480,9 @@ def suggest_offer(client, model: str, car: dict, comps: list[dict]) -> dict:
         "more than a plain one, so do not treat them as equal. Say so in the reasons when it changes the number. "
         "If the subject car's options are not listed, make one pushback line a reminder to get the window "
         "sticker or build sheet before agreeing a price.\n"
+        "Comps marked 'for sale now' are other cars the buyer could buy today. Asking prices sit above sale "
+        "prices, so do not anchor on them, but when a comparable car is listed for less, or several sit unsold, "
+        "say so in a reason or a pushback line: it is leverage.\n"
         "Round to the nearest $500. Keep open < target < walk_away, and keep walk_away at or below "
         "the asking price unless the comps clearly support more.\n"
         "Write reasons as plain facts with the comp's price, miles and date. No em dashes."

@@ -17,10 +17,13 @@ what that car has been selling for and gives you a typical sale price, the comps
 
 ## What you see
 
-- **The car.** A 3D car in the listing's paint color that you can drag to spin. Coupes get a detailed
-  concept coupe (see Credits); other body types get a simple shape of the right kind (convertible,
-  sedan, hatchback, wagon, SUV, pickup or van). None of these is a model of any maker's design. You
-  can load your own 3D file for a car, with a credit line for its artist (the **3D model** tab).
+- **The car.** A 3D car in the listing's paint color that you can drag to spin: a simple shape of the
+  right body type (coupe, convertible, sedan, hatchback, wagon, SUV, pickup or van), or, for coupes,
+  a detailed concept coupe if you pick it (see Credits). Neither is a model of any maker's design.
+  To see the actual car in 3D, load a model of it yourself in the **3D model** tab (see below).
+- **The listing photo.** The listing's own picture sits beside the title on a phone and beside the
+  car on a wide screen. Tap it to see it large. If the site would not give the app a picture, tap
+  **Add photo**.
 - **The price and the reason.** The asking price, how far it sits from the median of the sold comps,
   and one line of evidence. **See the case** opens the full reasoning: each point links to the sale
   or listing it rests on, followed by the car's options, what the seller is likely to say and how to
@@ -30,14 +33,15 @@ what that car has been selling for and gives you a typical sale price, the comps
   line at the median sale and a solid line at the asking price. Your offer is the green band on the
   line: drag its handles to set the open, target and walk-away prices, and the out-the-door total and
   monthly payment follow. Tap a dot to see that car.
-- **Options.** The car's options and original sticker price are read from the listing and shown
-  under the title; comps carry theirs too, and the offer reasoning accounts for the difference. When
-  a listing does not show them, the app says "Options not listed" so you know to ask for the window
-  sticker.
+- **Options.** The car's options and original sticker price are read from the listing, including
+  the dealer's description, and shown under the title; comps carry theirs too, and the offer
+  reasoning accounts for the difference. When none were read, tap **Options missing: add** and paste
+  the dealer's description, or ask the seller for the window sticker.
 - **VINs.** The car's VIN shows under the title and each comp's VIN on its card; tap one to copy it.
   When a listing leaves the VIN out, the app says so. Comp VINs are also read out of links that
   contain them (Classic.com's do).
-- **Comps.** Each comp has a button that opens that car's own page. A link that opens a list of
+- **Sold, and for sale now.** Completed sales and the cars you could buy today are separate lists.
+  Each comp has a button that opens that car's own page. A link that opens a list of
   results instead of one car is flagged on the screen and on the PDF, and is never offered as the
   proof link for a point in the case.
 - **Message.** A drafted offer message with a Copy button.
@@ -123,8 +127,8 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
 ## What to expect from the web research
 
 - Results come from Claude's web search tool, so they are search results, not page scrapes.
-- Every run searches Bring a Trailer and Cars & Bids first, then other auction sites and asking
-  prices. The case shows how many comps came from each place, including "none" for those two.
+- Every run searches Bring a Trailer and Cars & Bids first, then other auction sites, then at least
+  three cars that are for sale right now. The case shows how many comps came from each place, including "none" for those two.
 - Every comp is labeled sold, high bid or asking, and its link is checked against the URLs the
   search actually returned. A link that was not in the results is flagged.
 - Claude is told to record each car's own page, never a results page, and the app checks the link's
@@ -140,9 +144,12 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   The credit shows under the car whenever the model is on screen.
 - **three.js** and its glTF loader (MIT), **DM Sans** and **JetBrains Mono** (SIL Open Font License).
 
-**Your own 3D file.** In the **3D model** tab, choose a `.glb` file for the car on screen and type
-the credit its licence asks for (title, artist, licence). The file stays in your browser, is never
-uploaded, and its credit shows under the car. Use only models whose licence allows it.
+**A 3D model of the actual car.** The app does not ship models of real cars. You can add one for
+yourself in the **3D model** tab: **Find a 3D model** opens a search for downloadable models of the
+car, you download one as GLB, then choose the file (or paste a link to a `.glb`) and type the credit
+its licence asks for. The file is kept in your browser on your device only. It is never uploaded to
+the app or stored in it, it is used for every car of that make and model in your garage, and its
+credit shows under the car. Use only models whose licence allows it.
 
 To bundle another model with the app, put a `.glb` in `static/models/`, add it to `PRO_MODELS` in
 `showcase.py` with its credit, and name its body-paint material `Paint`.
