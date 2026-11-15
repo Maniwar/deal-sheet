@@ -23,12 +23,13 @@ import anthropic
 
 from calc import MIRROR_SITES, car_facts, car_title, clean_comps, host_of, is_mirror, link_kind, mark_other_trim, merge_comps, money, normalize_url
 
-MODELS = {
-    "Sonnet 5.5 (balanced)": "claude-sonnet-5-5",
+MODELS = {                                   # the first one is the default
     "Haiku 5.5 (fastest)": "claude-haiku-5-5",
+    "Sonnet 5.5 (balanced)": "claude-sonnet-5-5",
     "Opus 5.5 (most thorough)": "claude-opus-5-5",
 }
-DEFAULT_MODEL = "claude-sonnet-5-5"
+DEFAULT_MODEL = "claude-haiku-5-5"
+_NO_EFFORT: set[str] = set()                 # models that turned down an effort level, so it is not sent to them again
 WEB_SEARCH_TYPE = "web_search_20250305"
 
 
@@ -167,7 +168,7 @@ def _create(client, effort: str | None = None, progress: Progress | None = None,
 
     With `progress`, the request is streamed and each web search is reported as it happens.
     """
-    if effort:
+    if effort and kwargs.get("model") not in _NO_EFFORT:
         kwargs["output_config"] = {"effort": effort}
     try:
         if progress is not None:
@@ -177,6 +178,10 @@ def _create(client, effort: str | None = None, progress: Progress | None = None,
         detail = str(getattr(exc, "message", "") or exc).lower()
         if "output_config" in kwargs and ("effort" in detail or "output_config" in detail):
             kwargs.pop("output_config")        # a model without effort levels: send it again without one
+            _NO_EFFORT.add(kwargs.get("model"))
+            return _create(client, progress=progress, label=label, **kwargs)
+        if "cache_control" in kwargs and "cache" in detail:
+            kwargs.pop("cache_control")        # somewhere caching is not offered: send it again without it
             return _create(client, progress=progress, label=label, **kwargs)
         raise LLMError(f"The API returned an error ({exc.status_code}): {exc.message}") from exc
     except anthropic.AuthenticationError as exc:
@@ -566,6 +571,16 @@ def _known_note(known) -> str:
             "again:\n" + "\n".join(f"- {link}" for link in links))
 
 
+def _tokens_note(used: dict) -> str:
+    """What one search cost in tokens, for the live lines: ' (41k tokens in, 12k of them from cache, 2k out)'."""
+    def k(n: int) -> str:
+        return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
+    read, total = used["cache_read_input_tokens"], used["input_tokens"] + used["cache_read_input_tokens"] + used["cache_creation_input_tokens"]
+    if not total:
+        return ""
+    return f" ({k(total)} tokens in{f', {k(read)} of them from cache' if read else ''}, {k(used['output_tokens'])} out)"
+
+
 def _research(client, model: str, prompt: str, max_searches: int, max_rounds: int, problem: str,
               car: dict | None = None, only=None, never=None, progress: Progress | None = None, label: str = "Search") -> dict:
     """Run one web research turn that ends in a record_comps call.
@@ -580,9 +595,16 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
     tools = [search, COMPS_TOOL]
     messages = [{"role": "user", "content": prompt}]
     seen_urls: set[str] = set()
-    for _ in range(max_rounds):
+    used = {"input_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 0}
+    for turn in range(max_rounds):
+        # A second or later round sends the whole search so far again, so that part is read from the cache.
+        # The first round is new every time, and writing it to the cache would only cost more.
+        again = {"cache_control": {"type": "ephemeral"}} if turn else {}
         response = _create(client, effort="medium", progress=progress, label=label, model=model, max_tokens=16000,
-                           tools=tools, messages=list(messages))
+                           tools=tools, messages=list(messages), **again)
+        usage = _field(response, "usage")
+        for key in used:
+            used[key] += int(_field(usage, key) or 0) if usage is not None else 0
         seen_urls |= _search_urls(response)
         recorded = _tool_input(response, "record_comps")
         if isinstance(recorded, dict):
@@ -593,7 +615,7 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
             for comp in comps:
                 comp["link_ok"] = normalize_url(comp["url"]) in seen_urls if comp["url"] else False
             if progress:
-                progress.say(f"{label}: {len(comps)} car{'s' if len(comps) != 1 else ''} recorded")
+                progress.say(f"{label}: {len(comps)} car{'s' if len(comps) != 1 else ''} recorded{_tokens_note(used)}")
             return {
                 "comps": comps,
                 "summary": str(recorded.get("summary") or "").strip(),

@@ -118,7 +118,17 @@ panel and open that file on the other device.
 
 ## Models
 
-The app offers Claude Sonnet 5.5, Haiku 5.5 and Opus 5.5. Sonnet 5.5 and Opus 5.5 reject a forced
+The app offers Claude Haiku 5.5, Sonnet 5.5 and Opus 5.5, and uses **Haiku 5.5 unless you pick
+another** under Settings. Haiku is the fastest and cheapest; Sonnet and Opus read listings and
+follow the matching rules more carefully, so switch for a car that matters. The checks the app
+makes itself (body style, trim, VIN, duplicate sales, price-guide pages) apply whichever you use.
+
+Prompt caching is used where it pays: when a search runs to a second round, the search so far is
+sent again and is read from the cache. Every other request is new each time (another car, another
+site, fresh results), and writing those to the cache would cost more, not less. Each search line
+on screen ends with the tokens it used and how many came from the cache.
+
+Sonnet 5.5 and Opus 5.5 reject a forced
 tool choice, think by default and count thinking toward the output limit, so `llm.py` asks for
 tool calls in the prompt, retries once when a reply has none, and sets generous output limits.
 

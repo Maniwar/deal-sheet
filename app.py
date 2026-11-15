@@ -615,6 +615,8 @@ def current_offer() -> dict:
 PREF_NUMBERS = {"tax_rate": (float, 0.0, 15.0), "fees": (float, 0.0, 1e7), "apr": (float, 0.0, 30.0),
                 "down": (float, 0.0, 1e8), "months": (int, 0, 120), "max_searches": (int, 3, 20)}
 PREF_SWITCHES = ("want_photos", "detailed_car")
+PREFS_VERSION = 2                    # 2: Haiku became the default model
+OLD_DEFAULT_MODEL = "Sonnet 5.5 (balanced)"
 
 
 def current_prefs() -> dict:
@@ -622,7 +624,7 @@ def current_prefs() -> dict:
     prefs = {key: kind(ss[key]) for key, (kind, _, _) in PREF_NUMBERS.items()}
     prefs.update({key: bool(ss[key]) for key in PREF_SWITCHES})
     prefs.update({"buyer": str(ss["buyer"] or "").strip()[:60], "model_label": ss["model_label"],
-                  "qr_label": ss.get("qr_label")})
+                  "qr_label": ss.get("qr_label"), "v": PREFS_VERSION})
     return prefs
 
 
@@ -641,7 +643,9 @@ def apply_prefs(saved: dict) -> None:
             ss[key] = saved[key]
     if isinstance(saved.get("buyer"), str) and saved["buyer"].strip():
         ss["buyer"] = saved["buyer"].strip()[:60]
-    if saved.get("model_label") in llm.MODELS:
+    # Settings saved before the default changed hold the old default, which nobody chose: let the new one apply.
+    chosen = saved.get("v") == PREFS_VERSION or saved.get("model_label") != OLD_DEFAULT_MODEL
+    if saved.get("model_label") in llm.MODELS and chosen:
         ss["model_label"] = saved["model_label"]
     if saved.get("qr_label") in QR_SIZES:
         ss["qr_label"] = saved["qr_label"]
