@@ -43,14 +43,21 @@ def split_options(text) -> list[str]:
     return out
 
 
-def trust_of(comp: dict) -> int:
+def trust_of(comp: dict, car: dict | None = None) -> int:
     """How far a comp can be checked, for sorting and for its colour on the price line.
 
-    1: its link opens that one car's own page and it has a VIN. 2: its own page, no VIN. 3: nothing to open (read
+    1: its link opens that one car's own page, it has a VIN and nothing is left to confirm. 2: its own page, with
+    something left to confirm: no VIN, no word on whether it is a manual or an automatic when the buyer's car
+    states which it is, or a for-sale page the app could not confirm still shows the car. 3: nothing to open (read
     from a list, or a link the search did not return), or a VIN that is for another model year.
     """
     if calc.is_lead(comp) or calc.vin_check(comp)[0] == "off":
         return 3
+    mine = str(comp.get("source") or "") == "Added by you"
+    if calc.gearbox_kind((car or {}).get("transmission")) and not calc.comp_gearbox(comp) and not mine:
+        return 2
+    if calc.comp_group(comp) == "live" and comp.get("seen") != "live" and not mine:
+        return 2
     return 1 if comp.get("vin") else 2
 
 
@@ -173,6 +180,9 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         meta = []
         if comp.get("body") and comp["body"].lower() not in comp["title"].lower():
             meta.append(comp["body"])
+        gear = calc.comp_gearbox(comp)
+        if gear:
+            meta.append(gear.capitalize() + (" (on its page)" if comp.get("gear_seen") == "page" else ""))
         if comp.get("miles"):
             meta.append(f"{comp['miles']:,} mi")
         if comp.get("date"):
@@ -186,13 +196,16 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         find = calc.marketplace_find(comp)             # a car read from a Marketplace list: the link searches Marketplace for it
         cards.append({
             "status": comp["status"], "group": group, "price": comp["price"],
-            "label": "Live auction" if group == "live" and str(comp.get("note") or "").lower().startswith("live auction") else names[group],
+            "label": ("Live auction" if group == "live" and str(comp.get("note") or "").lower().startswith("live auction")
+                      else "Not confirmed" if group == "live" and comp.get("seen") == "unknown" else names[group]),
+            "unsure": bool(group == "live" and comp.get("seen") == "unknown"),
             "priceText": money(comp["price"]), "title": comp["title"], "meta": " · ".join(meta),
             "note": comp.get("note") or "", "options": comp.get("options") or "", "url": find or url,
             "host": "Facebook Marketplace" if find else calc.host_of(url), "kind": "find" if find else calc.link_kind(url), "use": bool(comp["use"]), "linkOk": comp.get("link_ok"), "delta": delta,
             "idx": idx, "why": why_out(comp), "lead": bool(not comp["use"] and comp.get("aside") == "lead"),
             "proof": calc.proof(comp), "vinOk": calc.vin_check(comp)[0], "vinYear": calc.vin_check(comp)[1],
-            "trust": trust_of(comp),
+            "trust": trust_of(comp, car),
+            "gearFlag": bool(calc.gearbox_kind(car.get("transmission")) and not gear and str(comp.get("source") or "") != "Added by you"),
             "img": comp.get("img") or "", "vin": comp.get("vin") or "",
             "seen": comp.get("seen") or "", "seenOn": comp.get("seen_on") or "",
             "history": comp.get("history") or "", "histFlag": calc.history_flag(comp.get("history")),
@@ -517,6 +530,7 @@ button.opt{cursor:pointer}
 .pill.sold{background:var(--ink);color:#0b0c0e;border-color:var(--ink)}
 .pill.high_bid{color:var(--warn);border-color:rgba(245,184,74,.5)}
 .pill.live{color:#7ee8bd;border-color:rgba(52,211,153,.5)}
+.pill.live.unsure{color:var(--warn);border-color:rgba(245,184,74,.5)}
 .c-price{font:500 20px var(--sans);font-variant-numeric:tabular-nums;margin-left:8px}
 .c-delta{float:right;font:400 11.5px var(--sans);color:var(--dim);margin-top:5px}
 .c-title{margin-top:6px;font:500 13.5px/1.3 var(--sans)}
@@ -835,7 +849,7 @@ function create(root) {
       const tier = (n) => comps.some((k) => (k.trust || 3) === n);
       el.legend.innerHTML = (has("sold") ? '<span><i class="sold"></i>Sold</span>' : "") + (has("high_bid") ? '<span><i class="high_bid"></i>No sale</span>' : "") +
         (has("live") ? '<span><i class="asking"></i>For sale now</span>' : "") + (a.median ? `<span><i class="med"></i>Median sale ${esc(a.medianText)}</span>` : "") +
-        '<span class="lg-break"></span>' + (tier(1) ? '<span><i class="t1"></i>Own page + VIN</span>' : "") + (tier(2) ? '<span><i class="t2"></i>Own page</span>' : "") + (tier(3) ? '<span><i class="t3"></i>Not checkable</span>' : "");
+        '<span class="lg-break"></span>' + (tier(1) ? '<span><i class="t1"></i>Own page + VIN</span>' : "") + (tier(2) ? '<span><i class="t2"></i>Own page, to confirm</span>' : "") + (tier(3) ? '<span><i class="t3"></i>Not checkable</span>' : "");
       h += '<button type="button" class="knob open" data-k="open" aria-label="Opening offer"></button><button type="button" class="knob walk" data-k="walk" aria-label="Walk-away price"></button><button type="button" class="knob target" data-k="target" aria-label="Target price"></button>';
       el.track.innerHTML = h;
       if (fresh) el.track.querySelectorAll(".dot").forEach((dot, i) => setTimeout(() => dot.classList.add("in"), 250 + i * 90));
@@ -898,11 +912,11 @@ function create(root) {
     const flag = k.kind === "find" ? ""                      /* the fold it sits in says what it is */
       : k.kind === "page" ? '<div class="c-flag">This link opens a results page, not this car.</div>' : (k.linkOk === false ? '<div class="c-flag">Link not confirmed. Open it before you cite it.</div>' : "");
     const seen = k.group !== "live" || k.kind === "find" ? "" : k.seen === "live" ? `<div class="c-seen ok">Checked ${esc(k.seenOn)}: the page still shows it for sale.</div>`
-      : k.seen === "unknown" ? `<div class="c-seen">Not confirmed: this site does not let apps look. Open it to check it is still for sale.</div>`
+      : k.seen === "unknown" ? `<div class="c-seen">Could not confirm it is still for sale. Open it to check.</div>`
       : '<div class="c-seen">Not checked yet. Tap Check they are still for sale.</div>';
     const out = big && k.group === "sold" && !k.use, flip = big && k.group === "sold" ? `<button type="button" class="textbtn usebtn" data-i="${k.idx}" data-price="${k.price}" data-use="${k.use ? 0 : 1}">${k.use ? "Leave it out" : "Count it"}</button>` : "";
-    const text = `<div><i class="tdot t${k.trust || 3}" title="${k.trust === 1 ? "Opens on its own page and has a VIN" : k.trust === 2 ? "Opens on its own page, no VIN" : "Nothing to open and check"}"></i><span class="pill ${esc(k.group)}">${esc(k.label)}</span>${out ? `<span class="pill out">Not counted: ${esc(k.why)}</span>` : ""}<span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
-      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div><div>${k.vin ? vinChip(k.vin, "c-vin", k.vinOk, k.vinYear) : '<span class="vin none c-vin"><b>VIN</b>not found</span>'}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${seen}${flag}` +
+    const text = `<div><i class="tdot t${k.trust || 3}" title="${k.trust === 1 ? "Opens on its own page, has a VIN, nothing left to confirm" : k.trust === 2 ? "Opens on its own page, with something left to confirm" : "Nothing to open and check"}"></i><span class="pill ${esc(k.group)}${k.unsure ? " unsure" : ""}">${esc(k.label)}</span>${out ? `<span class="pill out">Not counted: ${esc(k.why)}</span>` : ""}<span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
+      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div><div>${k.vin ? vinChip(k.vin, "c-vin", k.vinOk, k.vinYear) : '<span class="vin none c-vin"><b>VIN</b>not found</span>'}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.gearFlag ? '<div class="c-flag">Manual or automatic is not stated. Check before you count on it.</div>' : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${seen}${flag}` +
       (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">${k.kind === "find" ? "Find it on Marketplace" : "Open"} ${ARROW} <small>${esc(k.kind === "find" ? "" : k.host)}</small></a>` : "") +
       (big && (k.proof === "list" || k.proof === "loose" || k.proof === "none") ? `<form class="linkrow setlink" data-i="${k.idx}" data-price="${k.price}"><input type="url" class="linkbox" placeholder="${k.kind === "find" ? "Found it? Share, Copy link, paste here" : "Have its own link? Paste it here"}" inputmode="url" aria-label="This car's own link"><button type="submit" class="btn ghost">Save</button></form>` : "") +
       (flip ? `<div>${flip}</div>` : "") + "</div>";
@@ -940,7 +954,7 @@ function create(root) {
     const d = S.d, c = d.case || {}, [nSold, nSale] = counts(d);
     const sort = S.sort || (S.sort = { key: "trust", dir: 1 });
     /* most reliable first: own page with a VIN, then own page, then the rest; newest first within each. Cars missing a value go last. */
-    const order = (x, y) => { if (sort.key === "trust") return ((x.trust || 3) - (y.trust || 3)) * sort.dir || (y.when || 0) - (x.when || 0) || x.price - y.price;
+    const order = (x, y) => { if (sort.key === "trust") return ((x.trust || 3) - (y.trust || 3)) * sort.dir || (x.group === "live" && x.seen !== "live" ? 1 : 0) - (y.group === "live" && y.seen !== "live" ? 1 : 0) || (y.when || 0) - (x.when || 0) || x.price - y.price;
       const p = x[sort.key] || 0, q = y[sort.key] || 0; if (!p || !q) return (q ? 1 : 0) - (p ? 1 : 0); return (p - q) * sort.dir; };
     const list = (groups, title, only, lead) => { const rows = (d.comps || []).filter((k) => groups.includes(k.group) && (!only || only(k))).sort(order); return rows.length ? `<h3>${title} · ${rows.length}</h3>${lead || ""}` + rows.map((k) => compCard(k, true)).join("") : ""; };
     const arrow = (key) => (sort.key === key ? (sort.dir > 0 ? " ↑" : " ↓") : "");

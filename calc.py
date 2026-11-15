@@ -253,6 +253,8 @@ def clean_comp(row: dict) -> dict | None:
         "vin": clean_vin(text("vin")) or find_vin(text("url")),
         "available": available,
         "body": text("body"),
+        "gearbox": gearbox_kind(text("gearbox") or text("transmission")),        # 'manual', 'automatic' or '' (not stated)
+        "gear_seen": "page" if text("gear_seen") == "page" else "",              # read off the car's own page, not a results list
         "history": text("history"),
         # 'lead': set aside by the app because it cannot be opened and checked. 'mine': the buyer chose, so the app leaves it.
         "aside": text("aside") if text("aside") in ("lead", "mine") else "",
@@ -371,6 +373,79 @@ def body_kind(text) -> str:
     if "coupe" in words or "coupé" in words:
         return "coupe"
     return ""
+
+
+_GEAR_AUTO = re.compile(r"\b(automatic|automated|pdk|dct|dkg|dsg|dual[- ]?clutch|double[- ]?clutch|tiptronic|steptronic|"
+                        r"s[- ]?tronic|smg|cvt|ips|paddle[- ]?shift(?:ed|ers?)?|e[- ]?gear|f1 gearbox|sportshift|speedshift)\b", re.I)
+_GEAR_MANUAL = re.compile(r"\b(manual|stick(?:[- ]?shift)?|[4-7]mt|gated)\b", re.I)
+_SPEEDS = r"(?:\d{1,2}|four|five|six|seven|eight|nine|ten)[- ]?(?:speed|spd)"
+# In running text only words that are about the gearbox count. "Automatic" on its own is not enough (a manual car
+# has automatic rev-matching, climate control and headlights), and neither is "manual" (owner's manual, manual
+# mode, a manual top).
+_TEXT_AUTO = re.compile(
+    r"\b(?:pdk|dct|dkg|dsg|tiptronic|steptronic|s[- ]?tronic|smg|cvt|sportshift|speedshift|e[- ]gear|"
+    r"dual[- ]?clutch|double[- ]?clutch|automated[- ](?:manual|single)|" + _SPEEDS + r"(?: \w+)? (?:automatic|auto)\b|"
+    r"automatic (?:transmission|gearbox|trans\b|transaxle)|auto(?:matic)? trans\b|torque[- ]converter)\b|\bIPS\b", re.I)
+_TEXT_MANUAL = re.compile(
+    r"\b(?:" + _SPEEDS + r"(?: \w+)? (?:manual|stick)|manual (?:transmission|gearbox|trans\b|transaxle|box)|"
+    r"[4-7]mt|stick[- ]?shift|(?:three|3)[- ]pedal|gated (?:manual|shifter|six|6)|manual[- ]equipped|row(?:s|ing)? (?:its|your) own)\b", re.I)
+_BARE_MANUAL = re.compile(r"(?<!owner's )(?<!owners )(?<!service )(?<!shop )(?<!workshop )(?<!books and )(?<!with )(?<!the )"
+                          r"\bmanual\b(?!s\b|[- ](?:mode|shift mode|shifting mode|seats?|top|soft|windows?|climate|override|locks?|"
+                          r"hubs|folding|adjust\w*|and books|control|rev|recline|tilt|parking|liftgate))", re.I)
+_BARE_AUTO = re.compile(r"\bautomatic\b(?![- ](?:rev|climate|headl\w+|wipers?|high|emergency|temperature|start|stop|lock\w*|dimming|"
+                        r"braking|parking|liftgate|tailgate|doors?|seat\w*|top|roof|air|dual|zone|on|lights?|rain|cruise|engine|"
+                        r"mirrors?|tire|load|level\w*|soft))", re.I)
+
+
+def _gear_votes(words: str) -> tuple[bool, bool]:
+    """(names an automatic, names a manual), counting only words that are about the gearbox."""
+    auto, manual = bool(_TEXT_AUTO.search(words)), bool(_TEXT_MANUAL.search(words))
+    if not auto and not manual:                       # no gearbox phrase: a bare word counts
+        auto, manual = bool(_BARE_AUTO.search(words)), bool(_BARE_MANUAL.search(words))
+    return auto, manual
+
+
+def gearbox_kind(text) -> str:
+    """'manual', 'automatic' (every self-shifting gearbox: PDK, DCT, Tiptronic, SMG and so on) or '' when the
+    words do not say. For a value that is about the gearbox ('7-Speed M DCT', 'Automatic w/ Manual Mode', 'A/T').
+    A value that names both kinds as equals, the way a filter does, says nothing."""
+    words = str(text or "")
+    if words.strip().lower() in ("unknown", "not stated", "n/a", "na", "none", "other", "-"):
+        return ""
+    auto, manual = _gear_votes(words)
+    if auto != manual:
+        return "automatic" if auto else "manual"
+    if auto and manual:
+        return ""
+    short = re.match(r"\s*(auto|a/?t|m/?t)\b", words, re.I)          # how a spec table abbreviates it
+    if short:
+        return "manual" if short.group(1).lower().startswith("m") else "automatic"
+    if _GEAR_AUTO.search(words):
+        return "automatic"
+    return "manual" if _GEAR_MANUAL.search(words) else ""
+
+
+def gearbox_in_text(text) -> str:
+    """What running text (a title, a note) says about the gearbox, counting only words that are about it.
+
+    'manual' or 'automatic' when it says one of them; '' when it says neither or names both, which is how a
+    catalogue line reads ('offered with a 6-speed manual or 7-speed DCT').
+    """
+    auto, manual = _gear_votes(str(text or ""))
+    if auto == manual:
+        return ""
+    return "automatic" if auto else "manual"
+
+
+def comp_gearbox(comp: dict) -> str:
+    """A comp's gearbox: what was recorded for it or read off its page, else what its title and note say."""
+    return comp.get("gearbox") or gearbox_in_text(f"{comp.get('title') or ''}. {comp.get('note') or ''}")
+
+
+def other_gearbox(car: dict, comp: dict) -> bool:
+    """True when the car and the comp are plainly different kinds: a manual against an automatic."""
+    mine, theirs = gearbox_kind(car.get("transmission")), comp_gearbox(comp)
+    return bool(mine and theirs and mine != theirs)
 
 
 def other_body(car: dict, comp: dict) -> bool:

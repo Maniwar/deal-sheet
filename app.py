@@ -60,7 +60,7 @@ EDIT_FIELDS = ("year", "make", "model", "trim", "body", "transmission", "drivetr
                "exterior", "interior", "seller", "location", "history")
 SELLER_TYPES = ["", "dealer", "private", "auction"]
 COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img", "options", "vin",
-                "available", "seen", "seen_on", "body", "history", "aside"]
+                "available", "seen", "seen_on", "body", "history", "aside", "gearbox", "gear_seen"]
 DOT = " \u00b7 "
 QR_SIZES = {"Large (1.1 in)": 82, "Extra large (1.5 in)": 108}
 EMPTY_DEAL = {"car": {}, "comps": [], "offer": {}, "summary": "", "message": "", "sample": False}
@@ -259,6 +259,22 @@ def run_garage_actions(actions: list[dict]) -> None:
 
 # ---------------------------------------------------------------- one step: link or screenshot to a full deal
 
+def same_gearbox_only(car: dict, comps: list[dict], say=None) -> tuple[list[dict], int]:
+    """Drop comps that are plainly the other kind of transmission (an automatic for a manual). Returns (kept, how
+    many dropped). A car the buyer added or chose to keep stays. Each one dropped is named through `say`, so the
+    step log shows what went and why."""
+    kept = []
+    for comp in comps:
+        if (not calc.other_gearbox(car, comp) or comp.get("aside") == "mine"
+                or str(comp.get("source") or "") == "Added by you"):
+            kept.append(comp)
+        elif say:
+            where = "its page says" if comp.get("gear_seen") == "page" else "the search says"
+            say(f"Left out: {comp['title']} at {calc.money(comp['price'])} ({comp.get('source') or calc.host_of(comp['url'])}), "
+                f"{where} it is {'an automatic' if calc.comp_gearbox(comp) == 'automatic' else 'a manual'}")
+    return kept, len(comps) - len(kept)
+
+
 def same_body_only(car: dict, comps: list[dict]) -> tuple[list[dict], int]:
     """Drop comps that are plainly another body style (a cabriolet for a coupe). Returns (kept, how many dropped)."""
     kept = [comp for comp in comps if not calc.other_body(car, comp)]
@@ -294,31 +310,44 @@ def drop_spare_trims(comps: list[dict]) -> tuple[list[dict], int]:
     return kept, len(comps) - len(kept)
 
 
-def check_listings(comps: list[dict]) -> dict:
-    """Open each for-sale page, where its site allows, and record whether it still shows the car.
+def check_listings(comps: list[dict], car: dict | None = None, say=None) -> tuple[list[dict], dict]:
+    """Open each for-sale page, where its site allows, and record what it shows.
 
-    Sets `seen` (live, gone or unknown) and `seen_on` on each comp, fills in a VIN the page states, and
-    moves a car whose page says sold or removed out of the for-sale list. Returns how many were live, gone and unknown.
+    Sets `seen` (live, gone or unknown) and `seen_on` on each comp, fills in a VIN and a transmission the page
+    states, moves a car whose page says sold or removed out of the for-sale list, and drops a car whose own page
+    states the other transmission from the buyer's. 'live' is only said with proof that the car is on the page
+    (see `previews.judge_page`). Returns (the comps that stay, how many were live, gone, unknown and wrong).
     """
-    listed = [comp for comp in comps if calc.comp_group(comp) == "live" and comp["url"]]
-    looks = previews.listing_looks([comp["url"] for comp in listed])
+    listed = [comp for comp in comps if calc.comp_group(comp) == "live" and comp["url"] and not calc.is_list_page(comp["url"])]
+    looks = previews.listing_checks(listed)
     today = dt.date.today().strftime("%b %-d")
-    count = {"live": 0, "gone": 0, "unknown": 0}
+    count = {"live": 0, "gone": 0, "unknown": 0, "wrong": 0}
     for comp in listed:
-        state, vin = looks.get(comp["url"], ("unknown", ""))
+        state, vin, gearbox = looks.get(comp["url"], ("unknown", "", ""))
         comp["seen"], comp["seen_on"] = state, today
         if vin and not comp.get("vin"):
             comp["vin"] = vin                    # the page states it, so it is there to copy
-        count[state] += 1
+        if gearbox:
+            comp["gearbox"], comp["gear_seen"] = gearbox, "page"     # the car's own page outranks what a results list said
+        if state == "live":
+            if comp.get("link_ok") is False:     # the app opened the link and found the car on it: the link is confirmed
+                comp["link_ok"] = True
+                if comp.get("aside") == "lead":
+                    comp["aside"], comp["use"] = "", True
         if state == "gone":
             comp["available"] = "no"
             if "sold or gone" not in comp["note"]:
                 comp["note"] = ("The page now says it has sold or gone. " + comp["note"]).strip()
-    return count
+    kept, count["wrong"] = same_gearbox_only(car or {}, comps, say)
+    stays = {id(comp) for comp in kept}
+    for comp in listed:
+        if id(comp) in stays:
+            count[comp["seen"]] += 1
+    return kept, count
 
 
 def checked_note(count: dict) -> str:
-    total = sum(count.values())
+    total = count["live"] + count["gone"] + count["unknown"]
     if not total:
         return ""
     bits = []
@@ -327,7 +356,7 @@ def checked_note(count: dict) -> str:
     if count["gone"]:
         bits.append(f"{count['gone']} already sold or gone")
     if count["unknown"]:
-        bits.append(f"{count['unknown']} on sites that do not let apps look, so open those to confirm")
+        bits.append(f"{count['unknown']} could not be confirmed either way, so open those to check")
     return f"The app opened {total} for-sale page{'s' if total != 1 else ''}: " + ", ".join(bits) + "."
 
 
@@ -372,10 +401,12 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
         pool.shutdown(wait=False, cancel_futures=True)
     comps += calc.new_comps(comps, sale["comps"])
     comps, dropped = same_body_only(car, comps)
+    comps, wrong_box = same_gearbox_only(car, comps, tell)
     comps, spare = drop_spare_trims(comps)
+    tell("Opening each for-sale page to see whether the car is still there and what its page says")
+    comps, count = check_listings(comps, car, tell)          # also drops a car whose page states the other transmission
+    note, wrong_box = checked_note(count), wrong_box + count["wrong"]
     leads = calc.set_aside_leads(comps)            # cars that cannot be opened and checked stay out of the numbers
-    tell("Opening each for-sale page to see whether the car is still there")
-    note = checked_note(check_listings(comps))
     if note:
         tell(note)
     if dropped:
@@ -385,6 +416,9 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
         note = f"Exact matches were scarce, so {off_trim} car{'s' if off_trim != 1 else ''} of another trim {'are' if off_trim != 1 else 'is'} kept for context and not counted. {note}".strip()
     if spare:
         note = f"{spare} car{'s' if spare != 1 else ''} of another trim {'were' if spare != 1 else 'was'} left out. {note}".strip()
+    if wrong_box:
+        kind = "an automatic" if calc.gearbox_kind(car.get("transmission")) == "manual" else "a manual"
+        note = f"{wrong_box} car{'s' if wrong_box != 1 else ''} with {kind} transmission {'were' if wrong_box != 1 else 'was'} left out. {note}".strip()
     if leads:
         note = (f"{leads} car{'s' if leads != 1 else ''} that cannot be opened and checked (read from a list, or with no confirmed "
                 f"link) {'are' if leads != 1 else 'is'} kept as leads and not counted. {note}").strip()
@@ -707,7 +741,7 @@ def comps_frame(comps: list[dict]) -> pd.DataFrame:
     frame["use"] = frame["use"].astype("boolean").fillna(True).astype(bool)
     for column in ("price", "miles"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Int64")
-    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available", "seen", "seen_on", "body", "history", "aside"):
+    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available", "seen", "seen_on", "body", "history", "aside", "gearbox", "gear_seen"):
         frame[column] = frame[column].astype("string").fillna("")
     return frame
 
@@ -852,7 +886,10 @@ def handle_stage_requests(progress_slot) -> None:
         progress, _ = progress_for(progress_slot)
         if slot == "_verify_request":                            # look at each for-sale page again
             progress.say("Opening each for-sale page to see whether the car is still there")
-            note = checked_note(check_listings(have))
+            have, count = check_listings(have, the_car, progress.say)
+            note, wrong = checked_note(count), count["wrong"]
+            if wrong:
+                note = f"{wrong} car{'s' if wrong != 1 else ''} whose page states the other transmission {'were' if wrong != 1 else 'was'} removed. {note}".strip()
             ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
             ss["notices"] = [note or "There are no for-sale listings to check yet."]
         elif not ss["api_key"]:
@@ -876,6 +913,9 @@ def handle_stage_requests(progress_slot) -> None:
                 better = calc.upgrade_leads(have, found["comps"])    # a lead whose own page has now turned up takes that page
                 fresh = calc.new_comps(have, found["comps"])
                 fresh, _ = same_body_only(the_car, fresh)
+                fresh, _ = same_gearbox_only(the_car, fresh, progress.say)
+                if refresh:                                    # a refresh clears the other transmission from what was there too
+                    have, _ = same_gearbox_only(the_car, have, progress.say)
                 both, _ = drop_spare_trims(have + fresh)       # with enough exact matches now, other trims go, old ones too
                 stays = {id(comp) for comp in both}
                 have, fresh = [comp for comp in have if id(comp) in stays], [comp for comp in fresh if id(comp) in stays]
@@ -891,7 +931,8 @@ def handle_stage_requests(progress_slot) -> None:
                             comp["note"], comp["use"], back = row["note"], True, back + 1
                     if any(calc.comp_group(comp) == "live" for comp in have):
                         progress.say("Opening the for-sale pages you already had, to see whether each car is still there")
-                    note = checked_note(check_listings(have))  # the new ones were opened by the search itself
+                    have, count = check_listings(have, the_car, progress.say)  # the new ones were opened by the search itself
+                    note = checked_note(count)
                     sold = sum(comp["status"] != "asking" for comp in fresh)
                     bits = [f"{better} car{'s' if better != 1 else ''} now with a direct link and VIN" if better else "",
                             f"{sold} more sale{'s' if sold != 1 else ''} and no-sales" if sold else "",
@@ -903,7 +944,10 @@ def handle_stage_requests(progress_slot) -> None:
                 else:
                     if wants_sale and fresh:
                         progress.say("Opening each new page to see whether the car is still there")
-                    note = checked_note(check_listings(fresh)) if wants_sale else ""
+                    note = ""
+                    if wants_sale:
+                        fresh, count = check_listings(fresh, the_car, progress.say)
+                        note = checked_note(count)
                     ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have}
                     what = "car for sale" if wants_sale else "sale"
                     ss["notices"] = [(f"Found {len(fresh)} more {what}{'s' if len(fresh) != 1 and not wants_sale else ''}. {note}".strip()

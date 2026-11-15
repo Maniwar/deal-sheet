@@ -55,9 +55,23 @@ what that car has been selling for and gives you a typical sale price, the comps
 - **Sold, and for sale now.** Completed sales and the cars you could buy today are separate lists,
   each with a **Search for more** button that looks for cars not already found. For-sale cars come
   from live auctions, enthusiast classifieds and dealers. The app opens each for-sale page, where
-  the site allows it, and moves a car to "sold or gone" when its page says so; **Check they are
-  still for sale** does that again. Each card says whether its page was checked. Both lists sort by
-  price, miles or date.
+  the site allows it; **Check they are still for sale** does that again. A card says **For sale**
+  only with proof that the car is on its page: its VIN, or, when no VIN is known or the page
+  states none, its price on a page whose heading names one car of that model year. A car moves to
+  "sold or gone" only with proof too: a missing page, a redirect away from the car's page (the
+  usual answer for a sold car is the inventory list), words or a badge that say sold, pending or
+  removed, or another car's VIN at that address. Everything else, including sites that do not let
+  apps look and pages built by scripts, is marked **Not confirmed**, never for sale. A link the
+  app opened and found the car on is treated as confirmed. Both lists sort by price, miles or
+  date.
+- **Manual or automatic.** When your car states its transmission, the other kind is left out:
+  the searches are told to skip it and to record what each source states, and when the app opens
+  a for-sale page it reads the transmission from the page's own labelled field, which outranks
+  what a results list said. A car whose page states the other kind is removed, and each one is
+  named in "Every step of the last search" with where that was read. Cards show Manual or
+  Automatic ("on its page" when read there), and a car whose transmission nobody states is
+  flagged and ranked lower. Free text only counts when it is about the gearbox, so "owner's
+  manual" and "automatic rev-matching" decide nothing.
   Each comp has a button that opens that car's own page. A link that opens a list of
   results instead of one car is flagged on the screen and on the PDF, and is never offered as the
   proof link for a point in the case.
@@ -179,8 +193,9 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   Marketplace. Price-guide mirrors such as KBB are left out because they keep listings up after
   the car has gone.
 - **Most reliable first, and colour-coded.** Every list is sorted "Most reliable" by default: cars
-  that open on their own page and have a VIN, then cars with their own page, then the rest, newest
-  first within each. The price line uses the same three colours (green, white, grey), and shape
+  that open on their own page, have a VIN and leave nothing to confirm, then cars with their own
+  page and something left to confirm (no VIN, transmission not stated, or a for-sale page the app
+  could not confirm), then the rest, confirmed listings and newest first within each. The price line uses the same three colours (green, white, grey), and shape
   for what a car is: a filled dot is a sale, a ring is a car for sale, a diamond is a no-sale.
   Each card carries the same coloured dot.
 - **What can be checked comes first.** A car counts when its link opens that one car's own page
@@ -236,7 +251,8 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
 - Every comp is labeled sold, high bid or asking, and its link is checked against the URLs the
   search actually returned. A link that was not in the results is flagged.
 - Claude is told to record each car's own page, never a results page, and the app checks the link's
-  shape for the common sites. It cannot open blocked sites to confirm a page still shows that car.
+  shape for the common sites. It cannot open blocked sites to confirm a page still shows that car,
+  and says "Not confirmed" for those instead of guessing.
 - **Refresh results**, the button under the price on the main screen (and on The case tab), runs
   every search again for the car on screen: sales, no-sales and cars for sale now. While it runs,
   the button shows a clock and the line under it says what is happening. What you have stays, new finds are added, each for-sale page is

@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import (MIRROR_SITES, car_facts, car_title, clean_comps, clean_vin, ease_trim_mark, find_vin, host_of, is_list_page,
+from calc import (MIRROR_SITES, car_facts, car_title, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind, host_of, is_list_page,
                   is_mirror, link_kind, link_pages, loose_trim, mark_other_trim, merge_comps, money, normalize_url, to_int)
 
 MODELS = {                                   # the first one is the default
@@ -514,6 +514,10 @@ COMPS_TOOL = {
                                    "description": "sold = completed sale. high_bid = auction ended, reserve not met. asking = list price."},
                         "title": {"type": "string", "description": "Year, model, trim and body as the source states them."},
                         "body": {"type": "string", "description": "Body style as the source states it: Coupe, Cabriolet, Targa, Sedan and so on."},
+                        "transmission": {"type": "string", "enum": ["manual", "automatic", "unknown"],
+                                         "description": "manual, or automatic for every self-shifting gearbox (PDK, DCT, Tiptronic, SMG, "
+                                                        "CVT, torque converter). unknown when the source does not state it. Never "
+                                                        "work it out from the model name or assume it matches the buyer's car."},
                         "trim": {"type": "string", "description": "Just the trim name as the source states it, e.g. Carrera S or M2 Competition. No body style, gearbox or packages. Empty if the source does not say."},
                         "history": {"type": "string", "description": "Accident, damage or title history as the source states it: 'Clean Carfax', "
                                                                     "'Accident reported', 'Salvage title', 'Paintwork on two panels'. Leave out if not stated."},
@@ -601,6 +605,20 @@ def extract_comps(client, model: str, car: dict, text: str = "", image: bytes | 
     return {"comps": comps, "summary": str(recorded.get("summary") or "").strip()}
 
 
+def _gear_rule(car: dict) -> str:
+    """The rule on transmissions. A manual and an automatic of the same car sell for different money, and a buyer
+    of one does not want the other, so when the buyer's car states its gearbox the other kind is left out."""
+    kind = gearbox_kind(car.get("transmission"))
+    record = ("Record what each source states in the transmission field: manual, automatic (PDK, DCT, Tiptronic and "
+              "every other self-shifting gearbox) or unknown. Never assume it from the model, and never write that "
+              "it matches unless the source says so.")
+    if not kind:
+        return f"- {record}\n"
+    return (f"- Transmission is a hard requirement: the buyer's car is {'a manual' if kind == 'manual' else 'an automatic'}. "
+            f"Leave out every car whose source says it is {'an automatic' if kind == 'manual' else 'a manual'}. {record} "
+            "A results list often gets this wrong, so prefer what the car's own page says.\n")
+
+
 def _trim_rule(car: dict) -> str:
     """The rule on trims for a search. It is strict when the car's trim names a version (Carrera S, Competition).
 
@@ -661,9 +679,8 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "- If a listing's page says sold or removed, record it as asking with available no, never as for sale.\n"
         "- Body style is a hard requirement: compare a coupe only with coupes, a cabriolet only with cabriolets, "
         "a Targa only with Targas. Leave every other body style out. Record each comp's body style in body.\n"
-        + _trim_rule(car) +
-        "- Match the drivetrain (rear-wheel or all-wheel drive) and the transmission. If one of those differs, "
-        "say so in the comp's note.\n"
+        + _trim_rule(car) + _gear_rule(car) +
+        "- Match the drivetrain (rear-wheel or all-wheel drive). If it differs, say so in the comp's note.\n"
         "- Classic.com snippets show a placeholder '6865 mi' before the real mileage. Use the second figure.\n"
         "- Convert foreign prices only when the source gives a US dollar figure; otherwise skip the comp.\n"
         "- Be thorough: record every completed sale and no-sale of a matching car that the results show, up to "
@@ -702,8 +719,8 @@ def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
         "auction' and give the end date, for example 'Live auction, ends Nov 18. Price is the current bid.'\n"
         "- Body style is a hard requirement: a coupe buyer sees only coupes, a cabriolet buyer only cabriolets, "
         "a Targa buyer only Targas. Record each car's body style in body.\n"
-        + _trim_rule(car) +
-        "- Match the generation, drivetrain and transmission where you can. If a car differs, say so in its note.\n"
+        + _trim_rule(car) + _gear_rule(car) +
+        "- Match the generation and drivetrain where you can. If a car differs, say so in its note.\n"
         "- The buyer will open every link and check every VIN: record cars whose own page you can give first, "
         "and always record the VIN when the page, the snippet or the address shows it.\n"
         "- Record miles, VIN, options and the seller (the dealer's name, or 'private seller') when shown. Name "
