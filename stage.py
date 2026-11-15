@@ -191,7 +191,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "detailed": bool(detailed), "canDetail": bool(showcase.PRO_MODELS.get(shape["body"])),
         "modelKey": re.sub(r"[^a-z0-9]+", "-", f"{car.get('make') or ''} {car.get('model') or ''}".lower()).strip("-"),
         "modelName": " ".join(str(car.get(k) or "").strip() for k in ("make", "model")).strip(),
-        "find3d": " ".join(str(car.get(k) or "").strip() for k in ("make", "model", "trim", "body")).strip(),
+        "find3d": " ".join(str(car.get(k) or "").strip() for k in ("make", "model", "trim")).strip(),
         "sid": str(flags.get("sid") or ""),
         "sample": bool(flags.get("sample")), "hasCar": has_car,
         "edit": {field: ("" if car.get(field) in (None, "") else str(car.get(field))) for field in
@@ -1092,20 +1092,97 @@ function create(root) {
     root.classList.remove("live-blend"); el.live.style.left = el.live.style.width = ""; el.shadow.removeAttribute("style");
   }
   if (window.ResizeObserver) { const ro = new ResizeObserver(() => liveLayout()); ro.observe(root); ro.observe(el.zone); }
+  /* Some models stand the car on a floor or a platform far bigger than the car, and the viewer then frames the
+     floor: the car comes out tiny. This finds the car by casting rays down through the scene (z is up). A ring
+     of rays that mostly lands at one height means there is a floor; rays from the middle outwards then find
+     where the car ends in sixteen directions, and the narrowest box round those points is the car.
+     Resolves to { T, length, floor, hide } or to null when the scene is just the car, or cannot be read. */
+  async function liveMeasure(api, T, r) {
+    const ray = (x, y) => new Promise((done) => {
+      const t = setTimeout(() => done(null), 1500);
+      try {
+        api.pickFromScene([x, y, T[2] + 4 * r], [x, y, T[2] - 4 * r], (err, hit) => {
+          clearTimeout(t); const p = !err && hit && hit.position3D;
+          done(p ? { x: +p[0], y: +p[1], z: +p[2], id: hit.instanceID } : null);
+        });
+      } catch (e) { clearTimeout(t); done(null); }
+    });
+    const all = (pts) => Promise.all(pts.map((p) => ray(p[0], p[1])));
+    if (!(r > 0) || typeof api.pickFromScene !== "function") return null;
+    const ringAt = [];
+    for (let i = 0; i < 12; i++) { const a = i * Math.PI / 6 + 0.26; ringAt.push([T[0] + 0.55 * r * Math.cos(a), T[1] + 0.55 * r * Math.sin(a)]); }
+    const ring = (await all(ringAt)).filter(Boolean);
+    if (ring.length < 7) return null;                                   /* nothing wide under the car: the scene is the car */
+    const zs = ring.map((h) => h.z).sort((a, b) => a - b), zf = zs[Math.floor(zs.length / 4)];
+    const flat = ring.filter((h) => Math.abs(h.z - zf) < 0.015 * r);
+    if (flat.length < 7) return null;
+    const floor = new Set(flat.map((h) => h.id)), body = new Set();
+    let grid = [];
+    for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) grid.push([T[0] + i * 0.08 * r, T[1] + j * 0.08 * r]);
+    const tall = (h) => !!h && h.z > zf + 0.012 * r;
+    let hits = (await all(grid)).filter(tall);
+    if (!hits.length) {                                                 /* the car is not in the middle: look wider */
+      grid = []; for (let i = -6; i <= 6; i++) for (let j = -6; j <= 6; j++) grid.push([T[0] + i * 0.15 * r, T[1] + j * 0.15 * r]);
+      hits = (await all(grid)).filter(tall);
+    }
+    if (!hits.length) return null;
+    let top = Math.max(...hits.map((h) => h.z));
+    const H0 = top - zf, high = hits.filter((h) => h.z > zf + 0.35 * H0);
+    const cx = high.reduce((sum, h) => sum + h.x, 0) / high.length, cy = high.reduce((sum, h) => sum + h.y, 0) / high.length;
+    const inside = (h) => !!h && h.z > zf + 0.08 * H0;
+    const K = 16, lo = new Array(K).fill(0), hi = new Array(K).fill(r), dir = [];
+    for (let k = 0; k < K; k++) dir.push([Math.cos(k * 2 * Math.PI / K), Math.sin(k * 2 * Math.PI / K)]);
+    if ((await all(dir.map((d) => [cx + d[0] * r, cy + d[1] * r]))).filter(inside).length > 3) return null;     /* walls, not a floor */
+    for (let step = 0; step < 9; step++) {
+      const mid = lo.map((v, k) => (v + hi[k]) / 2);
+      (await all(dir.map((d, k) => [cx + d[0] * mid[k], cy + d[1] * mid[k]]))).forEach((h, k) => {
+        if (inside(h)) { lo[k] = mid[k]; top = Math.max(top, h.z); body.add(h.id); } else hi[k] = mid[k];
+      });
+    }
+    const edge = dir.map((d, k) => [cx + d[0] * (lo[k] + hi[k]) / 2, cy + d[1] * (lo[k] + hi[k]) / 2]);
+    let box = null;
+    for (let deg = 0; deg < 180; deg += 3) {
+      const a = deg * Math.PI / 180, u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]];
+      const pu = edge.map((p) => p[0] * u[0] + p[1] * u[1]), pv = edge.map((p) => p[0] * v[0] + p[1] * v[1]);
+      const eu = Math.max(...pu) - Math.min(...pu), ev = Math.max(...pv) - Math.min(...pv);
+      if (!box || eu * ev < box.area) {
+        const mu = (Math.max(...pu) + Math.min(...pu)) / 2, mv = (Math.max(...pv) + Math.min(...pv)) / 2;
+        box = { area: eu * ev, L: Math.max(eu, ev), W: Math.min(eu, ev), c: [u[0] * mu + v[0] * mv, u[1] * mu + v[1] * mv] };
+      }
+    }
+    const H = top - zf;
+    /* only trust a box shaped like a car: longer than wide, lower than long, and smaller than the scene */
+    if (!box || !(box.L > 0.08 * r && box.L < 1.7 * r) || box.W / box.L < 0.25 || box.W / box.L > 0.8 || H / box.L < 0.12 || H / box.L > 0.75) return null;
+    const apart = ![...floor].some((id) => body.has(id));                 /* the floor is its own piece, not part of the car */
+    return { T: [box.c[0], box.c[1], zf + H / 2], length: box.L, floor: [...floor], hide: apart && 0.55 * r > 0.9 * box.L };
+  }
   /* once the viewer has framed the whole car, read its camera and lens: they give the car's size in the model's own units */
   function settle(api, uid) {
     let last = "", tries = 0, done = false;
     const finish = (cam, lens) => {
       if (done || liveKey !== uid) return; done = true;
-      root.classList.add("live-blend"); live.geo = liveGeo();
-      if (cam) {
-        const T = cam.target.slice(), d = cam.position.map((v, i) => v - T[i]), far = Math.hypot(d[0], d[1], d[2]) || 1;
-        /* the viewer fits the car's bounding ball in its lens, and a car is about 1.77 ball radii long */
-        Object.assign(live, { api, base: { T, carLength: 1.773 * far * Math.sin((lens || 45) * Math.PI / 360) }, o: { T: T.slice(), R: far, elev: 0, az: Math.atan2(d[1], d[0]) }, fov: 0, userAt: 0, away: false, last: 0 });
-      }
-      liveLayout();
-      setTimeout(() => { if (liveKey === uid) el.live.classList.add("ready"); }, cam ? 260 : 0);
-      if (cam && !live.timer) live.timer = setTimeout(liveTick, 300);
+      let shown = false;
+      const show = (base, d, far) => {
+        if (shown || liveKey !== uid) return; shown = true;
+        root.classList.add("live-blend"); live.geo = liveGeo();
+        if (base) Object.assign(live, { api, base, o: { T: base.T.slice(), R: far, elev: 0, az: Math.atan2(d[1], d[0]) }, fov: 0, userAt: 0, away: false, last: 0 });
+        liveLayout();
+        setTimeout(() => { if (liveKey === uid) el.live.classList.add("ready"); }, base ? 260 : 0);
+        if (base && !live.timer) live.timer = setTimeout(liveTick, 300);
+      };
+      if (!cam) { show(null); return; }
+      const T = cam.target.slice(), d = cam.position.map((v, i) => v - T[i]), far = Math.hypot(d[0], d[1], d[2]) || 1;
+      /* the viewer fits the scene's bounding ball in its lens, and a car is about 1.77 ball radii long */
+      const ball = far * Math.sin((lens || 45) * Math.PI / 360), whole = { T, carLength: 1.773 * ball };
+      setTimeout(() => show(whole, d, far), 2500);                        /* never hold the car back for the measuring */
+      liveMeasure(api, T, ball).then((car) => {
+        if (liveKey !== uid) return;
+        if (!car) { show(whole, d, far); return; }
+        if (car.hide) car.floor.forEach((id) => { try { api.hide(id, () => {}); } catch (e) {} });     /* the studio has its own floor */
+        const base = { T: car.T, carLength: car.length };
+        if (!shown) show(base, d, far);
+        else if (live.api === api) { live.base = base; live.away = false; liveReset(0.7); }             /* it was shown small: glide in */
+      }, () => show(whole, d, far));
     };
     const read = () => {
       if (done || liveKey !== uid) return;
@@ -1154,58 +1231,143 @@ function create(root) {
     setTimeout(() => { if (liveKey === uid && !linked) plain(); }, 12000);     /* never leave it hidden */
   }
   /* No model picked for this car yet: its choices from the model library sit where the car will go. */
-  const pick = { key: "", items: null, busy: false, failed: false };
+  const pick = { key: "", car: "", items: null, best: null, busy: false, failed: false };
   async function findModels(q) {
     const res = await fetch(`${skApi()}/v3/search?type=models&count=12&q=${encodeURIComponent(q)}`);
     if (!res.ok) throw new Error("status " + res.status);
     return ((await res.json()).results || []).filter((m) => m && m.uid).map((m) => {
       const imgs = (((m.thumbnails || {}).images) || []).slice().sort((x, y) => (x.width || 0) - (y.width || 0));
       const im = imgs.find((i) => (i.width || 0) >= 240) || imgs[imgs.length - 1] || {};
-      return { uid: String(m.uid), name: m.name || "Model", author: ((m.user || {}).displayName || (m.user || {}).username || "unknown artist"), thumb: safeUrl(im.url) || "", size: 0, down: !!m.isDownloadable, url: safeUrl(m.viewerUrl) || "" };
+      return { uid: String(m.uid), name: m.name || "Model", author: ((m.user || {}).displayName || (m.user || {}).username || "unknown artist"), thumb: safeUrl(im.url) || "", size: 0, down: !!m.isDownloadable, url: safeUrl(m.viewerUrl) || "",
+        tags: skWords((m.tags || []).map((t) => (t && (t.name || t.slug)) || "").join(" ")), about: skWords(String(m.description || "").slice(0, 600)), likes: +m.likeCount || 0,
+        vehicle: (m.categories || []).some((c) => /car|vehicle/i.test(String((c && (c.name || c.slug)) || ""))) };
     });
+  }
+  /* What the library is asked, from the car's full name down to its make and model. A full name ("Lotus Evora
+     400 2+2") often finds nothing where a shorter one ("Lotus Evora 400", "Lotus Evora") finds the car. */
+  function modelQueries() {
+    const d = S.d, e = d.edit || {}, tidy = (t) => String(t || "").replace(/\s+/g, " ").trim();
+    const make = tidy(e.make), model = tidy(e.model), trim = tidy(e.trim).split(" ").filter(Boolean), mw = model.split(" ").filter(Boolean);
+    const out = [], add = (q) => { q = tidy(q); if (q && !out.some((x) => x.toLowerCase() === q.toLowerCase())) out.push(q); };
+    if (!model) { add(d.find3d || d.title); return out; }
+    add([make, model, ...trim].join(" "));
+    for (let n = Math.min(trim.length - 1, 2); n >= 1; n--) add([make, model, ...trim.slice(0, n)].join(" "));
+    add(make + " " + model);
+    for (let n = mw.length - 1; n >= 1; n--) add([make, ...mw.slice(0, n)].join(" "));
+    if (make) add(model);
+    return out.slice(0, 6);
+  }
+  const skWords = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9.]+/g, " ").split(" ").map((w) => w.replace(/^\.+|\.+$/g, "")).filter(Boolean);
+  const SK_BODY = { coupe: "coupe", cabriolet: "open", convertible: "open", cabrio: "open", roadster: "open", spyder: "open", spider: "open", speedster: "open", volante: "open", targa: "targa", sedan: "sedan", saloon: "sedan", wagon: "wagon", estate: "wagon", avant: "wagon", touring: "wagon", hatchback: "hatch", suv: "suv", pickup: "truck" };
+  const SK_PARTS = new Set("wheel wheels rim rims steering engine seat seats logo badge emblem key keychain tire tires tyre tyres caliper brake brakes exhaust headlight headlights taillight taillights bumper spoiler chassis cockpit dashboard gearbox garage showroom diorama pack collection".split(" "));
+  const SK_ODD = new Set("wrecked crashed destroyed damaged rusty abandoned burnt police taxi lego toy cartoon rally drift widebody liberty rocket livery concept".split(" "));
+  const SK_FILLER = new Set("the a an of by and for with in 3d model car cars vehicle free hd hq high mid poly rigged game ready pbr real racing 3 2 edition version new".split(" "));
+  const SK_MAKES = new Set("acura alfa aston audi bentley bmw bugatti buick cadillac chevrolet chevy chrysler citroen dodge ferrari fiat ford genesis gmc honda hyundai infiniti jaguar jeep kia koenigsegg lamborghini lancia lexus lincoln lotus maserati mazda mclaren mercedes mini mitsubishi nissan opel pagani peugeot pontiac porsche renault rolls saab subaru suzuki tesla toyota volkswagen vw volvo".split(" "));
+  const SK_GENERIC = new Set("model series class type".split(" "));
+  const SK_STYLE = new Set("ink sketch silhouette wireframe hologram stylized stylised voxel pixel papercraft clay".split(" "));
+  function carWords() {
+    const e = S.d.edit || {}, trim = skWords(e.trim).filter((w) => !/^\d$/.test(w) && !SK_BODY[w] && !["base", "standard", "package", "pack"].includes(w));
+    const car = { make: skWords(e.make), model: skWords(e.model), trim, year: +e.year || 0, kind: "" };
+    for (const w of skWords(e.body).concat(skWords(e.trim), skWords(e.model))) if (SK_BODY[w] && !car.kind) car.kind = SK_BODY[w];
+    car.all = new Set([...car.make, ...car.model, ...skWords(e.trim), ...skWords(e.body)]);
+    return car;
+  }
+  /* How well a library model fits the car, or null when it is not this car at all. The model must be named:
+     in the model's own name (best), or on its page together with the make ("EVO 400", described as a Lotus
+     Evora 400), or at least by its nameplate ("Evora" for an Evora 400). Trim, year and body style then decide. */
+  function rateModel(m, car) {
+    const name = skWords(m.name), tags = m.tags || [], about = m.about || [];
+    const inName = (w) => name.includes(w), said = (w) => inName(w) || tags.includes(w) || about.includes(w);
+    const has = (list, phrase) => phrase.length > 0 && (" " + list.join(" ") + " ").includes(" " + phrase.join(" ") + " ");
+    const onPage = (phrase) => has(name, phrase) || has(tags, phrase) || has(about, phrase);
+    if (!car.model.length || name.some((w) => SK_PARTS.has(w) && !car.all.has(w))) return null;
+    const makeSaid = car.make.length > 0 && car.make.every(said);
+    if (!makeSaid && !m.vehicle) return null;                                       /* nothing says it is this make, or a car at all */
+    const other = name.some((w) => SK_MAKES.has(w) && !car.make.includes(w));       /* it names another maker's car */
+    const plate = car.model.filter((w) => /[a-z]/.test(w) && !SK_GENERIC.has(w));
+    const spare = name.filter((w) => !car.all.has(w) && !/^(19|20)\d\d$/.test(w) && !SK_FILLER.has(w) && !SK_BODY[w] && !SK_MAKES.has(w));
+    const exact = car.model.every(inName), named = plate.length > 0 && plate.every(inName);
+    /* a name that gives the nameplate and then something else ("Evora GT430" for an Evora 400) is another version,
+       whatever its page goes on to mention; a name that gives neither ("EVO 400") is told apart by its page */
+    const byPage = !exact && !other && makeSaid && !(named && spare.length);
+    const whole = byPage && onPage(car.model.concat(car.trim));                    /* its page names the car in full */
+    const near = byPage && !whole && onPage(car.model);
+    const close = !exact && !whole && !near && !other && named;
+    if (!exact && !whole && !near && !close) return null;
+    let fit = exact ? 30 : whole ? 31 : near ? 22 : 14;
+    if (car.make.length) fit += car.make.every(inName) ? 4 : makeSaid ? 2 : 0;
+    if (other) fit -= 6;
+    for (const w of car.trim) fit += inName(w) ? 2 : said(w) ? 1 : 0;
+    if (car.trim.length && !car.trim.some(inName) && spare.length) fit -= 5;        /* it names another version: a GT4 for a GTS, a GT430 for a 400 */
+    const years = name.concat(tags).filter((w) => /^(19[5-9]\d|20[0-3]\d)$/.test(w)).map(Number);
+    if (car.year && years.length) { const gap = Math.min(...years.map((y) => Math.abs(y - car.year))); fit += gap <= 2 ? 4 - gap : gap === 3 ? 0.5 : -Math.min(gap, 10) * 0.4; }
+    const kinds = name.concat(tags).filter((w) => SK_BODY[w] && !car.all.has(w)).map((w) => SK_BODY[w]);
+    const wrongBody = !!car.kind && kinds.length > 0 && !kinds.includes(car.kind);      /* a wagon for a sedan, a cabriolet for a coupe */
+    if (car.kind && kinds.length) fit += wrongBody ? -4 : 1;
+    fit -= Math.min(name.filter((w) => SK_ODD.has(w) && !car.all.has(w)).length, 3) * 2;
+    if (name.concat(tags).some((w) => SK_STYLE.has(w))) fit -= 3;
+    if (name.includes("lowpoly") || (name.includes("low") && name.includes("poly"))) fit -= 2;
+    fit -= Math.min(spare.length, 6) * 0.3;
+    fit += Math.min(Math.log10((m.likes || 0) + 1), 3) * 0.3;
+    return { fit, full: exact && car.trim.every(inName) && !wrongBody };
+  }
+  /* Ask the library with each wording in turn until a model that names the car turns up. Returns the models
+     found, best fit first, and the best one (or null when none of them is this car). */
+  async function gatherModels() {
+    const asks = modelQueries(), car = carWords(), found = [], have = new Set(), e = S.d.edit || {};
+    const plain = (String(e.make || "") + " " + String(e.model || "")).replace(/\s+/g, " ").trim().toLowerCase();
+    const bareAt = Math.max(0, asks.findIndex((q) => q.toLowerCase() === plain));       /* the first wording without the trim */
+    let best = null, failed = 0;
+    for (let i = 0; i < asks.length; i++) {
+      let items = [];
+      try { items = await findModels(asks[i]); } catch (e) { failed++; continue; }
+      for (const m of items) if (!have.has(m.uid)) { have.add(m.uid); m.rate = rateModel(m, car); m.order = found.length; found.push(m); }
+      best = found.reduce((top, m) => (m.rate && (!top || m.rate.fit > top.rate.fit) ? m : top), null);
+      if (best && best.rate.full) break;                              /* it names the car, trim and all */
+      if (best && best.rate.fit >= 30 && i >= bareAt) break;          /* it names the model: a wider search will not name it better */
+      if (found.length >= 36) break;
+    }
+    if (!found.length && failed === asks.length && asks.length) throw new Error("library unreachable");
+    found.sort((a, b) => ((b.rate ? b.rate.fit : -1) - (a.rate ? a.rate.fit : -1)) || (a.order - b.order));
+    return { items: found, best, asks };
+  }
+  /* The search box: when the words find nothing, drop the last word and ask again, down to one word. */
+  async function findWide(q) {
+    const parts = String(q || "").trim().split(/\s+/).filter(Boolean);
+    for (let n = parts.length; n >= 1; n--) {
+      const ask = parts.slice(0, n).join(" "), items = await findModels(ask);
+      if (items.length || n === 1) return { items, ask };
+    }
+    return { items: [], ask: String(q || "") };
   }
   const modelTile = (m, cls) => `<button type="button" class="skitem${cls || ""}" data-uid="${esc(m.uid)}">${m.thumb ? `<img src="${esc(m.thumb)}" alt="" loading="lazy">` : '<span class="noimg"></span>'}<b>${esc(m.name)}</b><span>${esc(m.author)}${m.size ? " · " + mb(m.size) : ""}</span></button>`;
   async function showModel(m, quiet) {
-    try { await store.set(modelSlot(), { embed: m.uid, name: m.name, author: m.author, url: m.url || skSite() + "/3d-models/" + m.uid, down: m.down, auto: !!quiet }); }
+    try { await store.set(modelSlot(), { embed: m.uid, name: m.name, author: m.author, url: m.url || skSite() + "/3d-models/" + m.uid, down: m.down, auto: !!quiet, near: !!quiet && !(m.rate && m.rate.full) }); }
     catch (e) { if (!quiet) toast("That choice could not be saved on this device.", true); return false; }
     paintLive(); if (S.scene) S.scene.reload(S.d);
     if (!quiet) toast("Showing “" + m.name + "”. Drag it to look around.");
     return true;
   }
-  /* The model that best fits the car's name: it must name the model, and the make, trim and year count for more.
-     Nothing that fails to name the model is ever picked: then the person chooses. */
-  function bestModel(items) {
-    const d = S.d, e = d.edit || {}, words = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9.]+/g, " ").split(" ").filter(Boolean);
-    const model = words(e.model), make = words(e.make), trim = words(e.trim), year = String(e.year || "");
-    let best = null, top = 0;
-    for (const m of items || []) {
-      const name = words(m.name), has = (w) => name.includes(w);
-      if (!model.length || !model.every(has)) continue;
-      const fit = 10 + (make.length && make.every(has) ? 4 : 0) + trim.filter(has).length * 2 + (year && has(year) ? 1 : 0);
-      if (fit > top) { top = fit; best = m; }
-    }
-    return best;
-  }
   function paintPicker(rec, chose) {
-    const d = S.d, wanted = !!d.hasCar && !S.busy && !rec && !(d.model && d.model.url), q = d.find3d || d.title || "";
+    const d = S.d, wanted = !!d.hasCar && !S.busy && !rec && !(d.model && d.model.url), q = modelQueries().join("|");
     root.classList.toggle("picking", wanted); el.picker.hidden = !wanted;
     if (!wanted) return;
     const key = (d.modelKey || d.activeId || "") + "|" + q;
-    if (pick.key !== key) Object.assign(pick, { key, items: null, busy: false, failed: false });
+    if (pick.key !== key) Object.assign(pick, { key, car: d.modelKey || d.activeId || "", items: null, best: null, busy: false, failed: false });
     if (!pick.items && !pick.busy && !pick.failed && q) {
       pick.busy = true;
-      findModels(q).then((items) => { if (pick.key === key) pick.items = items; }, () => { if (pick.key === key) pick.failed = true; })
+      gatherModels().then((got) => { if (pick.key === key) { pick.items = got.items; pick.best = got.best; } }, () => { if (pick.key === key) pick.failed = true; })
         .then(async () => {
           if (pick.key !== key) return;
           pick.busy = false;
-          const auto = chose ? null : bestModel(pick.items);       /* pick the car's model for them, unless they removed one */
+          const auto = chose ? null : pick.best;                   /* pick the car's model for them, unless they removed one */
           if (auto && await showModel(auto, true)) return;
           paintLive();
         });
     }
     const more = '<button type="button" class="p-more">Search or load a file</button>';
     el.picker.innerHTML = pick.items && pick.items.length
-      ? `<div class="p-head"><span>${chose ? "Pick a 3D model of this car" : "None of these names this car. Pick one"}</span>${more}</div><div class="p-row">${pick.items.map((m) => modelTile(m)).join("")}</div>`
+      ? `<div class="p-head"><span>${chose ? "Pick a 3D model of this car" : "None of these names this car. Pick one"}</span>${more}</div><div class="p-row">${pick.items.slice(0, 12).map((m) => modelTile(m)).join("")}</div>`
       : `<div class="p-note">${pick.busy || (!pick.items && !pick.failed) ? "Looking for 3D models of this car" : pick.failed ? "The model library could not be reached." : "No 3D model of this car turned up."}${pick.busy ? "" : " " + more}</div>`;
     el.picker.querySelectorAll(".skitem").forEach((b) => { b.onclick = () => { const m = (pick.items || []).find((x) => x.uid === b.dataset.uid); if (m) showModel(m); }; });
     const btn = el.picker.querySelector(".p-more"); if (btn) btn.onclick = () => openSheet("model");
@@ -1220,7 +1382,7 @@ function create(root) {
       el.live.hidden = false; root.classList.add("live3d");
       if (liveKey !== rec.embed) { liveKey = rec.embed; startLive(frame, rec.embed); }
       const credit = $(".credit");
-      credit.innerHTML = `3D view: ${safeUrl(rec.url) ? `<a href="${esc(rec.url)}" target="_blank" rel="noopener">“${esc(rec.name)}”</a>` : "“" + esc(rec.name) + "”"} by ${esc(rec.author || "its artist")}, shown live from Sketchfab`;
+      credit.innerHTML = `3D view: ${rec.near ? "closest model found, " : ""}${safeUrl(rec.url) ? `<a href="${esc(rec.url)}" target="_blank" rel="noopener">“${esc(rec.name)}”</a>` : "“" + esc(rec.name) + "”"} by ${esc(rec.author || "its artist")}, shown live from Sketchfab`;
       credit.hidden = false;
     } else if (liveKey || !el.live.hidden) {
       liveKey = ""; liveStop(); frame.removeAttribute("src"); el.live.hidden = true; el.live.classList.remove("plain", "ready"); root.classList.remove("live3d");
@@ -1236,7 +1398,8 @@ function create(root) {
     if (S.tab !== "model") return;
     const d = S.d, name = d.modelName || "this car";
     const sk = S.skfb || (S.skfb = {});
-    if (sk.key !== (d.modelKey || d.activeId)) Object.assign(sk, { key: d.modelKey || d.activeId, q: d.find3d || d.title || "", items: null, busy: false, ask: "", pulling: "" });
+    if (sk.key !== (d.modelKey || d.activeId)) Object.assign(sk, { key: d.modelKey || d.activeId, q: modelQueries()[0] || d.title || "", items: null, busy: false, ask: "", pulling: "", used: "" });
+    if (!sk.items && !sk.busy && pick.items && pick.items.length && pick.car === (d.modelKey || d.activeId || "")) sk.items = pick.items;   /* what the app already found for this car */
     const site = "https://sketchfab.com/search?features=downloadable&type=models&q=" + encodeURIComponent(sk.q || name);
     const card = (m) => modelTile(m, sk.pulling === m.uid ? " busy" : "");
     const live = rec && rec.embed, mine = rec && rec.file;
@@ -1249,8 +1412,9 @@ function create(root) {
       `<form class="linkrow skform"><input type="search" class="linkbox skq" value="${esc(sk.q)}" placeholder="Make and model" enterkeyhint="search"><button type="submit" class="btn sksearch"${sk.busy ? " disabled" : ""}>${sk.busy ? "Searching" : "Find models"}</button></form>` +
       (sk.ask ? `<div class="hintbox skask"><b>One-time step.</b> Downloads need a free Sketchfab account. Paste your API token and the model downloads straight away. <a href="https://sketchfab.com/settings/password" target="_blank" rel="noopener">Get your token ${ARROW}</a>` +
         `<div class="linkrow"><input type="password" class="linkbox sktoken" placeholder="Sketchfab API token" autocomplete="off"><button type="button" class="btn sksave">Download</button></div><div class="tiny">Kept in this browser only and sent only to Sketchfab.</div></div>` : "") +
+      (sk.used ? `<div class="tiny">Nothing came back for “${esc(sk.q)}”, so these are for “${esc(sk.used)}”.</div>` : "") +
       (sk.items ? (sk.items.length ? `<div class="skgrid">${sk.items.map(card).join("")}</div><div class="tiny">Tap a model to show it on the main screen. It plays in Sketchfab's own viewer, with the artist's name on it, and nothing is downloaded.</div>`
-        : '<div class="lead-sub">No models came back. Try fewer words, for example just the make and model.</div>') : "") +
+        : '<div class="lead-sub">No models came back, even for the first word alone. Try the make or the model by itself.</div>') : "") +
       `<h3>Or load a file you already have</h3><input type="file" class="glb" accept=".glb,model/gltf-binary" hidden><button type="button" class="btn ghost pick">Choose a .glb file</button>` +
       `<div class="linkrow"><input type="url" class="linkbox linkurl" placeholder="or paste a link to a .glb file" inputmode="url"><button type="button" class="btn ghost loadlink">Load</button></div>` +
       `<div class="hintbox">Your choice is kept in this browser, on this device only. Nothing is uploaded to the app or stored in it, and it is used for every ${esc(name)} in your garage. Use models you have the right to use, and keep the artist's credit.</div>` +
@@ -1268,9 +1432,10 @@ function create(root) {
     el.sheetBody.querySelector(".skform").onsubmit = async (e) => {
       e.preventDefault();
       sk.q = el.sheetBody.querySelector(".skq").value.trim(); if (!sk.q || sk.busy) return;
-      sk.busy = true; sk.items = null; renderModelTab();
+      sk.busy = true; sk.items = null; sk.used = ""; renderModelTab();
       try {
-        sk.items = await findModels(sk.q);
+        const got = await findWide(sk.q);
+        sk.items = got.items; sk.used = got.items.length && got.ask.toLowerCase() !== sk.q.toLowerCase() ? got.ask : "";
       } catch (err) { sk.items = null; toast("The model library could not be reached. Check your connection and try again.", true); }
       sk.busy = false; renderModelTab();
     };

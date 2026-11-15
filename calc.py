@@ -77,25 +77,103 @@ def is_mirror(url) -> bool:
     return any(host == site or host.endswith("." + site) for site in MIRROR_SITES)
 
 
-def merge_comps(*groups) -> list[dict]:
-    """Several searches' comps as one list, without the same car twice (the same page, or the same sale on two sites)."""
-    out, seen = [], set()
-    for group in groups:
-        for comp in group:
-            keys = []
+_LIST_PAGE = re.compile(r"classic\.com/(m|search|a)/|[?&]tab=comps|facebook\.com/marketplace/(?!item/)", re.I)
+
+
+def is_list_page(url) -> bool:
+    """True for a page that lists many cars rather than one: a Classic.com market page, a Facebook Marketplace city page."""
+    return bool(_LIST_PAGE.search(str(url or "")))
+
+
+def _year_of(title) -> str:
+    found = re.search(r"\b(?:19|20)\d\d\b", str(title or ""))
+    return found.group(0) if found else ""
+
+
+class _Seen:
+    """Which cars a list already holds, so the same one is not added twice.
+
+    The same car is: the same page (when the page is that car's own), the same VIN at the same price, the same
+    sale (status, price and a date within three days), or, for a car whose record has no date or sits on a list
+    page, the same status, price and model year. Two different VINs are never the same car.
+    """
+
+    def __init__(self, rows):
+        self.hard, self.soft, self.prices = set(), {}, {}
+        for comp in rows:
             if comp["url"]:
-                keys.append(("page", normalize_url(comp["url"])))
-            if comp.get("vin"):
-                keys.append(("vin", comp["vin"], comp["status"], comp["price"]))
-            if comp["status"] != "asking" and date_key(comp["date"]):
-                keys.append(("sale", comp["status"], comp["price"], date_key(comp["date"])))
-            if not keys:
-                keys.append(("car", comp["title"].lower(), comp["status"], comp["price"], comp["date"]))
-            if any(key in seen for key in keys):
+                self.prices.setdefault(normalize_url(comp["url"]), set()).add(comp["price"])
+
+    def listed(self, comp) -> bool:
+        """The comp's link is a page of many cars: a known list page, or one page given for cars at different prices."""
+        url = normalize_url(comp["url"]) if comp["url"] else ""
+        return bool(url) and (is_list_page(comp["url"]) or len(self.prices.get(url, ())) > 1)
+
+    def _keys(self, comp):
+        hard, soft, year = [], None, _year_of(comp["title"])
+        if comp["url"] and not self.listed(comp):
+            hard.append(("page", normalize_url(comp["url"])))
+        if comp.get("vin"):
+            hard.append(("vin", comp["vin"], comp["status"], comp["price"]))
+        if comp["status"] == "asking":
+            if year and comp.get("miles"):
+                soft = ("ask", comp["price"], year, round(comp["miles"] / 1000))
+        else:
+            soft = ("sale", comp["status"], comp["price"], year)
+        if not hard and soft is None:
+            hard.append(("car", comp["title"].lower(), comp["status"], comp["price"], comp["date"]))
+        return hard, soft
+
+    def has(self, comp) -> bool:
+        hard, soft = self._keys(comp)
+        if any(key in self.hard for key in hard):
+            return True
+        day, vin = date_key(comp["date"]), comp.get("vin") or ""
+        for other_day, other_vin in self.soft.get(soft, ()):
+            if vin and other_vin and vin != other_vin:
                 continue
-            seen.update(keys)
-            out.append(comp)
-    return out
+            if comp["status"] == "asking" or not day or not other_day or abs(day - other_day) <= 3:
+                return True
+        return False
+
+    def add(self, comp) -> None:
+        hard, soft = self._keys(comp)
+        self.hard.update(hard)
+        if soft is not None:
+            self.soft.setdefault(soft, []).append((date_key(comp["date"]), comp.get("vin") or ""))
+
+
+def _full(comp) -> bool:
+    """A record that can stand on its own: it has a date or a VIN, or it is a car for sale."""
+    return comp["status"] == "asking" or bool(date_key(comp["date"])) or bool(comp.get("vin"))
+
+
+def merge_comps(*groups) -> list[dict]:
+    """Several searches' comps as one list, without the same car twice.
+
+    The fuller record of a sale is the one kept: a dated sale on the car's own page wins over the same sale read
+    from a list of results.
+    """
+    rows = [comp for group in groups for comp in group]
+    seen, keep = _Seen(rows), set()
+    for full in (True, False):
+        for comp in rows:
+            if _full(comp) == full and not seen.has(comp):
+                seen.add(comp)
+                keep.add(id(comp))
+    return [comp for comp in rows if id(comp) in keep]
+
+
+def new_comps(have, found) -> list[dict]:
+    """The comps in `found` that the list `have` does not hold already."""
+    seen, fresh = _Seen(list(have) + list(found)), []
+    for comp in have:
+        seen.add(comp)
+    for comp in found:
+        if not seen.has(comp):
+            seen.add(comp)
+            fresh.append(comp)
+    return fresh
 
 
 def clean_comp(row: dict) -> dict | None:
@@ -266,7 +344,7 @@ def other_body(car: dict, comp: dict) -> bool:
 
 
 _TRIM_NOISE = {"coupe", "coupé", "cabriolet", "convertible", "cabrio", "sedan", "hatchback", "wagon", "pdk", "manual",
-               "automatic", "auto", "dct", "tiptronic", "rwd", "awd", "fwd", "4wd", "base", "the"}
+               "automatic", "auto", "dct", "tiptronic", "rwd", "awd", "fwd", "4wd", "base", "the", "2+2", "2+0", "2dr", "4dr"}
 
 
 def trim_key(text, car: dict | None = None) -> list[str]:
@@ -300,6 +378,31 @@ def mark_other_trim(car: dict, row: dict) -> bool:
     if "different trim" not in note.lower():
         mark = f"Different trim ({str(row.get('trim')).strip()})."
         row["note"] = f"{note} {mark}" if note.lower().startswith("live auction") else f"{mark} {note}".strip()
+    return True
+
+
+def loose_trim(car: dict) -> bool:
+    """True when the car's trim line names no version: it is empty, or only a detail (a 2+2 seating layout, a body word, a gearbox)."""
+    return not trim_key(car.get("trim"), car)
+
+
+def ease_trim_mark(car: dict, row: dict) -> bool:
+    """Take back a 'Different trim' note from a comp that is the car's own model and only leaves out a detail.
+
+    A buyer's Evora 400 2+2 and a sale listed as an Evora 400 are the same version. This only applies when the
+    car's trim line names no version, the comp names the whole model and states no version of its own.
+    Returns True when the note was taken back.
+    """
+    note = str(row.get("note") or "")
+    if "different trim" not in note.lower() or not loose_trim(car):
+        return False
+    title = re.sub(r"[^a-z0-9.+ ]", " ", str(row.get("title") or "").lower().replace("-", " ")).split()
+    model = re.sub(r"[^a-z0-9.+ ]", " ", str(car.get("model") or "").lower().replace("-", " ")).split()
+    if not model or not all(word in title for word in model):
+        return False
+    if trim_key(row.get("trim"), car) or trim_key(row.get("title"), car):
+        return False                           # it names a version of its own (GT, Sport 410): the note stands
+    row["note"] = re.sub(r"(?i)\bdifferent trim\b[^.]*\.?\s*", "", note).strip()
     return True
 
 

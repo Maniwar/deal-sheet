@@ -17,11 +17,16 @@ what that car has been selling for and gives you a typical sale price, the comps
 
 ## What you see
 
-- **The car.** The app searches Sketchfab's public library for the car's name and shows the model
-  that names it best (it must name the model; make, trim and year count for more). It is used for
-  every car of that make and model in your garage. Change it or remove it in the **3D model** tab.
-  If nothing in the library names the car, or you removed the model, the place where the car goes
-  shows the choices to tap instead. The app does not draw a stand-in car of its own.
+- **The car.** The app searches Sketchfab's public library for the car and shows the model that
+  fits it best. It asks with the car's full name first and then with shorter ones ("Lotus Evora 400
+  2+2", then "Lotus Evora 400", then "Lotus Evora"), because a full name often finds nothing. A
+  model fits when its name gives the model, or when its page says it is that car, or, failing
+  both, when its name gives the nameplate; trim, year and body style then decide, and a model
+  named as another version (a GT430 for a 400) is marked down. When the model is not the car by
+  name, the credit under it says "closest model found". It is used for every car of that make and
+  model in your garage. Change it or remove it in the **3D model** tab, which lists the other
+  models found. If nothing in the library is the car, or you removed the model, the place where
+  the car goes shows the choices to tap instead. The app does not draw a stand-in car of its own.
 - **If the app restarts while you wait** (a new version went out, or it had gone to sleep), the page
   notices, reconnects your saved key, brings your cars and settings back and sends your request
   again, instead of waiting for an answer that will not come.
@@ -168,27 +173,45 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
 ## What to expect from the web research
 
 - Results come from Claude's web search tool, so they are search results, not page scrapes.
-- Every run searches Bring a Trailer and Cars & Bids first, then other auction sites. A second
-  search then looks for cars for sale right now: live auctions (Bring a Trailer, Cars & Bids,
-  PCARMARKET), enthusiast classifieds (for a Porsche, Rennlist and the PCA Mart), the maker's
-  pre-owned finder, dealers and listing sites. Price-guide mirrors such as KBB are left out because
-  they keep listings up after the car has gone.
+- Every run looks for completed sales and, at the same time, for cars for sale right now: live
+  auctions (Bring a Trailer, Cars & Bids, PCARMARKET), enthusiast classifieds (for a Porsche,
+  Rennlist and the PCA Mart), the maker's pre-owned finder, dealers, listing sites and Facebook
+  Marketplace. Price-guide mirrors such as KBB are left out because they keep listings up after
+  the car has gone.
+- Facebook Marketplace shows the search tool only its public lists for a city (car, price, miles,
+  town), not each car's own page. Cars read from those lists link to the list, say so in their
+  note, and are not checked: sign in to Facebook to find the car.
 - The app cannot open sites that block automated visits, so some for-sale cars are marked "not
   confirmed". Open those yourself.
 - Body style and trim are hard requirements: a coupe is compared only with coupes and a Carrera S
   only with Carrera S. Cars of another body style are dropped. A car of another trim is kept only
   as context: its note starts "Different trim", and it is switched off so it stays out of the
   numbers. The check compares the trim each source states, so a source that names no trim passes.
+  When the car's trim line is only a detail of the car (2+2 seats, a body word, a gearbox) and not
+  a version, every car of that model counts as the same version: an Evora 400 2+2 is compared with
+  every Evora 400, whether or not the sale's page repeats "2+2".
 - When a listing shows a VIN, the app looks it up in NHTSA's public VIN decoder
   (vpic.nhtsa.dot.gov) to check the trim. If the VIN is plainly more specific (the listing says
   Carrera, the VIN says Carrera S) the trim is corrected and a note says so; if the two disagree
   any other way, the note asks you to check it. Only the VIN is sent.
-- The searches use Claude's built-in web search. Completed sales are searched one auction site at a
-  time (Cars & Bids, Bring a Trailer, then PCARMARKET, Classic.com, Hagerty Marketplace and
-  Collecting Cars), each search limited to that site so it returns the site's own auction pages,
-  and then the wider web. Results are merged so the same sale is not listed twice. This needs the
-  search limit in Settings to be 8 or more (12 by default); below that it is one search of the
-  whole web.
+- The searches use Claude's built-in web search. Completed sales come from three or four searches
+  that run at the same time: Classic.com, Cars & Bids, Bring a Trailer and the wider web. Each of
+  the first three is limited to that one site, so it returns the site's own pages. Classic.com is
+  the main source: it records the results of Bring a Trailer, Cars & Bids, PCARMARKET, Hagerty,
+  Hemmings and Collecting Cars auctions with the price, the date, the miles and the VIN. Cars &
+  Bids pages in search results are often copies made while the auction was still running, so they
+  show no final price; those sales come through Classic.com.
+- Some sites cannot be searched from the inside (the search tool turns the request down, as it
+  does for Bring a Trailer). The app then looks for that site's results across the web instead,
+  remembers it, and does not ask again: later searches skip the failed attempt, and the site's
+  sales come from Classic.com and the wider web.
+- A sale read from one of Classic.com's lists of results, when that car's own page was not among
+  the search results, links to the list and says "Listed on Classic.com" in its note.
+- Results are merged so the same sale is not listed twice: the same page, the same VIN, or the
+  same price and model year within three days. The record with a date and its own page is kept.
+- If the search service is busy, a site's search is tried once more. If your key's rate limit is
+  reached, the app waits as long as the API asks (40 seconds at most), says so in the live lines,
+  and carries on; it gives up only after two waits. At most three requests run at once.
 - KBB and J.D. Power listing pages are left out of every search: they copy dealers' listings and stay
   up after the car has gone. Any already saved are moved to the ended list.
 - Every comp shows its VIN under its title, in the lists and in the pop-up on the chart; tap it to
@@ -214,7 +237,9 @@ the results in the app. Tap one and it plays on the main screen in Sketchfab's o
 artist's name on it: no account, and nothing is downloaded or stored in the app. The app sets that
 viewer's backdrop to the studio's own colour and frames the car the way the studio camera would
 (same lens, distance and height), turns it slowly while nobody is touching it, and lays the page's
-shading and a ground shadow over it. So the car sits in the page instead of in a window. Touch and
+shading and a ground shadow over it. Some models stand the car on a floor or platform much bigger
+than the car, which would make the car tiny: the app measures the car itself (it asks the viewer
+where rays through the scene land), frames that, and hides a floor that is a separate piece. So the car sits in the page instead of in a window. Touch and
 mouse go to the viewer's own controls; when you let go, the app returns the car to its framing. (The viewer's picture cannot be made see-through on a free account, which
 is why the studio around a live car is one flat colour.) With a free Sketchfab account you can instead
 download a model into the studio (paste your API token once), or load a `.glb` file or link you

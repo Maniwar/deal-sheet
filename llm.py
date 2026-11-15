@@ -16,12 +16,15 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import MIRROR_SITES, car_facts, car_title, clean_comps, host_of, is_mirror, link_kind, mark_other_trim, merge_comps, money, normalize_url
+from calc import (MIRROR_SITES, car_facts, car_title, clean_comps, ease_trim_mark, host_of, is_list_page, is_mirror, link_kind,
+                  loose_trim, mark_other_trim, merge_comps, money, normalize_url)
 
 MODELS = {                                   # the first one is the default
     "Haiku 5.5 (fastest)": "claude-haiku-5-5",
@@ -34,11 +37,26 @@ WEB_SEARCH_TYPE = "web_search_20250305"
 
 
 class LLMError(Exception):
-    """A failure the app can show to the person using it."""
+    """A failure the app can show to the person using it.
+
+    `kind` says what went wrong, so the caller knows whether another way of asking can work:
+    'request' (the API turned the request down), 'key', 'rate', 'server', 'network' or ''.
+    """
+
+    def __init__(self, message: str, kind: str = ""):
+        super().__init__(message)
+        self.kind = kind
+
+
+_GATE = threading.BoundedSemaphore(3)         # at most three requests to the API at once, however the work is split up
+_WAIT_CAP = float(os.environ.get("DEALSHEET_RETRY_WAIT", "40"))     # the longest one pause before trying a request again
+# Sites the search tool could not be limited to (the API turned the request down, or nothing came back). They are
+# looked up by name from then on, so the failed attempt is made once and not on every search.
+_UNSEARCHABLE: set[tuple] = set()
 
 
 def get_client(api_key: str) -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=api_key, max_retries=2, timeout=300.0)
+    return anthropic.Anthropic(api_key=api_key, max_retries=1, timeout=300.0)      # the waits are made here, where they can be shown
 
 
 def check_key(api_key: str) -> tuple[bool, str]:
@@ -88,6 +106,15 @@ def _search_urls(response) -> set[str]:
     return found
 
 
+def _search_errors(response) -> list[str]:
+    """The error code of each web search in this response that failed (the request itself still succeeds)."""
+    codes = []
+    for block in _field(response, "content", []) or []:
+        if _field(block, "type") == "web_search_tool_result" and not isinstance(_field(block, "content"), list):
+            codes.append(str(_field(_field(block, "content"), "error_code") or "unknown"))
+    return codes
+
+
 class Progress:
     """Lines about what is happening right now, for the screen to show while the person waits.
 
@@ -118,6 +145,17 @@ class Progress:
             pass
 
 
+# What the search tool's own error codes mean. A failed search is not billed, and the rest of the work goes on.
+_SEARCH_ERRORS = {
+    "max_uses_exceeded": "it has used all the searches it was given for this site",
+    "too_many_requests": "the search service is busy, so that search was skipped",
+    "unavailable": "the search service had a problem, so that search was skipped",
+    "invalid_tool_input": "that search was not accepted, so it was skipped",
+    "query_too_long": "that search was too long, so it was skipped",
+    "request_too_large": "that search was too large, so it was skipped",
+}
+
+
 def _watch(event, kinds: dict, parts: dict, progress: Progress, label: str, stream=None) -> None:
     """Turn one streamed event into a line for the screen: each search as it is sent, and what came back."""
     kind, index = getattr(event, "type", ""), getattr(event, "index", None)
@@ -134,9 +172,11 @@ def _watch(event, kinds: dict, parts: dict, progress: Progress, label: str, stre
                     if host and host not in hosts:
                         hosts.append(host)
                 where = f" from {', '.join(hosts[:3])}{' and others' if len(hosts) > 3 else ''}" if hosts else ""
-                progress.say(f"{label}: {len(results)} page{'s' if len(results) != 1 else ''} back{where}")
-            else:
-                progress.say(f"{label}: that search came back empty")
+                progress.say(f"{label}: {len(results)} page{'s' if len(results) != 1 else ''} back{where}" if results
+                             else f"{label}: no pages matched that search")
+            else:                              # the search itself failed: say which way, in plain words
+                code = results.get("error_code") if isinstance(results, dict) else getattr(results, "error_code", "")
+                progress.say(f"{label}: {_SEARCH_ERRORS.get(str(code or ''), 'that search failed, so it was skipped')}")
         elif kinds[index] == "tool_use":
             progress.say(f"{label}: writing up what it found")
     elif kind == "content_block_delta" and getattr(event.delta, "type", "") == "input_json_delta":
@@ -166,35 +206,72 @@ def _create_live(client, progress: Progress, label: str, kwargs: dict):
         return stream.get_final_message()
 
 
-def _create(client, effort: str | None = None, progress: Progress | None = None, label: str = "", **kwargs):
+def _pause(exc, least: float) -> float:
+    """How long to wait before sending a request again: what the API asks for, within reason."""
+    try:
+        asked = float(exc.response.headers.get("retry-after") or 0)
+    except Exception:
+        asked = 0.0
+    return max(0.0, min(max(asked, least), _WAIT_CAP))
+
+
+def _create(client, effort: str | None = None, progress: Progress | None = None, label: str = "", attempt: int = 0, **kwargs):
     """One Messages API request. `effort` sets how hard the model thinks (low, medium, high).
 
-    With `progress`, the request is streamed and each web search is reported as it happens.
+    With `progress`, the request is streamed and each web search is reported as it happens. A rate limit or a
+    busy server is waited out and the request sent again, twice at most, with a line saying so.
     """
     if effort and kwargs.get("model") not in _NO_EFFORT:
         kwargs["output_config"] = {"effort": effort}
-    try:
+
+    def again(seconds: float, why: str):
         if progress is not None:
-            return _create_live(client, progress, label, kwargs)
-        return client.messages.create(**kwargs)
+            progress.say(f"{label or 'The request'}: {why}. Waiting {seconds:.0f} seconds, then carrying on")
+        time.sleep(seconds)
+        return _create(client, progress=progress, label=label, attempt=attempt + 1, **kwargs)
+
+    try:
+        with _GATE:
+            if progress is not None:
+                return _create_live(client, progress, label, kwargs)
+            return client.messages.create(**kwargs)
     except anthropic.BadRequestError as exc:
         detail = str(getattr(exc, "message", "") or exc).lower()
         if "output_config" in kwargs and ("effort" in detail or "output_config" in detail):
             kwargs.pop("output_config")        # a model without effort levels: send it again without one
             _NO_EFFORT.add(kwargs.get("model"))
-            return _create(client, progress=progress, label=label, **kwargs)
+            return _create(client, progress=progress, label=label, attempt=attempt, **kwargs)
         if "cache_control" in kwargs and "cache" in detail:
             kwargs.pop("cache_control")        # somewhere caching is not offered: send it again without it
-            return _create(client, progress=progress, label=label, **kwargs)
-        raise LLMError(f"The API returned an error ({exc.status_code}): {exc.message}") from exc
+            return _create(client, progress=progress, label=label, attempt=attempt, **kwargs)
+        raise LLMError(f"The API turned the request down ({exc.status_code}): {exc.message}", "request") from exc
     except anthropic.AuthenticationError as exc:
-        raise LLMError("Anthropic rejected your API key. Forget it in the sidebar and paste it again.") from exc
+        raise LLMError("Anthropic rejected your API key. Forget it in the sidebar and paste it again.", "key") from exc
     except anthropic.RateLimitError as exc:
-        raise LLMError("The API rate limit was hit. Wait a minute and try again.") from exc
+        if attempt < 2:
+            return again(_pause(exc, 15), "your key's rate limit was reached")
+        raise LLMError("Your key's rate limit was reached and waiting did not clear it. Wait a minute and try again.", "rate") from exc
     except anthropic.APIStatusError as exc:
-        raise LLMError(f"The API returned an error ({exc.status_code}): {exc.message}") from exc
+        if exc.status_code >= 500 and attempt < 2:
+            return again(_pause(exc, 6), "Anthropic's servers are busy")
+        kind = "server" if exc.status_code >= 500 else "request"
+        raise LLMError(f"The API returned an error ({exc.status_code}): {exc.message}", kind) from exc
     except anthropic.APIConnectionError as exc:
-        raise LLMError("Could not reach the Anthropic API. Check the connection and try again.") from exc
+        if attempt < 1:
+            return again(min(4.0, _WAIT_CAP), "the connection to Anthropic dropped")
+        raise LLMError("Could not reach the Anthropic API. Check the connection and try again.", "network") from exc
+
+
+def _again(run, progress: Progress | None, label: str):
+    """Run one search pass, and once more if it fails in a way a second try can fix (not a bad key or a rate limit)."""
+    try:
+        return run()
+    except LLMError as exc:
+        if exc.kind in ("key", "rate"):
+            raise
+        if progress is not None:
+            progress.say(f"{label}: that did not go through ({exc}). Trying it once more")
+        return run()
 
 
 def _call_tool(client, model: str, tool: dict, content, *, max_tokens: int, effort: str, problem: str) -> dict:
@@ -475,6 +552,27 @@ def extract_comps(client, model: str, car: dict, text: str = "", image: bytes | 
     return {"comps": comps, "summary": str(recorded.get("summary") or "").strip()}
 
 
+def _trim_rule(car: dict) -> str:
+    """The rule on trims for a search. It is strict when the car's trim names a version (Carrera S, Competition).
+
+    When the trim line is empty or only a detail of the car (2+2 seats, a body word, a gearbox), a strict rule
+    would throw out every sale whose page does not repeat that detail, so the rule is about the model instead.
+    """
+    if not loose_trim(car):
+        return ("- Trim is a hard requirement too. A base car, an S, a 4S, a GTS and a Turbo are different cars at "
+                "different prices (a Carrera is not a Carrera S). Record only the buyer's exact trim. Only if you find "
+                "fewer than three exact matches may you add the nearest trims, and each of those needs a note that "
+                "starts with 'Different trim' so it is kept out of the numbers.\n")
+    name = " ".join(str(car.get(key) or "").strip() for key in ("make", "model")).strip() or "this model"
+    detail = str(car.get("trim") or "").strip()
+    lead = (f"- This car's trim line ('{detail}') is a detail of the car, not a version of it. " if detail
+            else "- This car has no trim name. ")
+    return (lead + f"Every {name} counts as the same version, whether or not its page repeats that detail: record "
+            "them all as exact matches. A different version of the model (a base car against an S, a GT, a Sport, a "
+            "410 or 430 and the like) is a different car at a different price: add one only if you find fewer than "
+            "three exact matches, with a note that starts with 'Different trim' so it is kept out of the numbers.\n")
+
+
 def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
     name = car_title(car) or "this car"
     return (
@@ -511,10 +609,7 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
         "- If a listing's page says sold or removed, record it as asking with available no, never as for sale.\n"
         "- Body style is a hard requirement: compare a coupe only with coupes, a cabriolet only with cabriolets, "
         "a Targa only with Targas. Leave every other body style out. Record each comp's body style in body.\n"
-        "- Trim is a hard requirement too. A base car, an S, a 4S, a GTS and a Turbo are different cars at "
-        "different prices (a Carrera is not a Carrera S). Record only the buyer's exact trim. Only if you find "
-        "fewer than three exact matches may you add the nearest trims, and each of those needs a note that "
-        "starts with 'Different trim' so it is kept out of the numbers.\n"
+        + _trim_rule(car) +
         "- Match the drivetrain (rear-wheel or all-wheel drive) and the transmission. If one of those differs, "
         "say so in the comp's note.\n"
         "- Classic.com snippets show a placeholder '6865 mi' before the real mileage. Use the second figure.\n"
@@ -538,7 +633,9 @@ def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
         "2. Enthusiast classifieds for this make: the main owners' forum marketplace and club classifieds (for a "
         "Porsche, Rennlist Marketplace and the PCA Mart; use the equivalents for other makes).\n"
         "3. The maker's own pre-owned finder and franchised dealers' own sites, including certified cars.\n"
-        "4. Listing sites: Cars.com, Autotrader, CarGurus, duPont Registry and Autotrader Classics.\n"
+        "4. Listing sites: Classic.com (its 'For Sale' lines give the dealer, the price and the day the listing "
+        "was last updated; 'Last Asking' means the listing has gone, so skip those), Cars.com, Autotrader, CarGurus, "
+        "duPont Registry and Autotrader Classics.\n"
         f"5. Plain searches the way a buyer would type them, e.g. \"{name} for sale\"{near}, to catch independent "
         "dealers and smaller sites.\n"
         "Rules:\n"
@@ -553,9 +650,7 @@ def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
         "auction' and give the end date, for example 'Live auction, ends Nov 18. Price is the current bid.'\n"
         "- Body style is a hard requirement: a coupe buyer sees only coupes, a cabriolet buyer only cabriolets, "
         "a Targa buyer only Targas. Record each car's body style in body.\n"
-        "- Trim is a hard requirement too: a Carrera is not a Carrera S, a base car is not an S or a GTS. Record "
-        "only the buyer's exact trim. Only if you find fewer than three may you add the nearest trims, each with "
-        "a note that starts with 'Different trim'.\n"
+        + _trim_rule(car) +
         "- Match the generation, drivetrain and transmission where you can. If a car differs, say so in its note.\n"
         "- Record miles, VIN, options and the seller (the dealer's name, or 'private seller') when shown. Name "
         "the site as the source. Record accident, damage or title history in history whenever it is stated.\n"
@@ -567,7 +662,7 @@ def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
 
 
 def _known_note(known) -> str:
-    links = [str(link) for link in (known or []) if link][:40]
+    links = [str(link) for link in (known or []) if link and not is_list_page(link)][:40]
     if not links:
         return ""
     return ("\n\nThe buyer already has the cars on these pages. Search for different ones and do not record these "
@@ -598,6 +693,7 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
     tools = [search, COMPS_TOOL]
     messages = [{"role": "user", "content": prompt}]
     seen_urls: set[str] = set()
+    failed: list[str] = []
     used = {"input_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 0}
     for turn in range(max_rounds):
         # A second or later round sends the whole search so far again, so that part is read from the cache.
@@ -609,11 +705,13 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
         for key in used:
             used[key] += int(_field(usage, key) or 0) if usage is not None else 0
         seen_urls |= _search_urls(response)
+        failed += _search_errors(response)
         recorded = _tool_input(response, "record_comps")
         if isinstance(recorded, dict):
             rows = [row for row in (recorded.get("comps") or []) if isinstance(row, dict)]
             for row in rows:                       # another trim is another car: it stays, labelled and switched off
                 mark_other_trim(car or {}, row)
+                ease_trim_mark(car or {}, row)     # but a sale that only leaves out a detail of the trim line is the same car
             comps = clean_comps(rows)
             for comp in comps:
                 comp["link_ok"] = normalize_url(comp["url"]) in seen_urls if comp["url"] else False
@@ -623,6 +721,7 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
                 "comps": comps,
                 "summary": str(recorded.get("summary") or "").strip(),
                 "searched": len(seen_urls),
+                "failed": failed,
             }
         messages.append({"role": "assistant", "content": _field(response, "content")})
         if _field(response, "stop_reason") == "pause_turn":
@@ -637,92 +736,167 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
     raise LLMError(problem)
 
 
-# Auction sites searched one at a time. A search limited to one site returns that site's own auction pages, each
-# with its result, instead of a few of them among everything else on the web.
+# Auction sites searched one at a time. A search limited to one site returns that site's own pages, each with
+# its result, instead of a few of them among everything else on the web. Classic.com comes first: it records
+# the results of Bring a Trailer, Cars & Bids, PCARMARKET, Hagerty, Hemmings and Collecting Cars auctions with
+# the price, the date, the miles and the VIN, and unlike some of those sites it can be searched.
 AUCTION_SITES = [
+    ("Classic.com", ["classic.com"]),
     ("Cars & Bids", ["carsandbids.com"]),
     ("Bring a Trailer", ["bringatrailer.com"]),
-    ("PCARMARKET, Classic.com, Hagerty Marketplace and Collecting Cars", ["pcarmarket.com", "classic.com", "hagerty.com", "collectingcars.com"]),
 ]
+
+# How to read each site's pages, added to that site's search.
+_SITE_NOTES = {
+    "Classic.com": (
+        "How to read Classic.com, which records the results of Bring a Trailer, Cars & Bids, PCARMARKET, Hagerty, "
+        "Hemmings and Collecting Cars auctions:\n"
+        "- A vehicle page (its address has /veh/) is one car. It shows 'Sold' with the price, the date and the auction "
+        "site; 'Not Sold' with a 'Highest Bid' (record as high_bid); or 'For Sale' and 'Last Asking' (asking prices: "
+        "leave those to the for-sale search). Its address holds the VIN. Use that address as the comp's URL and "
+        "name the auction site it gives as the source.\n"
+        "- A market page (its address has /m/) and the Comps list on a vehicle page list many auctions, each with a "
+        "price, a date and the auction site. Record every sold and not-sold auction of a matching car from those "
+        "lists as well. When that car's own page is not among your results, use the address of the page where you "
+        "saw it as its URL and start its note with 'Listed on Classic.com'. This is the one exception to the rule "
+        "that a market page is not a comp's URL.\n"
+        "- Record each auction once, with its own price and date. Leave the date empty rather than guess it.\n"
+        "- 'CMB' figures are Classic.com's own estimates, not sales: never record one.\n"
+    ),
+    "Cars & Bids": (
+        "Cars & Bids pages in the results are often copies made while the auction was still running: they say "
+        "'Auction ends' with a date and show a current bid, not the result. Record an auction only when the result "
+        "itself says how it ended ('Sold for', 'Bid to', 'Reserve not met') and gives that price. A current bid is "
+        "never a sale. An auction whose end date is still ahead of today is asking, with a note that starts 'Live "
+        "auction'.\n"
+    ),
+}
 
 
 def _site_prompt(car: dict, today: str, site: str, max_searches: int, limited: bool = True) -> str:
     name = car_title(car) or "this car"
-    short = " ".join(str(car.get(key) or "").strip() for key in ("make", "model", "trim")).strip() or name
+    keys = ("make", "model") if loose_trim(car) else ("make", "model", "trim")      # a detail such as 2+2 only narrows a search
+    short = " ".join(str(car.get(key) or "").strip() for key in keys).strip() or name
+    year = str(car.get("year") or "").strip()
     rules = _research_prompt(car, today, max_searches).split("Rules:\n", 1)[1]
     scope = (f"Your searches return pages from {site} only." if limited
-             else f"Put the site's name in every search, so the results come from {site}.")
+             else f"Put the site's name in every search, so the results are about {site} auctions. Pages on other sites "
+                  f"that report a {site} result (Classic.com, for one) are good sources.")
     return (
         f"Today is {today}. Find completed auctions of this car on {site}, so the buyer can negotiate.\n\n"
         f"{_car_block(car)}\n\n"
         f"{scope} Run up to {max_searches} searches, each worded differently so they surface different auctions, "
         "then call record_comps once with every usable one:\n"
-        f"- \"{short}\"\n"
-        f"- \"{name}\"\n"
-        f"- \"{short} sold\", and the same for the neighbouring model years of this generation\n"
+        f"- \"{(year + ' ' + short).strip()}\"\n"
+        f"- \"{short} sold\"\n"
+        f"- \"{short}\" with a neighbouring model year of this generation\n"
         f"- \"{short}\" with the transmission or a paint colour, if you still have searches left\n"
         "Each auction page says how it ended: 'Sold for' is sold; 'Bid to' or 'Reserve not met' is high_bid; an "
         "auction that is still running is asking, with available yes and a note that starts 'Live auction'. Leave "
         "out a page that does not show a price.\n"
+        + (_SITE_NOTES.get(site, "") if limited else "") +
         "Rules:\n" + rules
     )
+
+
+def _run_side_by_side(jobs, progress: Progress | None) -> list:
+    """Run each (label, function) on its own thread and return (label, result or LLMError) in the same order.
+
+    The workers' lines are drawn from this thread, which is the one that may write to the page.
+    """
+    with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
+        futures = [(label, pool.submit(run)) for label, run in jobs]
+        waiting = {future for _, future in futures}
+        while waiting:
+            _, waiting = wait(waiting, timeout=0.4)
+            if progress:
+                progress.flush()
+        out = []
+        for label, future in futures:
+            try:
+                out.append((label, future.result()))
+            except LLMError as exc:
+                out.append((label, exc))
+            except Exception as exc:               # one search going wrong must not take the others down with it
+                out.append((label, LLMError(f"This search stopped on an unexpected problem ({type(exc).__name__}).")))
+        return out
 
 
 def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rounds: int = 6,
                    today: str | None = None, known=None, progress: Progress | None = None) -> dict:
     """Search the web for completed sales.
 
-    Each auction site gets its own search, limited to that site, and the wider web comes last. Returns
-    {'comps': [...], 'summary': str, 'searched': int, 'passes': [{'site', 'found', 'error'}]}: the
-    summary says what each site gave, so a site that found nothing or did not finish is plain to see.
+    Each auction site that can be searched on its own gets its own search, and the wider web gets one too, all
+    at the same time. Returns {'comps': [...], 'summary': str, 'searched': int, 'passes': [{'site', 'found',
+    'error'}]}: the summary says what each site gave, so a site that found nothing or did not finish is plain to see.
     """
     today = today or dt.date.today().strftime("%B %d, %Y")
     problem = "The comp research did not finish. Try again, or add comps by hand."
-    each = max(2, int(max_searches) // (len(AUCTION_SITES) + 1))        # every site gets at least two searches
+    sites = [(site, domains) for site, domains in AUCTION_SITES if tuple(domains) not in _UNSEARCHABLE]
+    closed = [site for site, domains in AUCTION_SITES if tuple(domains) in _UNSEARCHABLE]
+    each = max(2, int(max_searches) // (len(sites) + 1))        # every site gets at least two searches
 
     def wide() -> dict:
-        searches = max(2, int(max_searches) - each * len(AUCTION_SITES))
-        return _research(client, model, _research_prompt(car, today, searches) + _known_note(known), searches, max_rounds,
-                         problem, car=car, never=MIRROR_SITES, progress=progress, label="Wider web")
+        searches = max(2, int(max_searches) - each * len(sites))
+        return _again(lambda: _research(client, model, _research_prompt(car, today, searches) + _known_note(known), searches,
+                                        max_rounds, problem, car=car, never=MIRROR_SITES, progress=progress, label="Wider web"),
+                      progress, "Wider web")
 
-    def one_site(site: str, domains: list[str], label: str) -> dict:
-        try:
+    def one_site(site: str, domains: list[str]) -> dict:
+        def limited() -> dict:
             return _research(client, model, _site_prompt(car, today, site, each) + _known_note(known), each, max_rounds,
-                             problem, car=car, only=domains, progress=progress, label=label)
-        except LLMError as exc:                # a site the search tool cannot be limited to: name it in the searches instead
-            if progress:
-                progress.say(f"{label}: a search limited to the site did not work ({exc}), so searching for it by name")
-            return _research(client, model, _site_prompt(car, today, site, each, limited=False) + _known_note(known), each,
-                             max_rounds, problem, car=car, never=MIRROR_SITES, progress=progress, label=label)
+                             problem, car=car, only=domains, progress=progress, label=site)
 
-    jobs = [(site if len(domains) == 1 else "Other auction sites", site, domains) for site, domains in AUCTION_SITES]
-    if progress:
-        progress.say("Searching one site at a time: " + ", ".join(label for label, _, _ in jobs) + ", then the wider web")
-    results, passes, first_error = [], [], None
-    with ThreadPoolExecutor(max_workers=2) as pool:           # two at a time keeps a new key inside its rate limit
-        futures = [(label, pool.submit(one_site, site, domains, label)) for label, site, domains in jobs]
-        futures.append(("Wider web", pool.submit(wide)))
-        waiting = {future for _, future in futures}
-        while waiting:                                        # the workers' lines are drawn from this thread
-            _, waiting = wait(waiting, timeout=0.4)
-            if progress:
-                progress.flush()
-        for label, future in futures:
-            try:
-                result = future.result()
-            except LLMError as exc:
-                first_error = first_error or exc
-                passes.append({"site": label, "found": 0, "error": str(exc)})
+        def by_name() -> dict:
+            return _again(lambda: _research(client, model, _site_prompt(car, today, site, each, limited=False) + _known_note(known),
+                                            each, max_rounds, problem, car=car, never=MIRROR_SITES, progress=progress, label=site),
+                          progress, site)
+        try:
+            result = limited()
+            if not result["searched"] and not result["comps"] and any(code in ("too_many_requests", "unavailable")
+                                                                      for code in result["failed"]):
                 if progress:
-                    progress.say(f"{label}: did not finish. {exc}")
-            else:
-                results.append(result)
-                passes.append({"site": label, "found": len(result["comps"]), "error": ""})
+                    progress.say(f"{site}: the search service was busy. Trying this site once more in a few seconds")
+                time.sleep(min(6.0, _WAIT_CAP))
+                result = limited()
+        except LLMError as exc:
+            if exc.kind != "request":              # a bad key or a rate limit would stop a search by name as well
+                raise
+            _UNSEARCHABLE.add(tuple(domains))      # the API will not limit a search to this site: do not ask again
+            if progress:
+                progress.say(f"{site}: the search tool cannot look inside this site, so looking for its results across the web")
+            return by_name()
+        if result["searched"] or result["comps"]:
+            return result
+        if not result["failed"]:                   # the searches ran and not one page came back, now or ever
+            _UNSEARCHABLE.add(tuple(domains))
+        if progress:
+            progress.say(f"{site}: no pages came back from inside this site, so looking for its results across the web")
+        return by_name()
+
+    if progress:
+        note = f" ({', '.join(closed)} cannot be searched on its own, so it is covered by Classic.com and the wider web)" if closed else ""
+        progress.say("Searching at the same time: " + ", ".join(site for site, _ in sites) + " and the wider web" + note)
+    jobs = [(site, (lambda site=site, domains=domains: one_site(site, domains))) for site, domains in sites] + [("Wider web", wide)]
+    results, passes, first_error = [], [], None
+    for label, result in _run_side_by_side(jobs, progress):
+        if isinstance(result, LLMError):
+            first_error = first_error or result
+            passes.append({"site": label, "found": 0, "error": str(result)})
+            if progress:
+                progress.say(f"{label}: did not finish. {result}")
+        else:
+            results.append(result)
+            passes.append({"site": label, "found": len(result["comps"]), "error": ""})
     if not results:
         raise first_error
     comps = merge_comps(*[result["comps"] for result in results])
     told = [f"{one['site']}: did not finish ({one['error']})" if one["error"] else f"{one['site']}: {one['found']}" for one in passes]
-    lead = "Each site was searched on its own. " + ". ".join(told) + ". A sale found on two sites is listed once."
+    lead = "Each source was searched on its own. " + ". ".join(told) + ". A sale found twice is listed once."
+    if closed or any(tuple(domains) in _UNSEARCHABLE for _, domains in sites):
+        shut = [site for site, domains in AUCTION_SITES if tuple(domains) in _UNSEARCHABLE]
+        lead += (f" {' and '.join(shut)} cannot be searched from the inside, so {'its' if len(shut) == 1 else 'their'} sales "
+                 "come from Classic.com, which records them, and from the wider web.")
     if first_error:
         lead += " Run Search for more sales to try the ones that did not finish again."
     last = results[-1]["summary"] if not passes[-1]["error"] else ""
@@ -730,17 +904,74 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
             "passes": passes}
 
 
+def _marketplace_prompt(car: dict, today: str, max_searches: int = 2) -> str:
+    short = " ".join(str(car.get(key) or "").strip() for key in ("make", "model")).strip() or car_title(car)
+    place = str(car.get("location") or "").strip()
+    near = f" and \"{short} for sale {place}\"" if place else ""
+    return (
+        f"Today is {today}. Find cars like this one that are listed on Facebook Marketplace.\n\n"
+        f"{_car_block(car)}\n\n"
+        f"Your searches return facebook.com pages only. Run up to {max_searches} searches, such as \"{short} for sale\""
+        f"{near}, then call record_comps once.\n"
+        "Marketplace's public pages are lists for one city. Each entry gives a car, its price, its miles and its town. "
+        "Record every entry that matches this car:\n"
+        "- status asking, available unknown, source Facebook Marketplace.\n"
+        "- title: the year, model and trim as listed, without the town. Start the note with the town, like 'Scottsdale, AZ.'\n"
+        "- url: the address of the list page where you saw the car. A car's own Marketplace page is not in the results, "
+        "so here the list page is the right URL. This is the one exception to the rule about list pages.\n"
+        "- When an entry shows two prices, the first is the price now and the second is the old one.\n"
+        "- The same car is often on several cities' lists. Record it once.\n"
+        "- Leave out entries with no price, and anything that is not this model.\n"
+        + _trim_rule(car) +
+        "- Record only what the lists show. Never fill a gap from memory.\n"
+        "In the summary say how many cars you recorded and in which towns."
+    )
+
+
 def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_rounds: int = 6,
                       today: str | None = None, known=None, progress: Progress | None = None) -> dict:
-    """Search the web for cars like this one that are for sale now: live auctions, classifieds and dealers."""
+    """Search the web for cars like this one that are for sale now: live auctions, classifieds, dealers and
+    Facebook Marketplace's public lists. The two searches run at the same time."""
     today = today or dt.date.today().strftime("%B %d, %Y")
-    result = _research(client, model, _for_sale_prompt(car, today, max_searches) + _known_note(known), max_searches, max_rounds,
-                       "The search for cars for sale did not finish.", car=car, never=MIRROR_SITES,
-                       progress=progress, label="For sale now")
+    problem = "The search for cars for sale did not finish."
+
+    def everywhere() -> dict:
+        return _again(lambda: _research(client, model, _for_sale_prompt(car, today, max_searches) + _known_note(known), max_searches,
+                                        max_rounds, problem, car=car, never=MIRROR_SITES, progress=progress, label="For sale now"),
+                      progress, "For sale now")
+
+    def marketplace() -> dict:
+        return _research(client, model, _marketplace_prompt(car, today), 2, 3, problem, car=car, only=["facebook.com"],
+                         progress=progress, label="Facebook Marketplace")
+
+    jobs = [("For sale now", everywhere)]
+    if ("facebook.com",) not in _UNSEARCHABLE:
+        jobs.append(("Facebook Marketplace", marketplace))
+    done = dict(_run_side_by_side(jobs, progress))
+    result, lists = done["For sale now"], done.get("Facebook Marketplace")
+    if isinstance(lists, LLMError):
+        if lists.kind == "request":
+            _UNSEARCHABLE.add(("facebook.com",))
+        if progress:
+            progress.say("Facebook Marketplace: could not be searched this time, so it was left out")
+        lists = None
+    listed = [comp for comp in (lists or {}).get("comps", []) if comp["status"] == "asking"]
+    if isinstance(result, LLMError):
+        if not listed:
+            raise result
+        result = {"comps": [], "searched": 0, "failed": [],
+                  "summary": f"The main search for cars for sale did not finish ({result}). Use Search for more to run it again."}
     # price-guide sites mirror other sites' listings and keep them up after the car has gone
-    result["comps"] = [comp for comp in result["comps"] if comp["status"] == "asking" and not is_mirror(comp["url"])]
-    for comp in result["comps"]:
+    comps = [comp for comp in result["comps"] if comp["status"] == "asking" and not is_mirror(comp["url"])]
+    for comp in comps:
         comp["available"] = comp.get("available") or "yes"
+    for comp in listed:                            # read from a list, not from the car's own page, and not opened
+        comp["source"], comp["available"] = "Facebook Marketplace", ""
+        if "marketplace list" not in comp["note"].lower():
+            comp["note"] = f"From a Facebook Marketplace list, not the car's own page: sign in to Facebook to find it. {comp['note']}".strip()
+    if lists is not None:
+        result["summary"] = f"{result['summary']} Facebook Marketplace's public lists: {len(listed)}.".strip()
+    result["comps"] = merge_comps(comps, listed)
     return result
 
 

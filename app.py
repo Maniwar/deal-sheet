@@ -13,7 +13,9 @@ import io
 import json
 import os
 import re
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
@@ -352,15 +354,23 @@ def progress_for(slot):
 def research_market(client, model: str, car: dict, max_searches: int, progress=None) -> dict:
     """Completed sales, then cars for sale now, then a check that each for-sale page still shows its car."""
     tell = progress.say if progress else (lambda text: None)
-    result = llm.research_comps(client, model, car, max_searches=max_searches, progress=progress)
-    comps, summary = list(result["comps"]), result["summary"]
-    tell(f"{len(comps)} sale{'s' if len(comps) != 1 else ''} and no-sales found. Now looking for cars for sale today")
+    pool = ThreadPoolExecutor(max_workers=1)                 # cars for sale are looked for while the sales are
+    for_sale = pool.submit(llm.research_for_sale, client, model, car, max_searches=min(max_searches, 8), progress=progress)
     try:
-        sale = llm.research_for_sale(client, model, car, max_searches=min(max_searches, 8), progress=progress)
-    except llm.LLMError:
-        sale = {"comps": [], "summary": "The search for cars for sale now did not finish. Use Search for more in the For sale now tab to retry it."}
-    seen = {calc.normalize_url(comp["url"]) for comp in comps if comp["url"]}
-    comps += [comp for comp in sale["comps"] if not comp["url"] or calc.normalize_url(comp["url"]) not in seen]
+        result = llm.research_comps(client, model, car, max_searches=max_searches, progress=progress)
+        comps, summary = list(result["comps"]), result["summary"]
+        tell(f"{len(comps)} sale{'s' if len(comps) != 1 else ''} and no-sales found. Finishing the search for cars for sale today")
+        while not for_sale.done():                           # its lines are drawn from this thread
+            time.sleep(0.3)
+            if progress:
+                progress.flush()
+        try:
+            sale = for_sale.result()
+        except llm.LLMError:
+            sale = {"comps": [], "summary": "The search for cars for sale now did not finish. Use Search for more in the For sale now tab to retry it."}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    comps += calc.new_comps(comps, sale["comps"])
     comps, dropped = same_body_only(car, comps)
     comps, spare = drop_spare_trims(comps)
     tell("Opening each for-sale page to see whether the car is still there")
@@ -855,8 +865,7 @@ def handle_stage_requests(progress_slot) -> None:
             except llm.LLMError as exc:
                 ss["stage_error"] = str(exc)
             else:
-                seen = {calc.normalize_url(url) for url in known}
-                fresh = [comp for comp in found["comps"] if not comp["url"] or calc.normalize_url(comp["url"]) not in seen]
+                fresh = calc.new_comps(have, found["comps"])
                 fresh, _ = same_body_only(the_car, fresh)
                 both, _ = drop_spare_trims(have + fresh)       # with enough exact matches now, other trims go, old ones too
                 stays = {id(comp) for comp in both}
