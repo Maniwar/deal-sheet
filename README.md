@@ -1,39 +1,50 @@
 # Deal Sheet
 
-A Streamlit app that turns a car listing into a negotiation brief you can print and hand over.
+A Streamlit app that turns a car listing into a negotiation brief: what the car is worth, the
+evidence for it, what to offer, and a sheet you can print and hand over.
 
 ## The short version
 
-Tap **Add a car**, paste a listing link or add a screenshot, and press **Build the deal sheet**.
-Claude reads the listing, researches comps, suggests an offer and drafts the message in one run
-(about two minutes). Every car you add goes in the **garage** at the top of the page.
+The whole app is one screen with a 3D car on a studio floor and one bar at the bottom.
 
-No listing yet? Name the car instead ("2020 BMW M2 CS, manual, about 15,000 miles"). The app finds
-what that car has been selling for and gives you a typical sale price, the range, the comps with
-their links, and what to open at, aim for and not exceed.
+1. Paste your Anthropic API key in the bar (once; the app can remember it on your device).
+2. Give it a car: paste a listing link, paste or pick a screenshot, or type the car's name.
+3. In about two minutes the car rolls in, the comps drop onto the price line, and you get an
+   opening offer, a target and a walk-away price. Drag the handles to change them.
+
+No listing yet? Type the car instead ("2020 BMW M2 CS, manual, about 15,000 miles"). The app finds
+what that car has been selling for and gives you a typical sale price, the comps and an offer range.
 
 ## What you see
 
-- **A garage.** Each car you add is a chip at the top. Tap one to switch. Nothing is kept between
-  visits, so save the garage to a file from the sidebar and open that file to bring your cars back.
-- **A 3D showroom.** The car sits on a turntable you can drag to spin (WebGL, three.js). With a photo it
-  shows the photo as a lit slab. Without one it draws a 3D car in the listing's paint color: a
-  detailed concept coupe for coupes (see Credits), and a simple shape of the right body type for
-  everything else (convertible, sedan, hatchback, wagon, SUV, pickup or van). None of these is a
-  model of any maker's design.
-  In front of it, the comps stand as glowing markers on a price runway, with the asking price as a
-  beacon and your offer range as a lit band. Tap a marker to open that listing.
-- **A comps carousel.** Each comp is a card with its photo (or a mini price map), and the whole card
-  links straight to its source.
-- **Four tabs underneath**, to check and adjust what the one-step build produced, or to do it by hand.
-  1. **Car.** The car's details, and a reader that updates this car from pasted text, a link or a
-     screenshot. Claude cuts the car's photo out of the screenshot.
-  2. **Comps.** Claude searches the web for completed sales, unsold auctions and asking prices. You can
-     also add comps by hand, or drop in a screenshot of a results page.
-  3. **Offer.** Claude suggests an opening offer, a target and a walk-away price. The app works out
-     tax, the out-the-door total and the monthly payment.
-  4. **Sheet.** A PDF with every link printed in full beside a large QR code (1.1 in, or 1.5 in), plus
-     an offer message. The seller copy leaves out your target, walk-away price and notes.
+- **The car.** A 3D car in the listing's paint color that you can drag to spin. Coupes get a detailed
+  concept coupe (see Credits); other body types get a simple shape of the right kind (convertible,
+  sedan, hatchback, wagon, SUV, pickup or van). None of these is a model of any maker's design. You
+  can load your own 3D file for a car, with a credit line for its artist (the **3D model** tab).
+- **The price and the reason.** The asking price, how far it sits from the median of the sold comps,
+  and one line of evidence. **See the case** opens the full reasoning: each point links to the sale
+  or listing it rests on, followed by the car's options, what the seller is likely to say and how to
+  answer, and what the search found.
+- **The price chart.** One line of prices. Every comp is a dot above it (solid for sold, hollow for
+  asking, amber ring for an auction that ended without a sale; faded when left out), with a dashed
+  line at the median sale and a solid line at the asking price. Your offer is the green band on the
+  line: drag its handles to set the open, target and walk-away prices, and the out-the-door total and
+  monthly payment follow. Tap a dot to see that car.
+- **Options.** The car's options and original sticker price are read from the listing and shown
+  under the title; comps carry theirs too, and the offer reasoning accounts for the difference. When
+  a listing does not show them, the app says "Options not listed" so you know to ask for the window
+  sticker.
+- **VINs.** The car's VIN shows under the title and each comp's VIN on its card; tap one to copy it.
+  When a listing leaves the VIN out, the app says so. Comp VINs are also read out of links that
+  contain them (Classic.com's do).
+- **Comps.** Each comp has a button that opens that car's own page. A link that opens a list of
+  results instead of one car is flagged on the screen and on the PDF, and is never offered as the
+  proof link for a point in the case.
+- **Message.** A drafted offer message with a Copy button.
+- **Garage.** Each car you add is a chip at the top. Tap one to switch.
+- **Edit and print**, below the main screen: correct any detail of the car, the comps or the offer
+  by hand, and make the PDF. The PDF prints every link in full beside a large QR code. The seller
+  copy leaves out your target, walk-away price and notes.
 
 ## Run it
 
@@ -42,30 +53,46 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The app opens with a sample deal so you can try every screen before adding a key.
+The app opens with a sample deal so you can try the screen before adding a key.
 
 ## Bring your own key
 
-Claude features need an Anthropic API key. Each person pastes their own into the box at the top of
-the page; a button beside it opens the Claude Console keys page (https://platform.claude.com/settings/keys).
+Claude features need an Anthropic API key. Each person pastes their own into the bar at the bottom
+of the screen; a link beside it opens the Claude Console keys page
+(https://platform.claude.com/settings/keys).
 
 - The key is checked with a free call when it is pasted.
-- It is held in memory for that browser session only. It is not written to disk, logged, put in a
-  saved deal or printed on the PDF, and reloading the page forgets it.
+- With **Remember it on this device** ticked, the key is saved in that browser's storage for this
+  site, so the next visit connects by itself. Untick it on a shared computer.
+- **Forget my key** (in the settings panel, the button at the top right) disconnects and deletes
+  the saved copy.
+- The key is never written to the server's disk, logged, put in a saved garage file or printed on
+  the PDF. It is used only to call Anthropic.
 - The app never reads a key from secrets or environment variables, so a public copy cannot spend
   the owner's key.
 - Usage is billed to whoever's key is connected. Web research is billed per search on top of
-  tokens, and the sidebar caps the number of searches per run.
+  tokens, and the settings panel caps the number of searches per run.
 
-Everything except the Claude buttons works without a key.
+Everything except the Claude features works without a key.
 
-## Links and screenshots
+## What is kept on your device
 
-A listing link works when the site lets apps read its pages: the app fetches the page the way a
-link preview does, obeying robots.txt, and hands its text to Claude. Many big marketplaces refuse
-(Cars.com, Classic.com, Bring a Trailer, Facebook Marketplace). For those, add a screenshot of the
-listing. If you give only a blocked link, the app reads the words in the link itself (often the
-year, make and model) and tells you what is missing.
+Your cars (with their comps, offers and photos) and your settings (tax, fees, loan terms, your first
+name, the model and the search limit) are saved in the browser you used, and come back when you
+reopen the app there. Removing a car removes its saved copy. Nothing is stored on a server.
+To move your cars to another device or keep a backup, save the garage to a file from the settings
+panel and open that file on the other device.
+
+## Links, screenshots and names
+
+- **A link** works when the site lets apps read its pages: the app fetches the page the way a link
+  preview does, obeying robots.txt, and hands its text to Claude. Many big marketplaces refuse
+  (Cars.com, Classic.com, Facebook Marketplace). If you give only a blocked link,
+  the app reads the words in the link itself (often the year, make and model) and tells you what is
+  missing.
+- **A screenshot** always works. Paste it into the bar, drop it on the page, or tap the picture
+  button. Long screenshots are cut into page-sized pieces so nothing is lost.
+- **A name** gives you market pricing without a listing.
 
 ## Models
 
@@ -75,17 +102,16 @@ tool calls in the prompt, retries once when a reply has none, and sets generous 
 
 ## Where the pictures come from
 
-1. **Your upload.** A car photo you add in the Car tab.
+1. **Your upload.** A car photo you add under Edit and print.
 2. **Your screenshots.** Claude finds the car photo inside a listing screenshot, and each car's photo
    inside a results-page screenshot, and the app cuts them out.
 3. **The listing's own preview image.** For each link, the app asks the page for the picture it
    publishes for sharing (its `og:image`), the way a chat app builds a link preview.
 
 The preview fetch identifies itself, obeys each site's robots.txt, only talks to public internet
-hosts, and never tries to get past a block. Classic.com, Cars.com and Bring a Trailer refuse
-automated visits, so comps from those sites show a mini price map instead of a photo unless you
-add a screenshot. The app does not use a headless or stealth browser, on purpose.
-Turn the fetch off in the sidebar under Photos.
+hosts, and never tries to get past a block. Classic.com and Cars.com refuse automated visits, so
+comps from those sites have no photo unless you add a screenshot. The app does
+not use a headless or stealth browser, on purpose. Turn the fetch off in the settings panel.
 
 ## Put it online
 
@@ -97,8 +123,12 @@ Turn the fetch off in the sidebar under Photos.
 ## What to expect from the web research
 
 - Results come from Claude's web search tool, so they are search results, not page scrapes.
+- Every run searches Bring a Trailer and Cars & Bids first, then other auction sites and asking
+  prices. The case shows how many comps came from each place, including "none" for those two.
 - Every comp is labeled sold, high bid or asking, and its link is checked against the URLs the
   search actually returned. A link that was not in the results is flagged.
+- Claude is told to record each car's own page, never a results page, and the app checks the link's
+  shape for the common sites. It cannot open blocked sites to confirm a page still shows that car.
 - Treat every comp as a lead. Open the link and confirm it before you put it in front of a seller.
 
 ## Credits
@@ -107,27 +137,29 @@ Turn the fetch off in the sidebar under Photos.
   [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), from the
   [Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept).
   Modified for this app: logos removed, simplified and repainted. Details in `static/models/CREDITS.md`.
-  The credit also shows under the 3D view whenever the model is on screen.
+  The credit shows under the car whenever the model is on screen.
 - **three.js** and its glTF loader (MIT), **DM Sans** and **JetBrains Mono** (SIL Open Font License).
 
-To add another detailed model, put a `.glb` in `static/models/`, add it to `PRO_MODELS` in `showcase.py`
-with its credit, and name its body-paint material `Paint`. Use only models whose licence allows it.
+**Your own 3D file.** In the **3D model** tab, choose a `.glb` file for the car on screen and type
+the credit its licence asks for (title, artist, licence). The file stays in your browser, is never
+uploaded, and its credit shows under the car. Use only models whose licence allows it.
+
+To bundle another model with the app, put a `.glb` in `static/models/`, add it to `PRO_MODELS` in
+`showcase.py` with its credit, and name its body-paint material `Paint`.
 
 ## Files
 
 | File | What it does |
 | --- | --- |
-| `app.py` | The screens and the state |
-| `showcase.py` | The 3D showroom and comps carousel (a Streamlit v2 component: HTML, CSS, JavaScript) |
-| `previews.py` | Listing photos: link previews and screenshot crops |
+| `app.py` | The state, the Claude steps, and the Edit and print section |
+| `stage.py` | The main screen (a Streamlit v2 component: HTML, CSS, JavaScript with three.js) |
+| `showcase.py` | Paint colors, body shapes and the credited 3D models the main screen uses |
+| `previews.py` | Listing pages and photos: link previews and screenshot crops |
 | `llm.py` | Claude calls: read a listing, research comps, suggest an offer, draft a message |
 | `sheet.py` | Builds the PDF and its QR codes |
-| `calc.py` | Money math and comp helpers |
+| `calc.py` | Money math, comp helpers and the direct-link check |
 | `styles.py` | The stylesheet for the Streamlit widgets |
 | `sample_deal.json` | The sample car (2020 911 Carrera S, researched Nov 14, 2026) |
 | `static/` | Fonts, three.js with its glTF loader, and the 3D model in `static/models/` |
 | `tools/` | The script that prepared the 3D model from the original file |
 | `assets/fonts/` | The same fonts as TTF for the PDF |
-
-The garage saves and reopens as one JSON file from the sidebar, photos included (a single car can be
-saved too). Nothing is stored on a server.

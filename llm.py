@@ -19,7 +19,7 @@ import json
 
 import anthropic
 
-from calc import car_facts, car_title, clean_comps, money, normalize_url
+from calc import car_facts, car_title, clean_comps, link_kind, money, normalize_url
 
 MODELS = {
     "Sonnet 5.5 (balanced)": "claude-sonnet-5-5",
@@ -145,6 +145,10 @@ def _car_block(car: dict) -> str:
                        ("location", "Location"), ("url", "Listing URL"), ("notes", "Notes")):
         if car.get(key):
             lines.append(f"{label}: {car[key]}")
+    options = [line.strip() for line in str(car.get("options") or "").splitlines() if line.strip()]
+    lines.append("Options: " + ("; ".join(options) if options else "not listed"))
+    if car.get("msrp"):
+        lines.append(f"Original sticker price: {money(car['msrp'])}")
     return "\n".join(lines)
 
 
@@ -158,10 +162,16 @@ def _comps_block(comps: list[dict]) -> str:
             bits.append(comp["date"])
         if comp.get("source"):
             bits.append(comp["source"])
+        if comp.get("options"):
+            bits.append(f"options: {comp['options']}")
+        if comp.get("vin"):
+            bits.append(f"VIN {comp['vin']}")
         if comp.get("note"):
             bits.append(f"note: {comp['note']}")
         if comp.get("url"):
             bits.append(comp["url"])
+            if link_kind(comp["url"]) == "page":
+                bits.append("(this link opens a results page, not this car's own page: do not call it a direct link)")
         rows.append(" | ".join(bits))
     return "\n".join(rows) if rows else "(no comps yet)"
 
@@ -190,7 +200,11 @@ LISTING_TOOL = {
             "seller_type": {"type": "string", "enum": ["dealer", "private", "auction"]},
             "location": {"type": "string"},
             "url": {"type": "string"},
-            "notes": {"type": "string", "description": "Options, price drops, title status or condition notes, in one or two sentences."},
+            "notes": {"type": "string", "description": "Price drops, title status or condition notes, in one or two sentences."},
+            "options": {"type": "array", "items": {"type": "string"},
+                        "description": "Factory options and packages the listing names, one per item, as written "
+                                       "(for example Sport Chrono Package, ceramic brakes, sport exhaust). Leave out if none are shown."},
+            "msrp": {"type": "integer", "description": "Original sticker price (MSRP with options) in whole US dollars, only if the listing states it."},
             "shape": {"type": "string", "enum": ["coupe", "convertible", "sedan", "hatch", "wagon", "suv", "truck", "van"],
                       "description": "Body type for the app's 3D picture only. Use the listing; if it does not say, use "
                                      "what is generally known about this model. Leave out if unsure."},
@@ -269,14 +283,21 @@ COMPS_TOOL = {
                         "miles": {"type": "integer"},
                         "price": {"type": "integer", "description": "Whole US dollars."},
                         "date": {"type": "string", "description": "Sale or listing date as the source gives it."},
-                        "source": {"type": "string", "description": "Site name, e.g. Bring a Trailer or Classic.com."},
-                        "url": {"type": "string", "description": "The exact result URL the figure came from."},
-                        "note": {"type": "string", "description": "Transmission, options, modifications or caveats. One short sentence."},
+                        "source": {"type": "string", "description": "Where the car sold or is listed: the auction site or dealer, e.g. "
+                                                                 "Bring a Trailer, Cars & Bids. If an aggregator such as Classic.com "
+                                                                 "names the auction site, give the auction site."},
+                        "url": {"type": "string", "description": "The exact result URL of that one car's own page: its auction listing or "
+                                                              "vehicle page. Never a search, category or market page."},
+                        "options": {"type": "string", "description": "Notable factory options or the original sticker price, if the source states them."},
+                        "vin": {"type": "string", "description": "The car's 17-character VIN, when the source or its address shows it."},
+                        "note": {"type": "string", "description": "Transmission, modifications or caveats. One short sentence."},
                     },
                     "required": ["status", "title", "price", "url"],
                 },
             },
-            "summary": {"type": "string", "description": "Two or three sentences on what the market shows and what could not be confirmed."},
+            "summary": {"type": "string", "description": "Two or three sentences on what the market shows and what could not be confirmed. "
+                                                         "Say how many sales you found on Bring a Trailer and on Cars & Bids, "
+                                                         "and say so plainly when one of them had none."},
         },
         "required": ["comps", "summary"],
     },
@@ -339,21 +360,32 @@ def extract_comps(client, model: str, car: dict, text: str = "", image: bytes | 
     return {"comps": comps, "summary": str(recorded.get("summary") or "").strip()}
 
 
-def _research_prompt(car: dict, today: str) -> str:
+def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
+    name = car_title(car) or "this car"
     return (
         f"Today is {today}. Find comparable prices for this car so the buyer can negotiate.\n\n"
         f"{_car_block(car)}\n\n"
-        "Search the web, then call record_comps once with everything usable.\n"
-        "What to look for, in order:\n"
-        "1. Completed sales of the same generation, trim, body style and transmission from the last "
-        "18 months: Bring a Trailer, Cars & Bids, PCARMARKET, Hagerty Marketplace and Classic.com "
-        "market pages.\n"
-        "2. Auctions that ended without a sale (record as high_bid).\n"
-        "3. Current asking prices for close matches, including certified cars.\n"
+        f"Search the web (you have up to {max_searches} searches), then call record_comps once with everything usable.\n"
+        "Searches to run, in this order:\n"
+        f"1. Bring a Trailer results for this car, e.g. \"bringatrailer.com {name} sold\". Always run this one.\n"
+        f"2. Cars & Bids past auctions for this car, e.g. \"carsandbids.com {name}\". Always run this one.\n"
+        "3. Other completed sales of the same generation, trim, body style and transmission from the last 18 "
+        "months: PCARMARKET and Hagerty Marketplace. Classic.com and The Classic Valuer also record Bring a "
+        "Trailer and Cars & Bids results, so use them to fill in prices, dates, options and VINs. The Classic "
+        "Valuer shows prices in pounds: take the dollar price from another source.\n"
+        "4. Auctions that ended without a sale (record as high_bid).\n"
+        "5. Current asking prices for close matches, including certified cars.\n"
         "Rules:\n"
         "- Record only prices, dates and miles that appear in the search results. Never estimate or "
         "fill a gap from memory.\n"
-        "- Every comp needs the exact URL of the result it came from.\n"
+        "- Every comp needs the exact URL of that one car's own page (its auction listing or vehicle page). "
+        "A search, category or market page is not acceptable as a comp's URL: if a figure only appears on such "
+        "a page, find the car's own page in the results, and leave the comp out if you cannot.\n"
+        "- Options move prices. When a source names a comp's notable options or its original sticker price, "
+        "record them in options.\n"
+        "- Record each comp's VIN when a source shows it. Classic.com vehicle addresses contain it.\n"
+        "- Name the auction site as the source (Bring a Trailer, Cars & Bids) even when you found the sale "
+        "through an aggregator.\n"
         "- Keep sold, high_bid and asking separate. An asking price is not a sale.\n"
         "- Match the transmission and body style. If a comp differs, say so in its note.\n"
         "- Classic.com snippets show a placeholder '6865 mi' before the real mileage. Use the second figure.\n"
@@ -370,7 +402,7 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
         {"type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": max_searches},
         COMPS_TOOL,
     ]
-    messages = [{"role": "user", "content": _research_prompt(car, today)}]
+    messages = [{"role": "user", "content": _research_prompt(car, today, max_searches)}]
     seen_urls: set[str] = set()
     for _ in range(max_rounds):
         response = _create(client, effort="medium", model=model, max_tokens=16000, tools=tools,
@@ -431,6 +463,11 @@ def suggest_offer(client, model: str, car: dict, comps: list[dict]) -> dict:
         "Adjust for the subject car's miles against each comp's miles. A dealer or certified car "
         "carries a premium over an auction sale. With a private seller, open no more than about "
         "10% under the asking price; a much lower opener tends to end the conversation.\n"
+        "Options matter. Compare the subject car's options with each comp's where they are stated: a comp "
+        "with costly options (ceramic brakes, sport packages, special paint, a high sticker price) is worth "
+        "more than a plain one, so do not treat them as equal. Say so in the reasons when it changes the number. "
+        "If the subject car's options are not listed, make one pushback line a reminder to get the window "
+        "sticker or build sheet before agreeing a price.\n"
         "Round to the nearest $500. Keep open < target < walk_away, and keep walk_away at or below "
         "the asking price unless the comps clearly support more.\n"
         "Write reasons as plain facts with the comp's price, miles and date. No em dashes."

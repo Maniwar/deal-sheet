@@ -1,0 +1,1264 @@
+"""The app's main screen: one full-height studio stage.
+
+A Streamlit v2 component that owns the whole first screen: the garage, the car on a
+turntable, the price with its one-line case, a price line with draggable offer handles,
+and an input bar that takes a link, a screenshot (picked, pasted or dropped) or just a
+car's name. It talks back to Python through trigger values:
+
+- ``key``      an Anthropic API key to connect (typed, or remembered on this device)
+- ``build``    a link / screenshot / name to turn into a deal
+- ``switch``   the garage car to show
+- ``offer``    open, target and walk-away numbers after a handle is dragged
+- ``restore``  the cars saved on this device, sent once when a new session starts
+
+The API key and the garage are kept in the browser (localStorage and IndexedDB), so they
+survive a reload or the phone suspending the tab. Nothing is stored on the server.
+
+Python builds a plain-data payload (`build_payload`); the JavaScript only draws.
+"""
+
+from __future__ import annotations
+
+import re
+
+import calc
+import showcase
+
+STATUS_NAME = {"sold": "Sold", "high_bid": "High bid", "asking": "Asking"}
+_MONEY = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+|\d{4,7})")
+
+
+def split_options(text) -> list[str]:
+    """Options as a list, from one per line or separated by commas or semicolons."""
+    if isinstance(text, (list, tuple)):
+        parts = [str(item) for item in text]
+    else:
+        parts = re.split(r"[\n;]+|,(?!\d{3})", str(text or ""))
+    seen, out = set(), []
+    for part in parts:
+        item = re.sub(r"^[\s\-\*•]+", "", part).strip()
+        if item and item.lower() not in seen:
+            seen.add(item.lower())
+            out.append(item)
+    return out
+
+
+def link_reason(text: str, comps: list[dict]) -> dict:
+    """A reason with the comps it cites, found by the prices it mentions, so each claim can be opened."""
+    links, seen = [], set()
+    for match in _MONEY.finditer(text):
+        price = int(match.group(1).replace(",", ""))
+        for comp in comps:
+            url = comp.get("url") or ""
+            if comp["price"] == price and url and url not in seen and calc.link_kind(url) != "page":
+                seen.add(url)
+                what = {"sold": "sale", "high_bid": "auction", "asking": "listing"}[comp["status"]]
+                links.append({"url": url, "label": f"See the {calc.money(price)} {what} on {calc.host_of(url)}"})
+    return {"text": text, "links": links[:3]}
+
+
+def split_pushback(text: str) -> dict:
+    """'They say X. Reply: Y' as what the seller says and what to answer."""
+    parts = re.split(r"\s*\bReply:\s*", text, maxsplit=1, flags=re.I)
+    return {"say": parts[0].strip(), "reply": parts[1].strip() if len(parts) > 1 else ""}
+
+
+def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, flags: dict,
+                  photo: bytes | None = None, photo_own: bool = False,
+                  comp_images: dict[str, bytes] | None = None, comp_photos: dict[str, bytes] | None = None,
+                  garage: list[dict] | None = None, persist: dict | None = None, detailed: bool = True) -> dict:
+    """Everything the stage draws, as plain JSON-ready data."""
+    comp_images = comp_images or {}
+    comp_photos = comp_photos or {}
+    stats = calc.comp_stats(comps)
+    used = [c for c in comps if c["use"]]
+    ask = car.get("price")
+    has_car = bool(car.get("make") or car.get("model"))
+    money, short = calc.money, calc.short_money
+
+    chips = list(calc.car_facts(car))
+    if car.get("drivetrain"):
+        chips.append(str(car["drivetrain"]))
+    seller_bits = [str(car.get(k) or "").strip() for k in ("seller", "location")]
+
+    # ---- the headline number and how it compares
+    count = stats["sold_count"]
+    sales = f"the median of {count} sale{'s' if count != 1 else ''}"
+    label, value, text, gap = "Asking", ask, money(ask) if ask else "No price yet", {"text": "", "tone": "flat"}
+    if ask and stats["sold_median"]:
+        diff = ask - stats["sold_median"]
+        if abs(diff) < 250:
+            gap = {"text": f"In line with {sales}", "tone": "flat"}
+        elif diff > 0:
+            gap = {"text": f"{money(diff)} above {sales}", "tone": "up"}
+        else:
+            gap = {"text": f"{money(-diff)} below {sales}", "tone": "down"}
+    elif ask:
+        gap = {"text": "No completed sales yet", "tone": "flat"}
+    elif stats["sold_median"]:                     # no listing: what the car sells for
+        label, value, text = "Typical sale", stats["sold_median"], money(stats["sold_median"])
+        gap = {"text": f"{count} sale{'s' if count != 1 else ''}, {short(stats['sold_low'])} to {short(stats['sold_high'])}",
+               "tone": "flat"}
+    elif stats["asking_median"]:
+        label, value, text = "Typical ask", stats["asking_median"], money(stats["asking_median"])
+        gap = {"text": "Asking prices only, no completed sales yet", "tone": "flat"}
+
+    # ---- the case: why this price, with the evidence
+    target = offer.get("target") or offer.get("open")
+    if target and ask:
+        diff = ask - target
+        if diff > 250:
+            headline = f"A fair deal is about {money(target)}. The asking price is {money(diff)} more."
+        elif diff < -250:
+            headline = f"The asking price is {money(-diff)} under a fair deal of {money(target)}."
+        else:
+            headline = f"The asking price of {money(ask)} is about fair."
+    elif target:
+        headline = f"Expect to pay about {money(target)}."
+    elif stats["sold_median"]:
+        headline = f"Similar cars have sold for about {money(stats['sold_median'])}."
+    else:
+        headline = "There is not enough to go on yet."
+    sub = ""
+    if offer.get("open") and offer.get("walk_away"):
+        sub = f"Open at {money(offer['open'])} and do not go past {money(offer['walk_away'])}."
+    elif not target:
+        sub = "Add comps, then work out an offer under Edit and print."
+    reasons = [link_reason(str(reason), used) for reason in offer.get("reasons") or []]
+    if reasons:
+        line = reasons[0]["text"]
+    elif count:
+        line = f"{count} completed sale{'s' if count != 1 else ''} from {short(stats['sold_low'])} to {short(stats['sold_high'])}."
+    else:
+        line = ""
+    options = split_options(car.get("options"))
+    case = {
+        "headline": headline, "sub": sub, "line": line, "reasons": reasons,
+        "pushback": [split_pushback(str(item)) for item in offer.get("pushback") or []],
+        "options": options, "msrp": money(car["msrp"]) if car.get("msrp") else "",
+        "summary": str(flags.get("summary") or ""),
+        "sources": calc.source_counts(comps) if comps else [],
+    }
+
+    # ---- comps, sold first
+    order = {"sold": 0, "high_bid": 1, "asking": 2}
+    cards = []
+    for comp in sorted(comps, key=lambda c: (not c["use"], order[c["status"]], c["price"])):
+        meta = []
+        if comp.get("miles"):
+            meta.append(f"{comp['miles']:,} mi")
+        if comp.get("date"):
+            meta.append(comp["date"])
+        if calc.source_name(comp):
+            meta.append(calc.source_name(comp))
+        delta = ""
+        if ask and abs(comp["price"] - ask) >= 100:
+            delta = f"{money(abs(comp['price'] - ask))} {'under' if comp['price'] < ask else 'over'} ask"
+        url = comp.get("url") or ""
+        cards.append({
+            "status": comp["status"], "label": STATUS_NAME[comp["status"]], "price": comp["price"],
+            "priceText": money(comp["price"]), "title": comp["title"], "meta": " · ".join(meta),
+            "note": comp.get("note") or "", "options": comp.get("options") or "", "url": url, "host": calc.host_of(url),
+            "kind": calc.link_kind(url), "use": bool(comp["use"]), "linkOk": comp.get("link_ok"), "delta": delta,
+            "img": comp.get("img") or "", "vin": comp.get("vin") or "",
+            "image": showcase.data_url(comp_photos.get(comp.get("img") or "") or comp_images.get(url)),
+        })
+
+    values = [c["price"] for c in used] + [v for v in (ask, offer.get("open"), offer.get("target"), offer.get("walk_away")) if v]
+    axis = None
+    if len(values) >= 2:
+        raw = calc.price_axis(values)
+        axis = {"lo": raw["lo"], "hi": raw["hi"], "ticks": [{"v": tick, "label": short(tick)} for tick in raw["ticks"]],
+                "median": stats["sold_median"], "medianText": money(stats["sold_median"]) if stats["sold_median"] else ""}
+
+    shape = showcase.shape_for(car)
+    return {
+        "seq": int(flags.get("seq") or 0), "busy": bool(flags.get("busy")), "error": str(flags.get("error") or ""),
+        "notices": list(flags.get("notices") or []), "fresh": bool(flags.get("fresh")),
+        "connected": bool(flags.get("connected")), "keyError": str(flags.get("key_error") or ""),
+        "keyForgotten": bool(flags.get("key_forgotten")),
+        "prefs": flags.get("prefs") or None, "prefsAsk": bool(flags.get("prefs_ask")),
+        "sample": bool(flags.get("sample")), "hasCar": has_car,
+        "title": calc.car_title(car) if has_car else "", "chips": chips,
+        "seller": " · ".join(bit for bit in seller_bits if bit), "url": car.get("url") or "",
+        "vin": calc.clean_vin(car.get("vin")) or str(car.get("vin") or "").strip(),
+        "listed": bool(ask or car.get("url") or car.get("seller")),
+        "ask": ask, "priceLabel": label, "priceValue": value, "priceText": text, "gap": gap,
+        "offer": {"open": offer.get("open"), "target": offer.get("target"), "walk": offer.get("walk_away")},
+        "money": {"tax": settings["tax_rate"], "fees": settings["fees"], "apr": settings["apr"],
+                  "down": settings["down"], "months": settings["months"]},
+        "axis": axis, "comps": cards, "case": case, "message": str(flags.get("message") or ""),
+        "color": showcase.color_for(str(car.get("exterior") or "")),
+        "paint": showcase.paint_for(str(car.get("exterior") or "")),
+        "cabin": showcase.cabin_for(str(car.get("interior") or "")),
+        "shape": shape, "model": showcase.PRO_MODELS.get(shape["body"]) if detailed else None,
+        "photo": showcase.data_url(photo), "photoOwn": bool(photo_own and photo),
+        "garage": list(garage or []), "persist": persist,
+        "activeId": next((g["id"] for g in garage or [] if g.get("active")), ""),
+    }
+
+
+HTML = r"""
+<div class="stage" data-mode="car">
+  <div class="bg"></div>
+  <canvas class="gl" aria-hidden="true"></canvas>
+  <div class="shade"></div>
+  <header class="top">
+    <div class="brand">Deal Sheet</div>
+    <nav class="garage" aria-label="Your cars"></nav>
+    <button class="icon gear" type="button" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg></button>
+  </header>
+  <section class="head"></section>
+  <section class="zone">
+    <button class="photo" type="button" hidden aria-label="Open the listing photo"><img alt=""></button>
+    <div class="progress" hidden></div>
+    <div class="empty" hidden></div>
+  </section>
+  <section class="verdict"></section>
+  <section class="rail" hidden>
+    <div class="legend"></div>
+    <div class="track"></div>
+    <div class="nums"></div>
+  </section>
+  <nav class="tabs"></nav>
+  <footer class="dock"><div class="dockbar"></div><div class="credit" hidden></div></footer>
+  <div class="pop" hidden></div>
+  <div class="scrim" hidden></div>
+  <aside class="sheet" aria-hidden="true">
+    <div class="sheet-head"><div class="sheet-tabs"></div><button class="icon close" type="button" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="sheet-body"></div>
+  </aside>
+  <div class="lightbox" hidden><img alt="Listing photo"></div>
+  <div class="toast" hidden></div>
+</div>
+"""
+
+CSS = r"""
+:host{display:block}
+*{box-sizing:border-box}
+.stage{--ink:#f5f6f8;--mute:#a6abb5;--dim:#737985;--line:rgba(255,255,255,.13);--glass:rgba(20,21,25,.66);--accent:#34d399;--warn:#f5b84a;
+  --sans:"DM Sans",system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;
+  position:relative;min-height:100vh;min-height:100dvh;overflow:hidden;color:var(--ink);font-family:var(--sans);background:#0b0c0e;
+  display:grid;grid-template-columns:100%;grid-template-rows:auto auto minmax(150px,1fr) auto auto auto auto;align-content:stretch;container-type:inline-size;
+  -webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+a{color:inherit}
+.bg{position:absolute;inset:0;background:
+  radial-gradient(95% 46% at 50% 57%,#565a64 0%,#30333a 30%,#17181c 62%,rgba(11,12,14,0) 100%),
+  linear-gradient(180deg,#0b0c0e 0%,#131417 46%,#0b0c0e 100%)}
+.gl{position:absolute;inset:0;width:100%;height:100%;touch-action:pan-y;cursor:grab;opacity:0;transition:opacity .9s}
+.gl.drag{cursor:grabbing}
+.has-gl .gl{opacity:1}
+.shade{position:absolute;inset:0;pointer-events:none;background:
+  radial-gradient(120% 90% at 50% 52%,rgba(0,0,0,0) 46%,rgba(0,0,0,.62) 100%),
+  linear-gradient(180deg,rgba(11,12,14,.88) 0%,rgba(11,12,14,0) 20%,rgba(11,12,14,0) 52%,rgba(11,12,14,.82) 76%,rgba(11,12,14,.96) 100%)}
+.top,.head,.zone,.verdict,.rail,.tabs,.dock{position:relative;z-index:2;min-width:0}
+
+/* top bar */
+.top{display:flex;align-items:center;gap:10px;padding:12px 14px 4px}
+.brand{font:700 10.5px var(--sans);letter-spacing:.24em;text-transform:uppercase;color:var(--mute);white-space:nowrap}
+.garage{flex:1;display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding:2px 0}
+.garage::-webkit-scrollbar{display:none}
+.chip{flex:none;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.04);font:500 12.5px var(--sans);color:var(--mute);white-space:nowrap;max-width:210px;overflow:hidden;text-overflow:ellipsis;transition:all .2s}
+.chip.on{color:var(--ink);border-color:rgba(255,255,255,.55);background:rgba(255,255,255,.12)}
+.chip.add{color:var(--ink);border-style:dashed}
+.icon{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:var(--mute);border:1px solid var(--line);background:rgba(255,255,255,.04)}
+.icon svg{width:17px;height:17px}
+
+/* title */
+.head{padding:6px 18px 0}
+.tag{font:700 9.5px var(--sans);letter-spacing:.16em;text-transform:uppercase;padding:4px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.4);color:var(--ink);white-space:nowrap}
+.title{margin:0;font:700 clamp(26px,7.6cqi,58px)/1.03 var(--sans);letter-spacing:-.025em;text-wrap:balance}
+.sub{margin-top:6px;font:400 13.5px/1.4 var(--sans);color:var(--mute);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.opts{display:flex;flex-wrap:wrap;align-items:center;gap:5px 6px;margin-top:8px}
+.opt{font:500 11.5px var(--sans);padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:#d5d9e0;background:rgba(255,255,255,.05);white-space:nowrap}
+.opt.none{border-color:rgba(245,184,74,.45);color:var(--warn);background:rgba(245,184,74,.06)}
+.seller{font:400 12.5px var(--sans);color:var(--dim);margin-left:4px}
+.vin{font:500 11px var(--mono);letter-spacing:.02em;padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:#d5d9e0;background:rgba(255,255,255,.05);white-space:nowrap}
+.vin b{font:700 9px var(--sans);letter-spacing:.14em;color:var(--dim);margin-right:5px}
+.c-vin{display:inline-block;margin-top:5px}
+.srcs{display:flex;flex-wrap:wrap;gap:5px 6px;margin-top:8px}
+.src{font:500 11.5px var(--sans);padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:#d5d9e0;background:rgba(255,255,255,.05);white-space:nowrap}
+.src b{font-weight:700;margin-left:5px;color:var(--ink)}
+.src.zero{color:var(--dim)}.src.zero b{color:var(--dim);font-weight:500}
+
+/* the car's part of the screen */
+.zone{pointer-events:none;min-height:140px}
+.zone>*{pointer-events:auto}
+.photo{position:absolute;right:14px;top:8px;width:74px;height:54px;border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.4);box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.photo img{width:100%;height:100%;object-fit:cover;display:block}
+.credit{margin:7px 6px 0;text-align:center;font:400 9.5px/1.3 var(--sans);color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.credit a{color:#8e949f}
+.credit .long{display:none}
+.empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:0 28px;pointer-events:none}
+.empty .big{font:700 clamp(22px,6cqi,34px)/1.1 var(--sans);letter-spacing:-.02em}
+.empty .small{margin-top:8px;font:400 14px/1.45 var(--sans);color:var(--mute)}
+.progress{position:absolute;left:0;right:0;bottom:8px;display:grid;justify-items:center;gap:7px;pointer-events:none}
+.progress .step{display:flex;align-items:center;gap:9px;font:500 13.5px var(--sans);color:var(--dim);transition:color .3s}
+.progress .step i{width:8px;height:8px;border-radius:50%;border:1.5px solid currentColor}
+.progress .step.done{color:var(--mute)}
+.progress .step.done i{background:currentColor}
+.progress .step.now{color:var(--ink)}
+.progress .step.now i{border-color:var(--accent);background:var(--accent);box-shadow:0 0 0 0 rgba(52,211,153,.6);animation:pulse 1.3s infinite}
+@keyframes pulse{70%{box-shadow:0 0 0 9px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+
+/* price and the case in one line */
+.verdict{padding:0 18px}
+.verdict .lbl{font:700 10px var(--sans);letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}
+.verdict .num{font:500 clamp(34px,10cqi,68px)/1 var(--sans);letter-spacing:-.03em;font-variant-numeric:tabular-nums;margin-top:2px}
+.verdict .side{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-top:8px}
+.gap{font:500 12px var(--sans);padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--mute);background:rgba(255,255,255,.05);white-space:nowrap}
+.gap.is-up{color:var(--warn);border-color:rgba(245,184,74,.45);background:rgba(245,184,74,.08)}
+.gap.is-down{color:#7ee8bd;border-color:rgba(52,211,153,.45);background:rgba(52,211,153,.08)}
+.listing{font:500 12.5px var(--sans);color:var(--mute);text-decoration:none;border-bottom:1px solid rgba(255,255,255,.25);white-space:nowrap}
+.why{display:-webkit-box;margin-top:9px;text-align:left;font:400 13.5px/1.4 var(--sans);color:#c9cdd5;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.why b{color:var(--ink);font-weight:500;border-bottom:1px solid rgba(255,255,255,.35);white-space:nowrap}
+
+/* the price line */
+.rail{padding:10px 18px 0}
+.rail[hidden]{display:none}
+/* cars sit above the line as dots; the offer sits on the line in green */
+.legend{display:flex;flex-wrap:wrap;gap:3px 12px;margin:0 0 4px;font:500 10.5px var(--sans);color:var(--mute)}
+.legend span{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.legend i{flex:none;width:9px;height:9px;border-radius:50%;background:var(--ink);border:1.5px solid var(--ink)}
+.legend i.asking{background:transparent;border-color:#9aa0aa}
+.legend i.high_bid{background:transparent;border-color:var(--warn)}
+.legend i.med{width:0;height:11px;border-radius:0;background:none;border:0;border-left:1.5px dashed rgba(255,255,255,.75)}
+.legend i.offer{width:16px;height:7px;border-radius:4px;background:rgba(52,211,153,.45);border:1px solid var(--accent)}
+.track{position:relative;height:84px;margin:0 12px;touch-action:none}
+.track .line{position:absolute;left:-12px;right:-12px;top:58px;height:1px;background:rgba(255,255,255,.28)}
+.track .band{position:absolute;top:51px;height:15px;border-radius:8px;background:linear-gradient(90deg,rgba(52,211,153,.10),rgba(52,211,153,.34),rgba(52,211,153,.10));border:1px solid rgba(52,211,153,.4)}
+.track .tick{position:absolute;top:69px;transform:translateX(-50%);font:500 10px var(--mono);color:var(--dim)}
+.track .tick::before{content:"";position:absolute;left:50%;top:-10px;width:1px;height:5px;background:rgba(255,255,255,.3)}
+.dot{position:absolute;top:40px;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;border-radius:50%;background:var(--ink);border:1.5px solid var(--ink);opacity:0;transform:translateY(-26px) scale(.4);transition:transform .55s cubic-bezier(.2,1.5,.4,1),opacity .3s}
+.dot::after{content:"";position:absolute;inset:-12px}
+.dot.in{opacity:1;transform:none}
+.dot.asking{background:#0f1013;border-color:#9aa0aa}
+.dot.high_bid{background:#0f1013;border-color:var(--warn)}
+.dot.off{opacity:.3}
+.dot.sel{box-shadow:0 0 0 5px rgba(255,255,255,.2)}
+.askmark{position:absolute;top:13px;width:1px;height:46px;background:var(--ink)}
+.medmark{position:absolute;top:13px;width:0;height:46px;border-left:1px dashed rgba(255,255,255,.6)}
+.askmark span{position:absolute;left:50%;top:-13px;transform:translateX(-50%);font:700 9px var(--sans);letter-spacing:.14em;color:var(--ink);white-space:nowrap}
+.knob{position:absolute;top:58px;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;border:2px solid var(--accent);background:#0f1013;touch-action:none;z-index:3;cursor:ew-resize}
+.knob::after{content:"";position:absolute;inset:-14px}
+.knob.target{width:22px;height:22px;margin:-11px 0 0 -11px;background:var(--accent);box-shadow:0 0 0 5px rgba(52,211,153,.18)}
+.knob.live{box-shadow:0 0 0 9px rgba(52,211,153,.25)}
+.knob[hidden]{display:none}
+.nums{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:6px}
+.nums div{min-width:0}
+.nums .k{font:700 9px var(--sans);letter-spacing:.14em;text-transform:uppercase;color:var(--dim);white-space:nowrap}
+.nums .v{font:500 clamp(13.5px,4.1cqi,18px) var(--sans);font-variant-numeric:tabular-nums;white-space:nowrap}
+.nums .target .v{color:#7ee8bd}
+.nums .s{display:none;font:400 10.5px var(--sans);color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* tabs and the input bar */
+.tabs{display:flex;align-items:flex-end;gap:7px;min-height:46px;padding:10px 14px 0;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex:none;padding:8px 14px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.05);font:500 13px var(--sans);color:#d5d9e0;white-space:nowrap}
+.tab b{font-weight:500;color:var(--dim);margin-left:4px}
+.tab.lead{background:var(--ink);color:#0b0c0e;border-color:var(--ink)}
+.dock{padding:10px 14px calc(10px + env(safe-area-inset-bottom))}
+.bar{display:flex;align-items:flex-end;gap:6px;background:var(--glass);border:1px solid rgba(255,255,255,.2);border-radius:24px;padding:6px;-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px)}
+.bar textarea,.bar input[type=password]{flex:1;min-width:0;background:transparent;border:0;outline:0;color:var(--ink);font:400 16px/1.35 var(--sans);resize:none;padding:8px 6px;max-height:96px}
+.bar textarea::placeholder,.bar input::placeholder{color:var(--dim)}
+.bar .tool{flex:none;height:38px;min-width:38px;padding:0 10px;border-radius:19px;display:grid;place-items:center;color:var(--mute);font:500 12.5px var(--sans)}
+.bar .tool svg{width:19px;height:19px}
+.bar .go{flex:none;width:38px;height:38px;border-radius:50%;background:var(--ink);color:#0b0c0e;display:grid;place-items:center}
+.bar .go svg{width:18px;height:18px}
+.bar .go.text{width:auto;padding:0 16px;font:700 13.5px var(--sans)}
+.bar .thumb{flex:none;position:relative;width:38px;height:38px;border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.35)}
+.bar .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.bar .thumb button{position:absolute;inset:0;background:rgba(0,0,0,.45);color:#fff;font:700 15px var(--sans);opacity:0}
+.bar .thumb:hover button,.bar .thumb:active button{opacity:1}
+.busy .bar{opacity:.5;pointer-events:none}
+.note{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin:7px 6px 0;font:400 11.5px/1.35 var(--sans);color:var(--dim)}
+.note a{color:var(--mute)}
+.note label{display:inline-flex;align-items:center;gap:6px;color:var(--mute)}
+.note input{accent-color:var(--accent)}
+
+/* comp popover, sheet, lightbox, toast */
+.pop{position:absolute;z-index:15;width:min(270px,82%);padding:12px 14px;border-radius:16px;background:rgba(20,21,25,.94);border:1px solid rgba(255,255,255,.2);box-shadow:0 18px 50px rgba(0,0,0,.6);-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px)}
+.pop[hidden],.scrim[hidden],.lightbox[hidden],.toast[hidden],.photo[hidden],.credit[hidden],.progress[hidden],.empty[hidden],.thumb[hidden]{display:none}
+.pill{display:inline-block;font:700 9px var(--sans);letter-spacing:.14em;text-transform:uppercase;padding:3px 7px;border-radius:999px;border:1px solid var(--line);color:var(--mute)}
+.pill.sold{background:var(--ink);color:#0b0c0e;border-color:var(--ink)}
+.pill.high_bid{color:var(--warn);border-color:rgba(245,184,74,.5)}
+.c-price{font:500 20px var(--sans);font-variant-numeric:tabular-nums;margin-left:8px}
+.c-delta{float:right;font:400 11.5px var(--sans);color:var(--dim);margin-top:5px}
+.c-title{margin-top:6px;font:500 13.5px/1.3 var(--sans)}
+.c-meta{margin-top:2px;font:400 12px/1.4 var(--sans);color:var(--mute)}
+.c-note{margin-top:3px;font:400 12px/1.4 var(--sans);color:var(--dim)}
+.c-flag{margin-top:5px;font:500 11.5px/1.35 var(--sans);color:var(--warn)}
+.c-link{display:inline-flex;align-items:center;gap:6px;margin-top:8px;font:500 13px var(--sans);text-decoration:none;padding:6px 12px;border-radius:999px;background:var(--ink);color:#0b0c0e}
+.c-link small{font:400 11px var(--mono);opacity:.7}
+.scrim{position:absolute;inset:0;z-index:18;background:rgba(0,0,0,.45)}
+.sheet{position:absolute;left:0;right:0;bottom:0;z-index:20;height:min(80%,680px);display:flex;flex-direction:column;background:rgba(15,16,19,.95);border-top:1px solid rgba(255,255,255,.18);border-radius:22px 22px 0 0;-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);transform:translateY(103%);transition:transform .34s cubic-bezier(.2,.8,.2,1)}
+.sheet.open{transform:none}
+.sheet-head{display:flex;align-items:center;gap:8px;padding:12px 14px 8px}
+.sheet-tabs{flex:1;display:flex;gap:6px;overflow-x:auto;scrollbar-width:none}
+.sheet-body{flex:1;overflow-y:auto;overscroll-behavior:contain;padding:4px 18px 28px}
+.sheet h3{margin:18px 0 8px;font:700 10px var(--sans);letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}
+.sheet h3:first-child{margin-top:6px}
+.lead-line{font:500 clamp(19px,5.4cqi,24px)/1.2 var(--sans);letter-spacing:-.01em;text-wrap:balance}
+.lead-sub{margin-top:6px;font:400 14px/1.45 var(--sans);color:var(--mute)}
+.ev{display:grid;grid-template-columns:22px minmax(0,1fr);gap:4px 6px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.08)}
+.ev .n{font:500 12px var(--mono);color:var(--dim);padding-top:2px}
+.ev .t{font:400 14.5px/1.45 var(--sans)}
+.ev a{grid-column:2;justify-self:start;font:500 12.5px var(--sans);color:#7ee8bd;text-decoration:none;border-bottom:1px solid rgba(126,232,189,.4)}
+.say{padding:11px 0;border-bottom:1px solid rgba(255,255,255,.08)}
+.say .q{font:400 14.5px/1.45 var(--sans);color:var(--mute)}
+.say .a{margin-top:4px;font:400 14.5px/1.45 var(--sans)}
+.say .a::before{content:"You: ";color:#7ee8bd;font-weight:500}
+.hintbox{margin-top:8px;padding:11px 13px;border-radius:14px;border:1px solid rgba(245,184,74,.4);background:rgba(245,184,74,.07);font:400 13.5px/1.45 var(--sans);color:#f0d9a8}
+.card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:13px 0;border-bottom:1px solid rgba(255,255,255,.08)}
+.card.off{opacity:.45}
+.card img{width:92px;height:68px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}
+.credit-text{width:100%;margin-top:2px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--ink);font:400 14px/1.4 var(--sans);resize:vertical}
+.msg{white-space:pre-wrap;font:400 14.5px/1.5 var(--sans);padding:14px;border-radius:14px;border:1px solid var(--line);background:rgba(255,255,255,.04)}
+.btn{display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:9px 16px;border-radius:999px;background:var(--ink);color:#0b0c0e;font:700 13.5px var(--sans);text-decoration:none}
+.btn.ghost{background:transparent;color:var(--ink);border:1px solid rgba(255,255,255,.3)}
+.lightbox{position:absolute;inset:0;z-index:30;background:rgba(0,0,0,.9);display:grid;place-items:center;padding:16px}
+.lightbox img{max-width:100%;max-height:100%;border-radius:14px}
+.toast{position:absolute;z-index:25;left:50%;top:58px;transform:translateX(-50%);width:max-content;max-width:calc(100% - 28px);padding:11px 15px;border-radius:14px;background:rgba(20,21,25,.96);border:1px solid rgba(255,255,255,.22);font:400 13.5px/1.45 var(--sans);box-shadow:0 14px 40px rgba(0,0,0,.55)}
+.toast.bad{border-color:rgba(245,184,74,.6);color:#f6dfae}
+
+/* phones: keep the whole screen in view by trimming the second lines first, then the car's room */
+@media (max-height:840px) and (max-width:899px){.stage{grid-template-rows:auto auto minmax(118px,1fr) auto auto auto auto}.zone{min-height:118px}.sub{-webkit-line-clamp:1}.note .fine{display:none}.dock{padding-top:8px}.tabs{padding-top:8px;min-height:44px}}
+@media (max-height:700px){.why{-webkit-line-clamp:1}}
+/* wide screens: title left, price right, the sheet becomes a side panel */
+@media (min-width:900px){
+  .stage{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:auto auto minmax(210px,1fr) auto auto auto}
+  .top{grid-column:1/-1;padding:18px 28px 6px}
+  .head{grid-column:1;padding:16px 40px 0}
+  .verdict{grid-column:2;grid-row:2;padding:16px 40px 0;align-self:start;text-align:right}
+  .verdict .side{justify-content:flex-end}
+  .why{text-align:right;max-width:460px;margin-left:auto}
+  .zone{grid-column:1/-1}
+  .rail{grid-column:1/-1;width:min(960px,100%);justify-self:center;padding-top:0}
+  .nums .s{display:block}
+  .tabs{grid-column:1/-1;justify-content:center}
+  .dock{grid-column:1/-1;width:min(680px,100%);justify-self:center;padding-bottom:18px}
+  .photo{right:40px;top:auto;bottom:18px;width:150px;height:104px}
+  .sheet{left:auto;top:0;bottom:0;width:460px;height:100%;border-radius:0;border-top:0;border-left:1px solid rgba(255,255,255,.18);transform:translateX(103%)}
+  .credit .long{display:inline}
+}
+/* short laptop windows: smaller headline so the whole screen still fits */
+@media (min-width:900px) and (max-height:780px){.title{font-size:40px}.verdict .num{font-size:50px}.head,.verdict{padding-top:6px}.stage{grid-template-rows:auto auto minmax(170px,1fr) auto auto auto}}
+@media (prefers-reduced-motion:reduce){.dot,.sheet,.gl{transition:none}}
+"""
+
+JS = r"""
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : "");
+const money = (v) => "$" + Math.round(v).toLocaleString("en-US");
+const ARROW = '<svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9 9 3M4.2 3H9v4.8"/></svg>';
+const ICON_SEND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
+const ICON_PIC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="3"/><circle cx="9" cy="10" r="1.6"/><path d="m5 17 5-4.5 3.5 3 2.5-2 3.5 3.5"/></svg>';
+const STEPS = ["Reading the listing", "Finding recent sales", "Working out your offer", "Writing the message"];
+const KEY_SLOT = "dealsheet.key";
+const PREFS_SLOT = "dealsheet.prefs";
+
+export default function (component) {
+  const { data, parentElement, setTriggerValue } = component;
+  let d = {};
+  try { d = typeof data === "string" ? JSON.parse(data) : (data || {}); } catch (e) { d = {}; }
+  const root = parentElement.querySelector(".stage");
+  if (!root) return;
+  const S = root.__st || (root.__st = create(root));
+  S.send = setTriggerValue;
+  S.update(d);
+}
+
+/* ------------------------------------------------------------------ storage on this device */
+const store = {
+  db: null,
+  open() {
+    if (this.db) return this.db;
+    this.db = new Promise((done, fail) => {
+      const req = indexedDB.open("dealsheet", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("garage");
+      req.onsuccess = () => done(req.result);
+      req.onerror = () => fail(req.error);
+    });
+    return this.db;
+  },
+  async run(mode, fn) {
+    const db = await this.open();
+    return new Promise((done, fail) => {
+      const tx = db.transaction("garage", mode), out = fn(tx.objectStore("garage"));
+      tx.oncomplete = () => done(out && "result" in out ? out.result : undefined);
+      tx.onerror = () => fail(tx.error);
+    });
+  },
+  get(key) { return this.run("readonly", (s) => s.get(key)); },
+  set(key, value) { return this.run("readwrite", (s) => s.put(value, key)); },
+  del(key) { return this.run("readwrite", (s) => s.delete(key)); },
+  keys() { return this.run("readonly", (s) => s.getAllKeys()); },
+};
+
+/* ------------------------------------------------------------------ the screen */
+function create(root) {
+  const $ = (q) => root.querySelector(q);
+  const S = { d: {}, offer: {}, busy: false, shot: "", tab: "", outbox: [], waiting: false, remember: true };
+  const el = { garage: $(".garage"), head: $(".head"), verdict: $(".verdict"), rail: $(".rail"), legend: $(".legend"), track: $(".track"), nums: $(".nums"),
+    tabs: $(".tabs"), dock: $(".dockbar"), pop: $(".pop"), sheet: $(".sheet"), sheetTabs: $(".sheet-tabs"), sheetBody: $(".sheet-body"),
+    scrim: $(".scrim"), light: $(".lightbox"), toast: $(".toast"), photo: $(".photo"), progress: $(".progress"), empty: $(".empty") };
+
+  /* one message to Python at a time: each one makes the app run again */
+  const post = (name, value) => { S.outbox.push([name, value]); pump(); };
+  const pump = () => { if (S.waiting || !S.outbox.length || !S.send) return; const [name, value] = S.outbox.shift(); S.waiting = true; clearTimeout(S.waitTimer); S.waitTimer = setTimeout(() => { S.waiting = false; pump(); }, 4000); S.send(name, value); };
+
+  let toastTimer = 0;
+  const toast = (text, bad, ms) => { el.toast.style.top = ($(".zone").offsetTop + 6) + "px"; el.toast.textContent = text; el.toast.className = "toast" + (bad ? " bad" : ""); el.toast.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.toast.hidden = true; }, ms || 7000); };
+  el.toast.onclick = () => { el.toast.hidden = true; };
+  S.toastOut = (text) => toast(text, true, 12000);
+
+  /* ---------- top bar ---------- */
+  function paintTop(d) {
+    const chips = (d.garage || []).map((c) => `<button type="button" class="chip${c.active ? " on" : ""}" data-id="${esc(c.id)}">${esc(c.label)}</button>`).join("");
+    el.garage.innerHTML = chips + '<button type="button" class="chip add" data-add="1">+ Add a car</button>';
+  }
+  el.garage.onclick = (e) => {
+    const b = e.target.closest(".chip"); if (!b || S.busy) return;
+    if (b.dataset.add) { focusBar(); return; }
+    if (!b.classList.contains("on")) { el.garage.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c === b)); post("switch", b.dataset.id); }
+  };
+  $(".gear").onclick = () => {
+    const btn = document.querySelector('[data-testid="stExpandSidebarButton"]') || document.querySelector('[data-testid="stSidebarCollapsedControl"] button') || document.querySelector('[data-testid="stSidebarCollapsedControl"]');
+    if (btn) btn.click();
+  };
+
+  /* a VIN, shown in full; a tap copies it */
+  const vinChip = (vin, cls) => `<button type="button" class="vin${cls ? " " + cls : ""}" data-vin="${esc(vin)}" title="Copy the VIN"><b>VIN</b>${esc(vin)}</button>`;
+  root.addEventListener("click", (e) => {
+    const chip = e.target.closest && e.target.closest(".vin"); if (!chip) return;
+    e.preventDefault(); e.stopPropagation();
+    const vin = chip.dataset.vin || "";
+    const done = () => toast("VIN copied: " + vin);
+    try { navigator.clipboard.writeText(vin).then(done, () => toast("VIN: " + vin)); } catch (_) { toast("VIN: " + vin); }
+  });
+
+  /* ---------- title ---------- */
+  function paintHead(d) {
+    if (S.busy) { el.head.innerHTML = `<h1 class="title">Building your deal sheet</h1><div class="sub">${esc(S.asked || "")}</div>`; return; }
+    if (!d.hasCar) { el.head.innerHTML = ""; return; }
+    const c = d.case || {};
+    let row = d.sample ? '<span class="tag">Sample car</span>' : "";
+    if ((c.options || []).length) row += c.options.slice(0, 3).map((o) => `<span class="opt">${esc(o)}</span>`).join("") + (c.options.length > 3 ? `<span class="opt">+${c.options.length - 3} more</span>` : "");
+    else if (d.listed) row += '<span class="opt none">Options not listed</span>';
+    if (c.msrp) row += `<span class="opt">Sticker ${esc(c.msrp)}</span>`;
+    if (d.vin) row += vinChip(d.vin);
+    else if (d.listed) row += '<span class="opt none">VIN not listed</span>';
+    if (d.seller) row += `<span class="seller">${esc(d.seller)}</span>`;
+    el.head.innerHTML = `<h1 class="title">${esc(d.title)}</h1><div class="sub">${(d.chips || []).map(esc).join(" · ")}</div><div class="opts">${row}</div>`;
+  }
+
+  /* ---------- price and the one-line case ---------- */
+  let shownNumber = null, numberTimer = 0;
+  function countTo(node, target, text) {
+    cancelAnimationFrame(numberTimer);
+    if (shownNumber == null || !target || matchMedia("(prefers-reduced-motion:reduce)").matches) { node.textContent = text; shownNumber = target || null; return; }
+    const from = shownNumber, t0 = performance.now();
+    const tick = (now) => { const k = Math.min((now - t0) / 650, 1), e = 1 - Math.pow(1 - k, 3); node.textContent = money(from + (target - from) * e); if (k < 1) numberTimer = requestAnimationFrame(tick); else { node.textContent = text; shownNumber = target; } };
+    numberTimer = requestAnimationFrame(tick);
+  }
+  function paintVerdict(d) {
+    if (S.busy || !d.hasCar) { el.verdict.innerHTML = ""; shownNumber = null; return; }
+    const url = safeUrl(d.url), c = d.case || {};
+    const gap = d.gap && d.gap.text ? `<span class="gap is-${esc(d.gap.tone)}">${esc(d.gap.text)}</span>` : "";
+    const link = url ? `<a class="listing" href="${esc(url)}" target="_blank" rel="noopener">Open the listing ${ARROW}</a>` : "";
+    const why = c.line ? `<button type="button" class="why">${esc(c.line)} <b>See the case</b></button>` : "";
+    el.verdict.innerHTML = `<div class="lbl">${esc(d.priceLabel || "Asking")}</div><div class="num"></div><div class="side">${gap}${link}</div>${why}`;
+    countTo(el.verdict.querySelector(".num"), d.priceValue, d.priceText || "");
+    const w = el.verdict.querySelector(".why"); if (w) w.onclick = () => openSheet("case");
+  }
+
+  /* ---------- the price line ---------- */
+  const pos = (v) => { const a = S.d.axis; return Math.max(0, Math.min(100, ((v - a.lo) / (a.hi - a.lo)) * 100)); };
+  let dotsKey = "";
+  function paintRail(d) {
+    const a = d.axis;
+    el.rail.hidden = S.busy || !a || !d.hasCar;
+    if (el.rail.hidden) { dotsKey = ""; return; }
+    if (!S.dragging) S.offer = { open: d.offer.open || null, target: d.offer.target || null, walk: d.offer.walk || null };
+    const width = el.track.clientWidth || 340;
+    const key = JSON.stringify([a.lo, a.hi, d.ask, a.median, Math.round(width / 40), !!(d.offer.target || d.offer.open), (d.comps || []).map((k) => [k.price, k.status, k.use])]);
+    if (key !== dotsKey) {
+      const fresh = dotsKey === "" || key.length !== dotsKey.length;
+      dotsKey = key;
+      let h = '<div class="line"></div><div class="band"></div>';
+      h += (a.ticks || []).map((t) => `<span class="tick" style="left:${pos(t.v)}%">${esc(t.label)}</span>`).join("");
+      if (a.median) h += `<div class="medmark" style="left:${pos(a.median)}%"></div>`;
+      if (d.ask) h += `<div class="askmark" style="left:${pos(d.ask)}%"><span>ASK</span></div>`;
+      // cars priced close together stack upward, so each one stays visible
+      const comps = d.comps || [], near = (13 / width) * 100, placed = [], level = {};
+      comps.map((k, i) => i).sort((x, y) => comps[x].price - comps[y].price || x - y).forEach((i) => {
+        const x = pos(comps[i].price); let lv = 0;
+        while (lv < 2 && placed.some((q) => q.lv === lv && Math.abs(q.x - x) < near)) lv++;
+        placed.push({ x, lv }); level[i] = lv;
+      });
+      h += comps.map((k, i) => `<button type="button" class="dot ${esc(k.status)}${k.use ? "" : " off"}${fresh ? "" : " in"}" data-i="${i}" style="left:${pos(k.price)}%;top:${40 - level[i] * 13}px" aria-label="${esc(k.label)} ${esc(k.priceText)}"></button>`).join("");
+      const has = (s) => comps.some((k) => k.status === s);
+      el.legend.innerHTML = (has("sold") ? '<span><i class="sold"></i>Sold</span>' : "") + (has("high_bid") ? '<span><i class="high_bid"></i>No sale</span>' : "") +
+        (has("asking") ? '<span><i class="asking"></i>Asking</span>' : "") + (a.median ? `<span><i class="med"></i>Median sale ${esc(a.medianText)}</span>` : "");
+      h += '<button type="button" class="knob open" data-k="open" aria-label="Opening offer"></button><button type="button" class="knob walk" data-k="walk" aria-label="Walk-away price"></button><button type="button" class="knob target" data-k="target" aria-label="Target price"></button>';
+      el.track.innerHTML = h;
+      if (fresh) el.track.querySelectorAll(".dot").forEach((dot, i) => setTimeout(() => dot.classList.add("in"), 250 + i * 90));
+    }
+    place();
+  }
+  function place() {
+    const o = S.offer, band = el.track.querySelector(".band");
+    for (const k of ["open", "target", "walk"]) { const knob = el.track.querySelector(".knob." + k); if (!knob) continue; knob.hidden = !o[k]; if (o[k]) knob.style.left = pos(o[k]) + "%"; }
+    const lo = o.open || o.target, hi = o.walk || o.target;
+    if (band) { band.style.display = lo && hi && hi > lo ? "" : "none"; if (lo && hi) { band.style.left = pos(lo) + "%"; band.style.width = Math.max(0, pos(hi) - pos(lo)) + "%"; } }
+    paintNums();
+  }
+  function paintNums() {
+    const o = S.offer, m = S.d.money || {}, price = o.target || o.open;
+    let otd = "", per = "";
+    if (price) {
+      const total = price * (1 + (m.tax || 0) / 100) + (m.fees || 0); otd = money(total);
+      const loan = Math.max(total - (m.down || 0), 0), r = (m.apr || 0) / 1200, n = m.months || 0;
+      if (n > 0 && loan > 0) per = "about " + money(r ? (loan * r) / (1 - Math.pow(1 + r, -n)) : loan / n) + "/mo";
+    }
+    const cell = (cls, k, v, s) => `<div class="${cls}"><div class="k">${k}</div><div class="v">${v || "n/a"}</div><div class="s">${s}</div></div>`;
+    el.nums.innerHTML = cell("open", "Open", o.open && money(o.open), "first offer") + cell("target", "Target", o.target && money(o.target), "where to close") +
+      cell("walk", "Walk away", o.walk && money(o.walk), "the ceiling") + cell("otd", "Out the door", otd, per || "at target, with tax");
+  }
+  /* drag a handle along the line */
+  el.track.addEventListener("pointerdown", (e) => {
+    const knob = e.target.closest(".knob");
+    if (knob) {
+      e.preventDefault(); if (S.busy) return;
+      S.dragging = knob.dataset.k; knob.classList.add("live"); try { knob.setPointerCapture(e.pointerId); } catch (_) {}
+      el.pop.hidden = true; return;
+    }
+    const dot = e.target.closest(".dot");
+    if (dot) showComp(+dot.dataset.i, dot); else el.pop.hidden = true;
+  });
+  el.track.addEventListener("pointermove", (e) => {
+    if (!S.dragging) return;
+    const r = el.track.getBoundingClientRect(), a = S.d.axis, span = a.hi - a.lo, step = span > 40000 ? 500 : span > 8000 ? 250 : 100;
+    let v = a.lo + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * span;
+    v = Math.round(v / step) * step;
+    const o = S.offer, k = S.dragging;
+    if (k === "open") v = Math.min(v, (o.target || o.walk || v));
+    if (k === "target") v = Math.max(Math.min(v, o.walk || v), o.open || v);
+    if (k === "walk") v = Math.max(v, (o.target || o.open || v));
+    o[k] = v; place();
+  });
+  const drop = () => {
+    if (!S.dragging) return;
+    el.track.querySelectorAll(".knob").forEach((k) => k.classList.remove("live"));
+    const o = S.offer; S.dragging = "";
+    const was = S.d.offer || {};
+    if (o.open !== (was.open || null) || o.target !== (was.target || null) || o.walk !== (was.walk || null)) post("offer", { open: o.open, target: o.target, walk: o.walk });
+  };
+  el.track.addEventListener("pointerup", drop); el.track.addEventListener("pointercancel", drop);
+
+  /* ---------- a comp, as a card ---------- */
+  const compCard = (k, big) => {
+    const url = safeUrl(k.url);
+    const flag = k.kind === "page" ? '<div class="c-flag">This link opens a results page, not this car.</div>' : (k.linkOk === false ? '<div class="c-flag">Link not confirmed. Open it before you cite it.</div>' : "");
+    const text = `<div><span class="pill ${esc(k.status)}">${esc(k.label)}</span><span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
+      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.vin ? `<div>${vinChip(k.vin, "c-vin")}</div>` : ""}${flag}` +
+      (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">Open ${ARROW} <small>${esc(k.host)}</small></a>` : "") + "</div>";
+    return big ? `<div class="card${k.use ? "" : " off"}">${text}${k.image ? `<img src="${esc(k.image)}" alt="" loading="lazy">` : "<span></span>"}</div>` : text;
+  };
+  function showComp(i, dot) {
+    const k = (S.d.comps || [])[i]; if (!k) return;
+    el.track.querySelectorAll(".dot").forEach((x) => x.classList.toggle("sel", x === dot));
+    el.pop.innerHTML = compCard(k, false); el.pop.hidden = false;
+    const R = root.getBoundingClientRect(), D = dot.getBoundingClientRect(), w = el.pop.offsetWidth, h = el.pop.offsetHeight;
+    el.pop.style.left = Math.max(10, Math.min(R.width - w - 10, D.left - R.left + D.width / 2 - w / 2)) + "px";
+    el.pop.style.top = Math.max(10, D.top - R.top - h - 14) + "px";
+  }
+  root.addEventListener("pointerdown", (e) => { if (!el.pop.hidden && !e.target.closest(".pop") && !e.target.closest(".dot")) { el.pop.hidden = true; el.track.querySelectorAll(".dot.sel").forEach((x) => x.classList.remove("sel")); } });
+
+  /* ---------- tabs and the sheet ---------- */
+  function paintTabs(d) {
+    if (S.busy || !d.hasCar) { el.tabs.innerHTML = ""; return; }
+    const c = d.case || {}, n = (d.comps || []).length;
+    el.tabs.innerHTML = `<button type="button" class="tab${(c.reasons || []).length ? " lead" : ""}" data-tab="case">The case</button>` +
+      `<button type="button" class="tab" data-tab="comps">Comps<b>${n}</b></button>` +
+      `<button type="button" class="tab" data-tab="message">Message</button>` +
+      `<button type="button" class="tab" data-tab="model">3D model</button>` +
+      `<button type="button" class="tab" data-tab="details">Edit and print ↓</button>`;
+  }
+  el.tabs.onclick = (e) => { const b = e.target.closest(".tab"); if (!b) return; if (b.dataset.tab === "details") { const t = document.querySelector(".st-key-details"); if (t) t.scrollIntoView({ behavior: "smooth", block: "start" }); } else openSheet(b.dataset.tab); };
+  function openSheet(tab) { S.tab = tab; renderSheet(); el.sheet.classList.add("open"); el.sheet.setAttribute("aria-hidden", "false"); el.scrim.hidden = false; el.pop.hidden = true; }
+  function closeSheet() { S.tab = ""; el.sheet.classList.remove("open"); el.sheet.setAttribute("aria-hidden", "true"); el.scrim.hidden = true; }
+  $(".close").onclick = closeSheet; el.scrim.onclick = closeSheet;
+  el.sheetTabs.onclick = (e) => { const b = e.target.closest(".tab"); if (b) { S.tab = b.dataset.tab; renderSheet(); } };
+  function renderSheet() {
+    const d = S.d, c = d.case || {}, n = (d.comps || []).length;
+    el.sheetTabs.innerHTML = [["case", "The case"], ["comps", `Comps<b>${n}</b>`], ["message", "Message"], ["model", "3D model"]].map(([id, t]) => `<button type="button" class="tab${S.tab === id ? " lead" : ""}" data-tab="${id}">${t}</button>`).join("");
+    let h = "";
+    if (S.tab === "case") {
+      h += `<div class="lead-line">${esc(c.headline || "")}</div>${c.sub ? `<div class="lead-sub">${esc(c.sub)}</div>` : ""}`;
+      if ((c.reasons || []).length) h += "<h3>The evidence</h3>" + c.reasons.map((r, i) => `<div class="ev"><span class="n">${i + 1}</span><span class="t">${esc(r.text)}</span>${(r.links || []).filter((l) => safeUrl(l.url)).map((l) => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} ${ARROW}</a>`).join("")}</div>`).join("");
+      h += "<h3>Options</h3>";
+      if ((c.options || []).length) h += `<div class="opts">${c.options.map((o) => `<span class="opt">${esc(o)}</span>`).join("")}${c.msrp ? `<span class="opt">Sticker ${esc(c.msrp)}</span>` : ""}</div>`;
+      else h += '<div class="hintbox">The listing does not show this car\'s options. On a car like this they can move the price by thousands. Ask the seller for the window sticker or build sheet before you rely on these numbers.</div>';
+      if ((c.pushback || []).length) h += "<h3>What the seller will say</h3>" + c.pushback.map((p) => `<div class="say"><div class="q">${esc(p.say)}</div>${p.reply ? `<div class="a">${esc(p.reply)}</div>` : ""}</div>`).join("");
+      if (c.summary || (c.sources || []).length) {
+        h += "<h3>What the search found</h3>";
+        if ((c.sources || []).length) h += `<div class="srcs">${c.sources.map((s) => `<span class="src${s.n ? "" : " zero"}">${esc(s.name)}<b>${s.n || "none"}</b></span>`).join("")}</div>`;
+        if (c.summary) h += `<div class="lead-sub">${esc(c.summary)}</div>`;
+      }
+    } else if (S.tab === "comps") {
+      h = n ? (d.comps || []).map((k) => compCard(k, true)).join("") : '<div class="lead-sub">No comps yet. Add a car with the bar at the bottom, or add comps under Edit and print.</div>';
+    } else if (S.tab === "message") {
+      h = d.message ? `<div class="msg">${esc(d.message)}</div><button type="button" class="btn copy">Copy the message</button>` : '<div class="lead-sub">No message yet. Draft one under Edit and print, in the Sheet tab.</div>';
+    }
+    if (S.tab === "model") { renderModelTab(); return; }
+    el.sheetBody.innerHTML = h; el.sheetBody.scrollTop = 0;
+    const copy = el.sheetBody.querySelector(".copy");
+    if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(S.d.message); copy.textContent = "Copied"; } catch (e) { toast("Could not copy. Select the text and copy it by hand.", true); } };
+  }
+
+  /* ---------- your own 3D file for this car, kept on this device ---------- */
+  const modelSlot = () => "model:" + (S.d.activeId || "");
+  async function renderModelTab() {
+    let rec = null;
+    try { rec = await store.get(modelSlot()); } catch (e) {}
+    if (S.tab !== "model") return;
+    const builtIn = S.d.model ? "the built-in concept coupe" : "a simple shape for this body type";
+    el.sheetBody.innerHTML = `<div class="lead-line">${rec ? "Showing your file" : "Showing " + builtIn}</div>` +
+      `<div class="lead-sub">${rec ? esc(rec.name) + " · " + (rec.file.byteLength / 1048576).toFixed(1) + " MB" : "You can show your own 3D model of this car instead."}</div>` +
+      `<h3>Your own model</h3><input type="file" class="glb" accept=".glb,model/gltf-binary" hidden>` +
+      `<button type="button" class="btn pick">${rec ? "Choose a different file" : "Choose a .glb file"}</button>` +
+      (rec ? ` <button type="button" class="btn ghost turn">Turn 90°</button> <button type="button" class="btn ghost drop">Remove</button>` +
+        `<h3>Credit shown under the car</h3><textarea class="credit-text" rows="2" placeholder="“Model name” by Artist, CC BY 4.0, link">${esc(rec.credit || "")}</textarea><button type="button" class="btn ghost save">Save the credit</button>` : "") +
+      `<div class="hintbox">The file stays on this device and is not uploaded. Use only models you have the right to use, and credit the artist the way their licence asks.</div>`;
+    el.sheetBody.scrollTop = 0;
+    const file = el.sheetBody.querySelector(".glb"), refresh = () => { renderModelTab(); if (S.scene) S.scene.reload(S.d); };
+    el.sheetBody.querySelector(".pick").onclick = () => file.click();
+    file.onchange = async () => {
+      const f = file.files[0]; if (!f) return;
+      if (f.size > 80 * 1048576) { toast("That file is over 80 MB, which is too heavy for a phone. Pick a smaller one.", true); return; }
+      try { await store.set(modelSlot(), { name: f.name, file: await f.arrayBuffer(), credit: rec ? rec.credit : "", turn: 0 }); refresh(); }
+      catch (e) { toast("That file could not be saved on this device.", true); }
+    };
+    const on = (q, fn) => { const b = el.sheetBody.querySelector(q); if (b) b.onclick = fn; };
+    on(".turn", async () => { rec.turn = ((rec.turn || 0) + 1) % 4; await store.set(modelSlot(), rec); refresh(); });
+    on(".drop", async () => { await store.del(modelSlot()); refresh(); });
+    on(".save", async () => { rec.credit = el.sheetBody.querySelector(".credit-text").value.trim(); await store.set(modelSlot(), rec); refresh(); });
+  }
+
+  /* ---------- the bar: a key first, then cars ---------- */
+  let dockMode = "";
+  function paintDock(d) {
+    const mode = d.connected ? "car" : "key";
+    if (mode === dockMode) return;
+    dockMode = mode;
+    if (mode === "key") {
+      el.dock.innerHTML = `<form class="bar"><input type="password" autocomplete="off" placeholder="Paste your Anthropic API key to start" aria-label="Anthropic API key"><button type="submit" class="go text">Connect</button></form>` +
+        `<div class="note"><label><input type="checkbox" class="remember" checked> Remember it on this device</label><a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">Get a key ${ARROW}</a><span class="fine">Used only to call Anthropic. Billed to your key.</span></div>`;
+      el.dock.querySelector("form").onsubmit = (e) => {
+        e.preventDefault();
+        const value = el.dock.querySelector("input[type=password]").value.trim();
+        if (!value) { toast("Paste your Anthropic API key first.", true); return; }
+        S.remember = el.dock.querySelector(".remember").checked; S.pendingKey = value; S.keyTried = true;
+        post("key", { value, saved: false });
+      };
+    } else {
+      el.dock.innerHTML = `<form class="bar"><button type="button" class="tool pic" aria-label="Add a screenshot" title="Add a screenshot">${ICON_PIC}</button><input type="file" accept="image/*" hidden>` +
+        `<span class="thumb" hidden><img alt=""><button type="button" aria-label="Remove the screenshot">×</button></span>` +
+        `<textarea rows="1" placeholder="Link or car name" aria-label="Add a car"></textarea>` +
+        `<button type="button" class="tool paste">Paste</button><button type="submit" class="go" aria-label="Build the deal sheet">${ICON_SEND}</button></form>`;
+      const form = el.dock.querySelector("form"), box = form.querySelector("textarea"), file = form.querySelector("input[type=file]");
+      form.querySelector(".pic").onclick = () => file.click();
+      file.onchange = () => { if (file.files[0]) takeImage(file.files[0]); file.value = ""; };
+      form.querySelector(".thumb button").onclick = () => setShot("");
+      box.addEventListener("input", () => { box.style.height = "auto"; box.style.height = Math.min(box.scrollHeight, 96) + "px"; });
+      box.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+      box.addEventListener("paste", (e) => { const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/")); if (item) { e.preventDefault(); takeImage(item.getAsFile()); } });
+      form.querySelector(".paste").onclick = async () => {
+        try {
+          if (navigator.clipboard.read) {
+            for (const item of await navigator.clipboard.read()) {
+              const type = item.types.find((t) => t.startsWith("image/"));
+              if (type) { takeImage(await item.getType(type)); return; }
+            }
+          }
+          const text = await navigator.clipboard.readText();
+          if (text) { box.value = (box.value ? box.value + " " : "") + text.trim(); box.dispatchEvent(new Event("input")); box.focus(); } else toast("Nothing to paste. Copy a link or a picture first.", true);
+        } catch (e) { toast("Your browser did not allow reading the clipboard. Press and hold the box and choose Paste, or use the picture button.", true); }
+      };
+      form.onsubmit = (e) => {
+        e.preventDefault(); if (S.busy) return;
+        const text = box.value.trim();
+        if (!text && !S.shot) { toast("Paste a link, add a screenshot, or name a car.", true); return; }
+        S.busy = true; S.sentSeq = S.d.seq; S.busyAt = Date.now(); S.asked = text || "From your screenshot"; S.step = 1; el.toast.hidden = true;
+        closeSheet(); paintAll(); post("build", { text, image: S.shot });
+      };
+    }
+  }
+  const focusBar = () => { const f = el.dock.querySelector("textarea, input[type=password]"); if (f) f.focus(); };
+  function setShot(url) { S.shot = url; const t = el.dock.querySelector(".thumb"); if (t) { t.hidden = !url; if (url) t.querySelector("img").src = url; } }
+  /* shrink a picture in the browser before it is sent: long screenshots keep their length */
+  async function takeImage(blob) {
+    if (!blob) return;
+    try {
+      const bmp = await createImageBitmap(blob);
+      let w = bmp.width, h = bmp.height, k = 1;
+      if (h > 2.2 * w) k = Math.min(1, 1080 / w, 15000 / h); else k = Math.min(1, 2200 / Math.max(w, h));
+      const c = document.createElement("canvas"); c.width = Math.round(w * k); c.height = Math.round(h * k);
+      c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+      setShot(c.toDataURL("image/jpeg", 0.86));
+    } catch (e) { toast("That picture could not be read. Try a PNG or JPG screenshot.", true); }
+  }
+  root.addEventListener("dragover", (e) => { e.preventDefault(); });
+  root.addEventListener("drop", (e) => { e.preventDefault(); const f = [...(e.dataTransfer?.files || [])].find((x) => x.type.startsWith("image/")); if (f && S.d.connected) takeImage(f); });
+
+  /* ---------- while Claude works ---------- */
+  function paintBusy() {
+    el.progress.hidden = !S.busy;
+    if (!S.busy) return;
+    el.progress.innerHTML = STEPS.map((t, i) => `<div class="step ${i + 1 < S.step ? "done" : i + 1 === S.step ? "now" : ""}"><i></i>${esc(t)}</div>`).join("");
+  }
+  setInterval(() => {
+    if (!S.busy) return;
+    const p = document.getElementById("ds-progress"), n = p ? +p.dataset.step || 0 : 0;
+    const step = Math.max(n, S.step || 1);
+    if (step !== S.step) { S.step = step; paintBusy(); }
+    if (Date.now() - S.busyAt > 420000) { S.busy = false; paintAll(); toast("That took too long and was stopped. Try again.", true); }
+  }, 400);
+
+  /* ---------- the listing photo ---------- */
+  function paintPhoto(d) {
+    const show = !S.busy && !!d.photo;
+    el.photo.hidden = !show; if (show) el.photo.querySelector("img").src = d.photo;
+  }
+  el.photo.onclick = () => { el.light.querySelector("img").src = S.d.photo; el.light.hidden = false; };
+  el.light.onclick = () => { el.light.hidden = true; };
+
+  function paintEmpty(d) {
+    const show = !S.busy && !d.hasCar;
+    el.empty.hidden = !show;
+    if (show) el.empty.innerHTML = `<div><div class="big">Which car are you looking at?</div><div class="small">${d.connected ? "Paste a listing link or a screenshot below, or just name the car." : "Connect your key below, then paste a listing link or a screenshot, or just name the car."}</div></div>`;
+  }
+
+  function paintAll() {
+    const d = S.d;
+    root.classList.toggle("busy", S.busy);
+    paintTop(d); paintHead(d); paintVerdict(d); paintRail(d); paintTabs(d); paintDock(d); paintBusy(); paintPhoto(d); paintEmpty(d);
+    if (S.tab) renderSheet();
+    if (S.scene) { S.scene.setBusy(S.busy); if (!S.busy) S.scene.setData(d); S.scene.layout(); }
+  }
+
+  /* ---------- the key and the garage, kept on this device ---------- */
+  function keyAndGarage(d) {
+    let saved = "";
+    try { saved = localStorage.getItem(KEY_SLOT) || ""; } catch (e) {}
+    if (d.keyForgotten) { try { localStorage.removeItem(KEY_SLOT); } catch (e) {} saved = ""; }
+    if (d.connected) {
+      if (S.pendingKey && S.remember) { try { localStorage.setItem(KEY_SLOT, S.pendingKey); } catch (e) {} }
+      S.pendingKey = ""; S.keyTried = false;
+    } else if (d.keyError && S.keyTried) {
+      toast(d.keyError, true); S.keyTried = false; S.pendingKey = "";
+      if (S.usedSaved) { try { localStorage.removeItem(KEY_SLOT); } catch (e) {} }
+    } else if (!S.triedSaved && saved && !d.keyForgotten) { S.keyTried = true; S.usedSaved = true; post("key", { value: saved, saved: true }); }
+    S.triedSaved = true;
+
+    if (d.prefsAsk) {
+      if (!S.triedPrefs) {
+        S.triedPrefs = true;
+        let kept = null;
+        try { kept = JSON.parse(localStorage.getItem(PREFS_SLOT) || "null"); } catch (e) {}
+        post("prefs", kept && typeof kept === "object" ? kept : {});
+      }
+    } else if (d.prefs) {
+      const now = JSON.stringify(d.prefs);
+      if (now !== S.prefsKept) { try { localStorage.setItem(PREFS_SLOT, now); } catch (e) {} S.prefsKept = now; }
+    }
+
+    if (d.fresh) {
+      if (!S.triedRestore) {
+        S.triedRestore = true;
+        (async () => {
+          try {
+            const index = await store.get("index");
+            if (!index || !(index.order || []).length) return;
+            const cars = [];
+            for (const id of index.order) { const car = await store.get("car:" + id); if (car && car.deal) cars.push({ ...car.deal, _id: id, car_photo: car.photo || "", photos: car.photos || {} }); }
+            if (cars.length) post("restore", { cars, active: Math.max(0, index.order.indexOf(index.active)) });
+          } catch (e) { /* storage is unavailable: nothing to restore */ }
+        })();
+      }
+      return;
+    }
+    S.triedRestore = true;
+    const p = d.persist; if (!p) return;
+    (async () => {
+      try {
+        const order = p.cars.map((c) => c.id);
+        for (const c of p.cars) {
+          const old = (await store.get("car:" + c.id)) || {};
+          const rec = { deal: c.deal, photo: old.photo || "", photos: old.photos || {} };
+          if (c.id === p.active) {
+            rec.photo = d.photoOwn ? d.photo : "";
+            const mine = {}; (d.comps || []).forEach((k) => { if (k.img && k.image) mine[k.img] = k.image; });
+            rec.photos = mine;
+          }
+          await store.set("car:" + c.id, rec);
+        }
+        await store.set("index", { order, active: p.active, saved: Date.now() });
+        for (const key of await store.keys()) { const [kind, id] = String(key).split(":"); if ((kind === "car" || kind === "model") && id && !order.includes(id) && id !== p.active) await store.del(key); }
+      } catch (e) { /* saving is best effort */ }
+    })();
+  }
+
+  /* ---------- new data from Python ---------- */
+  let noticeKey = "";
+  S.update = (d) => {
+    S.d = d; S.waiting = false; clearTimeout(S.waitTimer);
+    if (S.busy && d.seq !== S.sentSeq && !d.busy) {
+      S.busy = false;
+      if (d.error) toast(d.error, true, 12000);
+      else { setShot(""); const box = el.dock.querySelector("textarea"); if (box) { box.value = ""; box.style.height = "auto"; } }
+    }
+    if (!S.busy && d.error && d.error !== S.lastError) toast(d.error, true, 12000);
+    S.lastError = d.error || "";
+    const notes = (d.notices || []).join(" ");
+    if (notes && notes !== noticeKey && !d.error) toast(notes, false, 12000);
+    noticeKey = notes;
+    paintAll(); keyAndGarage(d); pump();
+  };
+
+  /* ---------- 3D ---------- */
+  Promise.all([loadThree(), loadAddons().catch(() => null)]).then(([THREE, addons]) => {
+    try { S.scene = makeScene(THREE, addons, root, S); root.classList.add("has-gl"); S.scene.setBusy(S.busy); if (!S.busy) S.scene.setData(S.d); S.scene.layout(); }
+    catch (e) { console.warn("Deal Sheet: the 3D view is unavailable.", e); root.classList.add("no-gl"); }
+  }).catch((e) => { console.warn("Deal Sheet: could not load three.js.", e); root.classList.add("no-gl"); });
+  return S;
+}
+
+/* ------------------------------------------------------------------ three.js, loaded once per page */
+function loadThree() {
+  if (window.__dsThree) return window.__dsThree;
+  window.__dsThree = (async () => {
+    try {
+      const res = await fetch(new URL("app/static/vendor/three.module.min.js", document.baseURI).href);
+      if (!res.ok) throw new Error("local copy missing");
+      window.__dsThreeUrl = URL.createObjectURL(new Blob([await res.text()], { type: "text/javascript" }));
+      return await import(/* webpackIgnore: true */ window.__dsThreeUrl);
+    } catch (e) {
+      window.__dsThreeUrl = "https://unpkg.com/three@0.160.0/build/three.module.min.js";
+      return await import(/* webpackIgnore: true */ window.__dsThreeUrl);
+    }
+  })();
+  return window.__dsThree;
+}
+/* the glTF loader and a studio-light environment, linked against the same copy of three.js */
+function loadAddons() {
+  if (window.__dsAddons) return window.__dsAddons;
+  window.__dsAddons = (async () => {
+    await loadThree();
+    const res = await fetch(new URL("app/static/vendor/three-addons.module.min.js", document.baseURI).href);
+    if (!res.ok) throw new Error("model loader missing");
+    const code = (await res.text()).split('from"three"').join('from"' + window.__dsThreeUrl + '"');
+    return await import(/* webpackIgnore: true */ URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+  })();
+  return window.__dsAddons;
+}
+
+/* ------------------------------------------------------------------ the studio */
+function makeScene(THREE, addons, root, S) {
+  const canvas = root.querySelector(".gl"), zone = root.querySelector(".zone"), credit = root.querySelector(".credit");
+  const calm = matchMedia("(prefers-reduced-motion:reduce)").matches;
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: "high-performance" });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0x000000, 0);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.12;
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 120);
+  if (addons) { const pm = new THREE.PMREMGenerator(renderer); scene.environment = pm.fromScene(new addons.RoomEnvironment(), 0.04).texture; pm.dispose(); }
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x15171b, addons ? 0.5 : 1.6));
+  const keyLight = new THREE.DirectionalLight(0xffffff, addons ? 1.6 : 2.8); keyLight.position.set(5, 9, 7); scene.add(keyLight);
+  const rimLight = new THREE.DirectionalLight(0xcfe0ff, 0.9); rimLight.position.set(-7, 4, -6); scene.add(rimLight);
+
+  const disc = (inner, outer, alpha) => {
+    const c = document.createElement("canvas"); c.width = c.height = 256; const g = c.getContext("2d"), grd = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+    grd.addColorStop(0, inner); grd.addColorStop(alpha, outer); grd.addColorStop(1, "rgba(0,0,0,0)"); g.fillStyle = grd; g.fillRect(0, 0, 256, 256);
+    return new THREE.CanvasTexture(c);
+  };
+  const shadeTex = disc("rgba(0,0,0,.9)", "rgba(0,0,0,.5)", 0.55);
+  const wheelTex = (() => {
+    const c = document.createElement("canvas"); c.width = c.height = 256; const g = c.getContext("2d");
+    g.translate(128, 128);
+    g.fillStyle = "#07090d"; g.beginPath(); g.arc(0, 0, 128, 0, 7); g.fill();
+    g.fillStyle = "#11161f"; g.beginPath(); g.arc(0, 0, 90, 0, 7); g.fill();
+    g.strokeStyle = "#d5dde8"; g.lineWidth = 9; g.beginPath(); g.arc(0, 0, 86, 0, 7); g.stroke();
+    g.lineCap = "round"; g.lineWidth = 15;
+    for (let i = 0; i < 5; i++) { const a = (i / 5) * Math.PI * 2 - Math.PI / 2; g.beginPath(); g.moveTo(Math.cos(a) * 18, Math.sin(a) * 18); g.lineTo(Math.cos(a) * 82, Math.sin(a) * 82); g.stroke(); }
+    g.fillStyle = "#d5dde8"; g.beginPath(); g.arc(0, 0, 22, 0, 7); g.fill();
+    g.fillStyle = "#1b2330"; g.beginPath(); g.arc(0, 0, 9, 0, 7); g.fill();
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
+  })();
+  /* the turntable: a dark glossy pad the car is mirrored in, with a thin bright rim */
+  const floor = new THREE.Mesh(new THREE.CircleGeometry(26, 64), new THREE.MeshBasicMaterial({ map: disc("rgba(14,15,18,.9)", "rgba(14,15,18,.9)", 0.5), transparent: true, depthWrite: false, toneMapped: false }));
+  floor.rotation.x = -Math.PI / 2; floor.position.y = 0.0005; floor.renderOrder = 2; scene.add(floor);
+  const pad = new THREE.Mesh(new THREE.CircleGeometry(3.85, 96), new THREE.MeshBasicMaterial({ color: 0x08090b, transparent: true, opacity: 0.5, depthWrite: false, toneMapped: false }));
+  pad.rotation.x = -Math.PI / 2; pad.position.y = 0.001; pad.renderOrder = 2; scene.add(pad);
+  const rimMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.22, toneMapped: false });
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(3.85, 0.011, 8, 220), rimMat); rim.rotation.x = Math.PI / 2; rim.position.y = 0.004; scene.add(rim);
+
+  const rig = new THREE.Group(); scene.add(rig);          /* turns with the car */
+  const upright = new THREE.Group(), mirrored = new THREE.Group(); mirrored.scale.y = -1; rig.add(upright, mirrored);
+  let carKey = "", alive = true, busy = false, angle = -0.62, vel = 0, slideFrom = -1e9, held = 0;
+
+  const dispose = (obj) => obj.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => {
+      for (const k in m) { const v = m[k]; if (v && v.isTexture && v !== wheelTex && v !== shadeTex) v.dispose(); }
+      m.dispose();
+    });
+  });
+  const shadow = (L, W) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(L * 1.2, W * 1.55), new THREE.MeshBasicMaterial({ map: shadeTex, transparent: true, depthWrite: false, toneMapped: false })); m.rotation.x = -Math.PI / 2; m.position.y = 0.012; m.renderOrder = 3; m.userData.floorOnly = true; return m; };
+
+  const BODIES = {
+    coupe_front: { L: 4.6, W: 1.86, g: 0.28, r: 0.345, ax: [1.42, -1.28],
+      belt: [[-2.3, 0.72], [-1.95, 0.9], [-1.3, 0.95], [0, 0.94], [0.55, 0.93], [1.4, 0.86], [2.0, 0.72], [2.3, 0.55]],
+      roof: [[-1.75, 0.93], [-1.15, 1.2], [-0.6, 1.32], [-0.1, 1.31], [0.55, 0.93]], paint: [[-0.72, -0.08]], glass: [-1.3, 0.45], tub: 1.7 },
+    coupe_rear: { L: 4.5, W: 1.84, g: 0.27, r: 0.345, ax: [1.32, -1.13],
+      belt: [[-2.25, 0.7], [-1.9, 0.86], [-1.2, 0.93], [0.2, 0.93], [0.95, 0.9], [1.6, 0.8], [2.05, 0.66], [2.25, 0.52]],
+      roof: [[-1.95, 0.86], [-1.2, 1.1], [-0.45, 1.27], [0.1, 1.3], [0.45, 1.24], [1.0, 0.9]], paint: [[-1.95, -1.25], [-0.45, 0.45]], glass: [-1.2, 0.9], tub: 1.75 },
+    coupe_mid: { L: 4.5, W: 1.92, g: 0.24, r: 0.345, ax: [1.33, -1.3],
+      belt: [[-2.25, 0.76], [-1.9, 0.94], [-1.0, 0.98], [0.3, 0.9], [1.1, 0.83], [1.7, 0.69], [2.1, 0.55], [2.25, 0.45]],
+      roof: [[-1.3, 0.97], [-0.8, 1.13], [-0.25, 1.2], [0.3, 1.18], [1.12, 0.83]], paint: [[-1.3, -0.85], [-0.3, 0.3]], glass: [-0.75, 1.02], tub: 1.3 },
+    sedan: { L: 4.85, W: 1.86, g: 0.3, r: 0.34, ax: [1.5, -1.4],
+      belt: [[-2.42, 0.76], [-2.15, 0.96], [-1.5, 1.0], [0, 0.99], [0.75, 0.97], [1.6, 0.92], [2.15, 0.78], [2.42, 0.58]],
+      roof: [[-1.6, 1.0], [-1.05, 1.36], [-0.5, 1.45], [0.1, 1.44], [0.78, 0.97]], paint: [[-1.0, 0.05]], glass: [-1.4, 0.68] },
+    hatch: { L: 4.3, W: 1.8, g: 0.3, r: 0.33, ax: [1.33, -1.27],
+      belt: [[-2.15, 0.78], [-1.95, 0.98], [-1.0, 1.0], [0.6, 0.98], [1.35, 0.92], [1.9, 0.78], [2.15, 0.58]],
+      roof: [[-2.06, 0.99], [-1.72, 1.36], [-1.0, 1.47], [0, 1.46], [0.66, 0.98]], paint: [[-1.62, -0.05]], glass: [-1.8, 0.56] },
+    wagon: { L: 4.8, W: 1.86, g: 0.3, r: 0.34, ax: [1.5, -1.38],
+      belt: [[-2.4, 0.78], [-2.2, 0.98], [-1.2, 1.0], [0.75, 0.97], [1.6, 0.92], [2.15, 0.78], [2.4, 0.58]],
+      roof: [[-2.33, 0.99], [-1.98, 1.38], [-1.0, 1.46], [0.1, 1.45], [0.78, 0.97]], paint: [[-1.88, 0.05]], glass: [-2.05, 0.68] },
+    suv: { L: 4.75, W: 1.95, g: 0.42, r: 0.4, ax: [1.45, -1.37],
+      belt: [[-2.37, 0.96], [-2.2, 1.16], [-1.2, 1.2], [0.8, 1.17], [1.6, 1.12], [2.1, 0.98], [2.37, 0.74]],
+      roof: [[-2.31, 1.19], [-2.02, 1.62], [-1.0, 1.72], [0.15, 1.7], [0.86, 1.17]], paint: [[-1.92, 0.1]], glass: [-2.05, 0.76] },
+    truck: { L: 5.5, W: 2.0, g: 0.45, r: 0.42, ax: [1.85, -1.75],
+      belt: [[-2.75, 1.04], [-2.6, 1.24], [-0.6, 1.26], [1.2, 1.24], [2.0, 1.2], [2.5, 1.08], [2.75, 0.82]],
+      roof: [[-0.44, 1.26], [-0.36, 1.76], [0.2, 1.85], [0.75, 1.83], [1.32, 1.24]], paint: [[-0.34, 0.7]], glass: [-0.3, 1.2], bed: [-2.58, -0.5] },
+    van: { L: 5.0, W: 1.98, g: 0.36, r: 0.37, ax: [1.62, -1.5],
+      belt: [[-2.5, 0.96], [-2.4, 1.18], [-1.0, 1.2], [1.6, 1.15], [2.2, 1.02], [2.5, 0.74]],
+      roof: [[-2.46, 1.19], [-2.3, 1.8], [-1.0, 1.9], [0.9, 1.88], [1.78, 1.15]], paint: [[-2.22, 0.85]], glass: [-2.15, 1.62] },
+  };
+  function bodySpec(shape) {
+    const body = (shape && shape.body) || "coupe", layout = (shape && shape.layout) || "front";
+    const open = body === "convertible";
+    const base = BODIES[body === "coupe" || open ? "coupe_" + (layout === "rear" || layout === "mid" ? layout : "front") : body] || BODIES.coupe_front;
+    if (!open) return base;
+    /* open top: keep the windscreen, drop the roof, show the cabin */
+    const cowl = base.roof[base.roof.length - 1], top = Math.max(...base.roof.map((p) => p[1]));
+    return { ...base, roof: [[cowl[0] - 0.6, top - 0.06], cowl], paint: [], glass: [cowl[0] - 0.6, cowl[0]], cabin: [cowl[0] - base.tub, cowl[0] - 0.14] };
+  }
+  /* a smooth curve through points that never overshoots them */
+  const curve = (pts) => {
+    const n = pts.length, d = [], m = new Array(n);
+    for (let i = 0; i < n - 1; i++) d.push((pts[i + 1][1] - pts[i][1]) / (pts[i + 1][0] - pts[i][0]));
+    m[0] = d[0]; m[n - 1] = d[n - 2];
+    for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (2 * d[i - 1] * d[i]) / (d[i - 1] + d[i]);
+    return (x) => {
+      if (x <= pts[0][0]) return pts[0][1];
+      if (x >= pts[n - 1][0]) return pts[n - 1][1];
+      let i = 0; while (x > pts[i + 1][0]) i++;
+      const h = pts[i + 1][0] - pts[i][0], t = (x - pts[i][0]) / h, t2 = t * t, t3 = t2 * t;
+      return (2 * t3 - 3 * t2 + 1) * pts[i][1] + (t3 - 2 * t2 + t) * h * m[i] + (-2 * t3 + 3 * t2) * pts[i + 1][1] + (t3 - t2) * h * m[i + 1];
+    };
+  };
+  /* skin a row of cross-sections; matOf picks the material for each panel */
+  const loft = (rings, closed, matOf, nMat) => {
+    const K = rings[0].length, pos = [];
+    rings.forEach((ring) => ring.forEach((p) => pos.push(p[0], p[1], p[2])));
+    const buckets = Array.from({ length: nMat }, () => []);
+    for (let i = 0; i < rings.length - 1; i++) for (let j = 0; j < (closed ? K : K - 1); j++) {
+      const a = i * K + j, b = i * K + ((j + 1) % K), c = (i + 1) * K + j, e = (i + 1) * K + ((j + 1) % K);
+      buckets[matOf((rings[i][0][0] + rings[i + 1][0][0]) / 2, j)].push(a, c, b, b, c, e);
+    }
+    const geo = new THREE.BufferGeometry(); geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    const index = []; let start = 0;
+    buckets.forEach((bucket, m) => { geo.addGroup(start, bucket.length, m); start += bucket.length; bucket.forEach((v) => index.push(v)); });
+    geo.setIndex(index); geo.computeVertexNormals(); return geo;
+  };
+  /* a simple car of the right body type, in studio paint */
+  function buildShape(paintHex, shape) {
+    const spec = bodySpec(shape), { L, W, r } = spec, hl = L / 2, crown = 0.035;
+    const g = new THREE.Group();
+    const belt = curve(spec.belt), roof = curve(spec.roof);
+    const bottom = (x) => spec.g + 0.17 * Math.pow(Math.abs(x) / hl, 6);
+    const hw = (x) => { const t = Math.min(Math.abs(x) / hl, 1); return Math.max(0.012, (W / 2) * (1 - (x > 0 ? 0.17 : 0.12) * Math.pow(t, 2.4)) * Math.sqrt(Math.max(0, 1 - Math.pow(t, 20)))); };
+    const endX = (z, dir) => { let lo = hl * 0.7, hi = hl; for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (hw(dir * mid) > z) lo = mid; else hi = mid; } return dir * lo; };
+    const paintMat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(paintHex), metalness: 0.3, roughness: 0.4, clearcoat: 1, clearcoatRoughness: 0.06, side: THREE.DoubleSide });
+    const glassMat = new THREE.MeshPhysicalMaterial({ color: 0x0a0f16, metalness: 0.2, roughness: 0.05, side: THREE.DoubleSide, transparent: true, opacity: 0.92 });
+    const darkMat = new THREE.MeshBasicMaterial({ color: 0x050608, side: THREE.DoubleSide });
+    const N = 64, bodyRings = [];
+    for (let i = 0; i < N; i++) {
+      const x = hl * Math.sin((-1 + (2 * i) / (N - 1)) * Math.PI / 2);
+      const w = hw(x), yb = bottom(x), yt = Math.max(belt(x), yb + 0.05), h = yt - yb;
+      const half = [[0, yb], [w * 0.72, yb], [w * 0.95, yb + Math.min(0.07, h * 0.2)], [w, yb + h * 0.32], [w, yb + h * 0.62], [w * 0.975, yb + h * 0.86], [w * 0.9, yb + h * 0.975], [w * 0.6, yt + crown * 0.6], [0, yt + crown]];
+      const ring = half.map((p) => [x, p[1], p[0]]);
+      for (let k = 7; k >= 1; k--) ring.push([x, half[k][1], -half[k][0]]);
+      bodyRings.push(ring);
+    }
+    g.add(new THREE.Mesh(loft(bodyRings, true, () => 0, 1), [paintMat]));
+    const xs = new Set(), r0 = spec.roof[0][0], r1 = spec.roof[spec.roof.length - 1][0];
+    for (let i = 0; i <= 44; i++) xs.add(+(r0 + ((r1 - r0) * i) / 44).toFixed(4));
+    spec.roof.forEach((p) => xs.add(p[0]));
+    const topRings = [...xs].sort((a, b) => a - b).map((x) => {
+      const w = hw(x), yt = belt(x), yr = Math.max(roof(x), yt), gh = yr - yt, k = Math.min(1, gh / 0.3), edge = w * (0.9 - 0.2 * k);
+      const half = [[w * 0.9, yt], [w * (0.9 - 0.09 * k), yt + gh * 0.55], [edge, yt + gh * 0.94], [edge * 0.55, yr + 0.012 * k], [0, yr + 0.02 * k]];
+      const ring = half.map((p) => [x, p[1], p[0]]);
+      for (let q = 3; q >= 0; q--) ring.push([x, half[q][1], -half[q][0]]);
+      return ring;
+    });
+    const painted = (x) => spec.paint.some((q) => x >= q[0] && x <= q[1]);
+    const topMat = (x, j) => (j < 2 || j > 5 ? (x >= spec.glass[0] && x <= spec.glass[1] ? 1 : 0) : (painted(x) ? 0 : 1));
+    g.add(new THREE.Mesh(loft(topRings, false, topMat, 2), [paintMat, glassMat]));
+    const inset = (x0, x1, share) => {
+      const pos = [], idx = [], seg = 14;
+      for (let i = 0; i <= seg; i++) { const x = x0 + ((x1 - x0) * i) / seg, y = belt(x) + crown + 0.012, z = hw(x) * share; pos.push(x, y, z, x, y, -z); if (i < seg) { const a = i * 2; idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); } }
+      const geo = new THREE.BufferGeometry(); geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3)); geo.setIndex(idx);
+      g.add(new THREE.Mesh(geo, darkMat));
+    };
+    if (spec.cabin) {
+      inset(spec.cabin[0], spec.cabin[1], 0.68);
+      const seatMat = new THREE.MeshStandardMaterial({ color: 0x1c2026, roughness: 0.7 }), sx = spec.cabin[1] - 0.98;
+      for (const s of [1, -1]) { const seat = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.3, 0.42), seatMat); seat.position.set(sx, belt(sx) + 0.05, s * hw(sx) * 0.36); seat.rotation.z = 0.18; g.add(seat); }
+    }
+    if (spec.bed) inset(spec.bed[0], spec.bed[1], 0.82);
+    const tireMat = new THREE.MeshStandardMaterial({ color: 0x0a0b0d, roughness: 0.85 });
+    const faceMat = new THREE.MeshBasicMaterial({ map: wheelTex, side: THREE.DoubleSide });
+    for (const x of spec.ax) for (const s of [1, -1]) {
+      const w = hw(x);
+      const well = new THREE.Mesh(new THREE.CircleGeometry(r * 1.2, 40, 0, Math.PI), darkMat); well.position.set(x, r, s * (w + 0.004)); g.add(well);
+      const tire = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.25, 40), tireMat); tire.rotation.x = Math.PI / 2; tire.position.set(x, r, s * (w - 0.1)); g.add(tire);
+      const face = new THREE.Mesh(new THREE.CircleGeometry(r * 0.99, 40), faceMat); face.position.set(x, r, s * (w + 0.027)); g.add(face);
+    }
+    const lampY = (x) => bottom(x) + (belt(x) - bottom(x)) * 0.62;
+    for (const s of [1, -1]) {
+      const z = (W / 2) * 0.56, x = endX(z + 0.05, 1);
+      const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.075, 16, 12), new THREE.MeshBasicMaterial({ color: 0xf4f9ff, toneMapped: false })); lamp.scale.set(0.8, 0.55, 1.9); lamp.position.set(x, lampY(x), s * z); g.add(lamp);
+    }
+    const tail = [];
+    for (let i = -8; i <= 8; i++) { const z = (i / 8) * (W / 2) * 0.8, x = endX(Math.abs(z) + 0.03, -1) - 0.012; tail.push(new THREE.Vector3(x, lampY(x), z)); }
+    g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(tail), 40, 0.02, 6), new THREE.MeshBasicMaterial({ color: 0xff3d4f, toneMapped: false })));
+    const top = Math.max(...spec.roof.map((p) => p[1])), k = Math.min(5.8 / L, 1.9 / top);
+    g.add(shadow(L, W)); g.scale.setScalar(k);
+    return g;
+  }
+
+  /* a detailed model that ships with the app, repainted for this car */
+  const showCredit = (c) => {
+    if (!c) { credit.hidden = true; credit.innerHTML = ""; return; }
+    const link = (text, url) => (safeUrl(url) ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text));
+    credit.innerHTML = `3D model: ${link("“" + c.title + "”", c.source)} by ${esc(c.author)}<span class="long">, ${esc(c.owner)}</span>, ${link(c.license, c.license_url)}, ${esc(c.changes)}`;
+    credit.hidden = false;
+  };
+  function dressModel(model, d) {
+    const g = new THREE.Group();
+    const paint = new THREE.Color(d.paint || d.color), cabin = new THREE.Color(d.cabin || "#24272d");
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => {
+        if (m.name === "Paint") { m.color.copy(paint); m.metalness = 0.3; m.roughness = 0.4; m.clearcoat = 1; m.clearcoatRoughness = 0.06; }
+        else if (m.name === "Interior") m.color.copy(cabin);
+      });
+    });
+    model.rotation.y = Math.PI / 2; model.updateMatrixWorld(true);          /* glTF cars face +z; the stage wants the nose toward +x */
+    const box = new THREE.Box3().setFromObject(model), size = box.getSize(new THREE.Vector3()), mid = box.getCenter(new THREE.Vector3());
+    const k = Math.min(5.8 / size.x, 1.9 / size.y);
+    model.scale.setScalar(k); model.position.set(-mid.x * k, -box.min.y * k, -mid.z * k);
+    g.add(model); g.add(shadow(size.x * k, size.z * k));
+    return g;
+  }
+  const modelFiles = new Map();
+  function loadModel(d, key) {
+    const m = d.model;
+    (async () => {
+      if (!modelFiles.has(m.url)) modelFiles.set(m.url, fetch(new URL(m.url, document.baseURI).href).then((r) => { if (!r.ok) throw new Error("model file " + r.status); return r.arrayBuffer(); }));
+      const file = await modelFiles.get(m.url);
+      const gltf = await new Promise((done, fail) => new addons.GLTFLoader().parse(file.slice(0), "", done, fail));
+      if (carKey !== key || !alive) { dispose(gltf.scene); return; }
+      place(dressModel(gltf.scene, d), false); showCredit(m.credit); root.dataset.car = "model";
+    })().catch((e) => { modelFiles.delete(m.url); console.warn("Deal Sheet: the detailed 3D model is unavailable, keeping the simple shape.", e); });
+  }
+  /* put a car on the turntable, with its mirror image under the floor */
+  function place(obj, enter) {
+    for (const holder of [upright, mirrored]) while (holder.children.length) { const old = holder.children.pop(); if (holder === upright) dispose(old); }
+    upright.add(obj);
+    const twin = obj.clone(true); twin.traverse((o) => { if (o.userData.floorOnly) o.visible = false; }); mirrored.add(twin);
+    if (enter && !calm) slideFrom = performance.now();
+  }
+  /* a model file the person chose for this car: shown as it is, with their credit */
+  function loadOwn(rec, key) {
+    (async () => {
+      const gltf = await new Promise((done, fail) => new addons.GLTFLoader().parse(rec.file.slice(0), "", done, fail));
+      if (carKey !== key || !alive) { dispose(gltf.scene); return; }
+      const g = new THREE.Group(), model = gltf.scene;
+      model.rotation.y = Math.PI / 2 + (rec.turn || 0) * Math.PI / 2; model.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(model), size = box.getSize(new THREE.Vector3()), mid = box.getCenter(new THREE.Vector3());
+      const k = Math.min(5.8 / Math.max(size.x, 0.01), 1.9 / Math.max(size.y, 0.01), 5.8 / Math.max(size.z, 0.01) * 1.6);
+      model.scale.setScalar(k); model.position.set(-mid.x * k, -box.min.y * k, -mid.z * k);
+      g.add(model); g.add(shadow(size.x * k, size.z * k));
+      place(g, false); root.dataset.car = "own";
+      credit.textContent = rec.credit ? "3D model: " + rec.credit : "3D model: your own file. Add its credit under 3D model."; credit.hidden = false;
+    })().catch((e) => { console.warn("Deal Sheet: that 3D file could not be opened.", e); if (S.toastOut) S.toastOut("That 3D file could not be opened. If it is Draco-compressed, download the plain glTF Binary (.glb) version instead."); });
+  }
+  function setCar(d, force) {
+    const key = d.hasCar ? JSON.stringify([d.activeId, d.shape, d.paint, d.cabin, d.model ? d.model.url : ""]) : "none";
+    if (key === carKey && !force) return;
+    const first = carKey === ""; carKey = key; showCredit(null);
+    if (!d.hasCar) { for (const holder of [upright, mirrored]) while (holder.children.length) { const old = holder.children.pop(); if (holder === upright) dispose(old); } root.dataset.car = "none"; return; }
+    place(buildShape(d.paint || "#8a9099", d.shape), true); root.dataset.car = "shape";
+    if (!first) angle = -0.62;
+    if (!addons) return;
+    store.get("model:" + (d.activeId || "")).catch(() => null).then((rec) => {
+      if (carKey !== key) return;
+      if (rec && rec.file) loadOwn(rec, key); else if (d.model && d.model.url) loadModel(d, key);
+    });
+  }
+
+  /* the camera frames the car inside its part of the screen, wherever the layout puts it */
+  function layout() {
+    const R = root.getBoundingClientRect(), Z = zone.getBoundingClientRect();
+    const W = Math.max(R.width, 10), H = Math.max(R.height, 10), zw = Math.max(Z.width, 10), zh = Math.max(Z.height, 10);
+    renderer.setSize(W, H, false);
+    const perUnit = Math.min(zw / 6.7, zh / 2.75);                      /* pixels one metre of car should cover */
+    const D = H / (2 * Math.tan((camera.fov * Math.PI) / 360) * perUnit);
+    camera.aspect = W / H; camera.position.set(0, D * 0.17 + 0.5, D); camera.lookAt(0, 0.72, 0);
+    camera.setViewOffset(W, H, W / 2 - (Z.left - R.left + zw / 2), H / 2 - (Z.top - R.top + zh * 0.5), W, H);
+    camera.updateProjectionMatrix();
+  }
+
+  let down = null;
+  canvas.addEventListener("pointerdown", (e) => { down = { x: e.clientX, moved: 0 }; canvas.classList.add("drag"); try { canvas.setPointerCapture(e.pointerId); } catch (_) {} });
+  canvas.addEventListener("pointermove", (e) => { if (!down) return; const dx = e.clientX - down.x; down.x = e.clientX; down.moved += Math.abs(dx); vel = dx * 0.0065; angle += vel; held = performance.now(); });
+  const lift = () => { down = null; canvas.classList.remove("drag"); };
+  canvas.addEventListener("pointerup", lift); canvas.addEventListener("pointercancel", lift);
+
+  const ro = new ResizeObserver(layout); ro.observe(root); ro.observe(zone);
+  let visible = true; const io = new IntersectionObserver((en) => { visible = en[0].isIntersecting; }); io.observe(root);
+  let last = performance.now(), t = 0;
+  function frame(now) {
+    if (!alive) return;
+    if (!root.isConnected) { alive = false; ro.disconnect(); io.disconnect(); renderer.dispose(); if (root.__st) root.__st.scene = null; return; }
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.05); last = now;
+    if (!visible || document.hidden) return;
+    t += dt;
+    if (!down) { angle += vel; vel *= 0.93; if (!calm && now - held > 3500 && !busy) angle += dt * 0.09; }
+    const slide = Math.max(0, 1 - (now - slideFrom) / 1250), ease = slide * slide * slide;
+    rig.rotation.y = angle - ease * 0.9; rig.position.x = ease * 7.5;
+    rig.visible = !busy;
+    rimMat.opacity = busy ? 0.3 + Math.sin(t * 3.2) * 0.22 : 0.22;
+    renderer.render(scene, camera);
+  }
+  layout(); requestAnimationFrame(frame);
+  return { setData: (d) => setCar(d, false), reload: (d) => setCar(d, true), setBusy(v) { busy = !!v; }, layout };
+}
+"""

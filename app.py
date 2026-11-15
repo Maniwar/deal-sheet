@@ -24,6 +24,7 @@ import llm
 import previews
 import sheet
 import showcase
+import stage
 import styles
 
 
@@ -34,7 +35,7 @@ def refresh_modules() -> None:
     new app.py, but modules it imported earlier stay as they were, so new code can meet an
     old showcase.py and fail. Any module whose file is newer than its loaded copy is reloaded.
     """
-    for module in (calc, previews, styles, llm, sheet, showcase):     # calc first: the others import from it
+    for module in (calc, previews, styles, llm, sheet, showcase, stage):     # calc first: the others import from it
         try:
             stamp = os.path.getmtime(module.__file__)
         except (OSError, TypeError):
@@ -50,10 +51,10 @@ CSS = styles.CSS
 APP_DIR = Path(__file__).parent
 CAR_FIELDS = ["year", "make", "model", "trim", "body", "transmission", "drivetrain", "miles", "price",
               "vin", "exterior", "interior", "seller", "seller_type", "location", "url", "notes",
-              "shape", "layout"]
-NUMBER_FIELDS = {"year", "miles", "price"}
+              "shape", "layout", "options", "msrp"]
+NUMBER_FIELDS = {"year", "miles", "price", "msrp"}
 SELLER_TYPES = ["", "dealer", "private", "auction"]
-COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img"]
+COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img", "options", "vin"]
 DOT = " \u00b7 "
 QR_SIZES = {"Large (1.1 in)": 82, "Extra large (1.5 in)": 108}
 EMPTY_DEAL = {"car": {}, "comps": [], "offer": {}, "summary": "", "message": "", "sample": False}
@@ -62,10 +63,10 @@ SHAPE_NAMES = {"": "Auto", "coupe": "Coupe", "convertible": "Convertible", "seda
                "wagon": "Wagon", "suv": "SUV", "truck": "Pickup", "van": "Van"}
 LAYOUT_NAMES = {"": "Auto", "front": "Front", "mid": "Mid", "rear": "Rear"}
 
-st.set_page_config(page_title="Deal Sheet", page_icon=":material/receipt_long:", layout="centered",
+st.set_page_config(page_title="Deal Sheet", page_icon=":material/receipt_long:", layout="wide",
                    initial_sidebar_state="collapsed")
 st.html(f"<style>{CSS}</style>")
-SHOWROOM = st.components.v2.component("deal_showroom", html=showcase.HTML, css=showcase.CSS, js=showcase.JS)
+STAGE = st.components.v2.component("deal_stage", html=stage.HTML, css=stage.CSS, js=stage.JS)
 
 
 # ---------------------------------------------------------------- helpers
@@ -156,6 +157,8 @@ def as_bytes(value) -> bytes | None:
     if isinstance(value, (bytes, bytearray)):
         return bytes(value)
     if isinstance(value, str) and value:
+        if value.startswith("data:") and "," in value:
+            value = value.split(",", 1)[1]
         try:
             return base64.b64decode(value)
         except (ValueError, TypeError):
@@ -207,14 +210,23 @@ def run_garage_actions(actions: list[dict]) -> None:
         if from_file and same_car(deal):              # already here: show it instead of adding a copy
             ss["active"] = same_car(deal)
             return
-        car_id = uuid.uuid4().hex[:8]
+        kept_id = str(deal.pop("_id", "") or "")           # a car brought back from the browser keeps its id
+        car_id = kept_id if re.fullmatch(r"[0-9a-f]{6,16}", kept_id) and kept_id not in garage else uuid.uuid4().hex[:8]
         garage[car_id] = deal
         order.append(car_id)
         ss["active"] = car_id
+        if not deal.get("sample"):
+            ss["fresh"] = False                       # there is now something worth keeping on the device
 
+    opened: list[str] = []
     for action in actions:
         if "add" in action:
             add(action["add"], bool(action.get("from_file")))
+            opened.append(ss["active"])
+        elif "show_opened" in action:                 # after restoring: go back to the car that was on screen
+            index = calc.to_int(action["show_opened"]) or 0
+            if opened:
+                ss["active"] = opened[min(max(index, 0), len(opened) - 1)]
         elif "sample" in action:
             existing = [c for c in order if garage[c].get("sample")]
             if existing:
@@ -233,32 +245,39 @@ def run_garage_actions(actions: list[dict]) -> None:
     ss["upload_ver"] += 1
 
 
-def garage_label(car_id: str, live_car: dict | None = None) -> str:
-    ss = st.session_state
-    deal = ss["garage"].get(car_id) or {}
-    car = live_car if live_car is not None else (deal.get("car") or {})
-    title = calc.car_title(car) if (car.get("make") or car.get("model")) else "New car"
-    return f"{title} (sample)" if deal.get("sample") else title
-
-
 # ---------------------------------------------------------------- one step: link or screenshot to a full deal
 
-def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: str,
-               wanted: str = "") -> tuple[dict | None, list[str]]:
+def tidy_car(found: dict) -> dict:
+    """What Claude read from a listing, as the app's car fields."""
+    car = {}
+    for field in CAR_FIELDS:
+        value = found.get(field)
+        if field in NUMBER_FIELDS:
+            car[field] = calc.to_int(value)
+        elif isinstance(value, (list, tuple)):
+            car[field] = "\n".join(str(item).strip() for item in value if str(item).strip())
+        else:
+            car[field] = str(value or "").strip()
+    return car
+
+
+def build_deal(client, model: str, link: str, shot: bytes | None, max_searches: int, buyer: str,
+               wanted: str = "", say=None) -> tuple[dict | None, list[str]]:
     """Read the listing, research comps, suggest an offer and draft the message. Returns (deal, notes).
 
     `wanted` is the buyer's own description of a car. With no link and no screenshot it is all there
     is: the result is a price guide for that car, with no asking price and no message.
+    `say(step)` reports progress (1 reading, 2 searching, 3 pricing, 4 writing).
     """
+    say = say or (lambda step: None)
     notes: list[str] = []
     no_listing = bool(wanted) and not link and shot is None
     page = {"status": "none", "text": "", "image": None}
+    say(1)
     if link:
-        st.write("Reading the listing page")
         page = previews.read_page(link)
-    st.write("Pulling out the car's details")
     try:
-        shots = images_for_api(shot.getvalue(), shot.type or "image/jpeg") if shot is not None else []
+        shots = images_for_api(shot, "image/jpeg") if shot else []
     except llm.LLMError as exc:
         return None, [str(exc)]
     text = page["text"]
@@ -269,8 +288,7 @@ def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: st
     except llm.LLMError as exc:
         return None, [str(exc)]
     box = found.pop("photo_box", None)
-    car = {field: (calc.to_int(found.get(field)) if field in NUMBER_FIELDS else str(found.get(field) or "").strip())
-           for field in CAR_FIELDS}
+    car = tidy_car(found)
     if link:
         car["url"] = link
     unread = bool(link) and page["status"] != "ok"
@@ -298,7 +316,7 @@ def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: st
     elif not car["price"]:
         notes.append("No asking price was found. Enter it in the Car tab.")
 
-    st.write("Researching comps on the web. This takes a minute or two.")
+    say(2)
     try:
         result = llm.research_comps(client, model, car, max_searches=max_searches)
     except llm.LLMError as exc:
@@ -309,12 +327,12 @@ def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: st
         notes.append("The search found no usable comps. Add some in the Comps tab.")
         return deal, notes
     try:
-        st.write("Working out an offer")
+        say(3)
         plan = llm.suggest_offer(client, model, car, deal["comps"])
         plan["shown"] = plan.get("open")
         deal["offer"] = plan
         if plan.get("open") and not no_listing:    # no seller to write to yet
-            st.write("Drafting the offer message")
+            say(4)
             deal["message"] = llm.draft_message(client, model, car, deal["comps"], plan["open"], buyer, "text")
     except llm.LLMError as exc:
         notes.append(f"The offer step stopped: {exc}")
@@ -353,9 +371,11 @@ def init_state() -> None:
     ss["key_ver"] = 0
     ss["buyer"] = secret("BUYER_NAME")
     ss["model_label"] = next(iter(llm.MODELS))
-    ss["intake_ver"] = 0
-    ss["intake_open"] = False
     ss["notices"] = []
+    ss["build_seq"] = 0          # goes up after every build, so the screen knows the answer has arrived
+    ss["fresh"] = True           # a new session: the browser may hold a garage to bring back
+    ss["prefs_asked"] = False    # ... and settings
+    ss["key_forgotten"] = False
     sample = load_sample()
     ss["active"] = uuid.uuid4().hex[:8]       # the garage starts with the sample car
     ss["garage"] = {ss["active"]: sample}
@@ -375,6 +395,8 @@ def set_car(car: dict, replace: bool) -> None:
             value = value if value in showcase.BODY_SHAPES else ""
         elif field == "layout":
             value = value if value in showcase.LAYOUTS else ""
+        elif isinstance(value, (list, tuple)):
+            value = "\n".join(str(item).strip() for item in value if str(item).strip())
         ss[f"car_{field}"] = fmt_field(field, value)
 
 
@@ -427,6 +449,14 @@ def apply_pending() -> None:
         ss["is_sample"] = False
     if "offer" in payload:
         set_offer(payload["offer"])
+    if "offer_numbers" in payload:
+        numbers = payload["offer_numbers"] or {}
+        was_open = calc.to_int(ss.get("offer_open"))
+        if calc.to_int(ss.get("offer_shown")) in (None, was_open):      # the sheet shows the opening offer unless changed
+            ss["offer_shown"] = fmt_money_input(numbers.get("open"))
+        ss["offer_open"] = fmt_money_input(numbers.get("open"))
+        ss["offer_target"] = fmt_money_input(numbers.get("target"))
+        ss["offer_walk"] = fmt_money_input(numbers.get("walk"))
     if "message" in payload:
         ss["message_text"] = payload["message"]
 
@@ -457,6 +487,42 @@ def current_offer() -> dict:
     }
 
 
+# The settings the browser keeps between visits, with the limits each one must stay inside.
+PREF_NUMBERS = {"tax_rate": (float, 0.0, 15.0), "fees": (float, 0.0, 1e7), "apr": (float, 0.0, 30.0),
+                "down": (float, 0.0, 1e8), "months": (int, 0, 120), "max_searches": (int, 3, 15)}
+PREF_SWITCHES = ("want_photos", "detailed_car")
+
+
+def current_prefs() -> dict:
+    ss = st.session_state
+    prefs = {key: kind(ss[key]) for key, (kind, _, _) in PREF_NUMBERS.items()}
+    prefs.update({key: bool(ss[key]) for key in PREF_SWITCHES})
+    prefs.update({"buyer": str(ss["buyer"] or "").strip()[:60], "model_label": ss["model_label"],
+                  "qr_label": ss.get("qr_label")})
+    return prefs
+
+
+def apply_prefs(saved: dict) -> None:
+    """Bring back the settings this browser saved. Anything missing or out of range keeps its default."""
+    ss = st.session_state
+    for key, (kind, low, high) in PREF_NUMBERS.items():
+        try:
+            value = kind(float(saved[key]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if low <= value <= high:
+            ss[key] = value
+    for key in PREF_SWITCHES:
+        if isinstance(saved.get(key), bool):
+            ss[key] = saved[key]
+    if isinstance(saved.get("buyer"), str) and saved["buyer"].strip():
+        ss["buyer"] = saved["buyer"].strip()[:60]
+    if saved.get("model_label") in llm.MODELS:
+        ss["model_label"] = saved["model_label"]
+    if saved.get("qr_label") in QR_SIZES:
+        ss["qr_label"] = saved["qr_label"]
+
+
 def current_settings() -> dict:
     ss = st.session_state
     return {"tax_rate": float(ss["tax_rate"]), "fees": float(ss["fees"]), "apr": float(ss["apr"]),
@@ -469,7 +535,7 @@ def comps_frame(comps: list[dict]) -> pd.DataFrame:
     frame["use"] = frame["use"].astype("boolean").fillna(True).astype(bool)
     for column in ("price", "miles"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Int64")
-    for column in ("status", "title", "date", "source", "url", "note", "img"):
+    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin"):
         frame[column] = frame[column].astype("string").fillna("")
     return frame
 
@@ -540,7 +606,86 @@ if password and not st.session_state.get("_authed"):
         st.error("That password is not right.")
     st.stop()
 
+def stage_event(name: str) -> None:
+    """The stage asked for something. Runs before the script, so the request is waiting when it starts."""
+    ss = st.session_state
+    value = ss["stage"][name]
+    if value is None:
+        return
+    if name == "key":
+        ss["_key_try"] = value
+    elif name == "build":
+        ss["_build_request"] = value
+    elif name == "restore":
+        ss["_restore"] = value
+    elif name == "prefs":
+        ss["_prefs_restore"] = value
+    elif name == "switch":
+        queue({"switch": str(value)})
+    elif name == "offer":
+        pending = ss.get("_pending") or {}
+        pending["offer_numbers"] = value
+        ss["_pending"] = pending
+
+
+def handle_stage_requests(progress_slot) -> None:
+    """Connect a key, bring back saved cars, or build a deal. A request stays queued until it is done."""
+    ss = st.session_state
+    request = ss.pop("_prefs_restore", None)
+    if request is not None:                      # runs before the settings widgets are drawn
+        apply_prefs(request if isinstance(request, dict) else {})
+        ss["prefs_asked"] = True
+    request = ss.get("_key_try")
+    if request:
+        value = str(request.get("value") or "").strip()
+        usable, note = llm.check_key(value)
+        if usable:
+            ss["api_key"], ss["key_forgotten"] = value, False
+            if note:
+                ss["notices"] = [note]
+        else:
+            ss["key_error"] = note
+        ss.pop("_key_try", None)
+    request = ss.get("_restore")
+    if request:
+        cars = [c for c in (request.get("cars") or []) if isinstance(c, dict) and isinstance(c.get("car"), dict)]
+        for saved_deal in cars[:40]:
+            queue({"add": {**EMPTY_DEAL, **saved_deal, "sample": False}, "from_file": True})
+        if cars:
+            queue({"show_opened": request.get("active") or 0})
+        ss["fresh"] = False
+        ss.pop("_restore", None)
+    request = ss.get("_build_request")
+    if request:
+        if not ss["api_key"]:
+            ss["stage_error"] = "Connect your Anthropic API key first."
+        else:
+            text = str(request.get("text") or "").strip()
+            found_link = re.search(r"(?:https?://|www\.)\S+", text, re.I)
+            link = found_link.group(0).rstrip(".,)") if found_link else ""
+            wanted = (text[:found_link.start()] + " " + text[found_link.end():]).strip() if found_link else text
+            if link and not re.match(r"https?://", link, re.I):
+                link = "https://" + link
+            shot = as_bytes(request.get("image"))
+
+            def say(step: int) -> None:
+                progress_slot.html(f'<i id="ds-progress" data-step="{int(step)}" style="display:none"></i>')
+
+            new_deal, notes = build_deal(llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]], link, shot,
+                                         int(ss["max_searches"]), str(ss["buyer"]).strip(), wanted=wanted, say=say)
+            progress_slot.empty()
+            if new_deal:
+                queue({"add": new_deal})
+                ss["notices"] = notes
+            else:
+                ss["stage_error"] = " ".join(notes)
+        ss["build_seq"] += 1
+        ss.pop("_build_request", None)
+
+
 init_state()
+progress_slot = st.empty()
+handle_stage_requests(progress_slot)
 apply_pending()
 ss = st.session_state
 
@@ -548,12 +693,13 @@ ss = st.session_state
 with st.sidebar:
     st.markdown("### Claude")
     if ss["api_key"]:
-        st.caption(f"Connected with your key ending in {ss['api_key'][-4:]}. It is held in memory for this session only.")
+        st.caption(f"Connected with your key ending in {ss['api_key'][-4:]}. If you ticked Remember, it is also "
+                   "saved in this browser so you do not have to paste it again.")
         if st.button("Forget my key", width="stretch"):
-            ss["api_key"] = ""
+            ss["api_key"], ss["key_forgotten"] = "", True      # also removes the copy saved in the browser
             st.rerun()
     else:
-        st.caption("Not connected. Paste your Anthropic API key at the top of the page.")
+        st.caption("Not connected. Paste your Anthropic API key in the bar at the bottom of the main screen.")
     st.selectbox("Claude model", list(llm.MODELS), key="model_label")
     st.slider("Web searches per research run", 3, 15, key="max_searches",
               help="Each search is billed by the API. More searches find more comps.")
@@ -574,7 +720,8 @@ with st.sidebar:
                    "for example on a slow phone or connection.")
 
     st.markdown("### Garage file")
-    st.caption("Nothing is kept between visits. Save the garage to keep your cars, and open the file to bring them back.")
+    st.caption("Your cars are saved in this browser and come back when you reopen the app. Save the garage to a "
+               "file to move them to another device or keep a backup.")
     deal_file_box = st.container()
     uploaded_deal = st.file_uploader("Open a saved garage or car", type=["json"], key=f"deal_upload_{ss['upload_ver']}")
     if uploaded_deal is not None:
@@ -599,98 +746,17 @@ api_key = ss["api_key"]
 client = llm.get_client(api_key) if api_key else None
 model = llm.MODELS[ss["model_label"]]
 settings = current_settings()
-needs_key = "Connect your Anthropic API key at the top of the page to use Claude."
+needs_key = "Connect your Anthropic API key first, in the bar on the main screen."
 
-garage_box = st.container(key="garage")
+stage_box = st.container(key="stagebox")           # filled at the end, when the car, comps and offer are known
+details_box = st.container(key="details")
+details_box.markdown("## Edit and print")
+details_box.caption("Everything on the main screen can be corrected here: the car, the comps and the offer. "
+                    "The Sheet tab makes the PDF with a QR code for every link.")
+hero_box = details_box.container()
 
-# ----- bring your own key -----
-if not api_key:
-    with st.container(key="byok"):
-        info_col, key_col = st.columns([1.35, 1], gap="large", vertical_alignment="center")
-        with info_col:
-            put('<div class="ds-byok"><div class="ds-label">Bring your own key</div>'
-                '<div class="ds-byok-t">Connect Claude to read listings, research comps and write offers</div>'
-                '<div class="ds-byok-s">Paste your Anthropic API key. It is held in memory for this session only, '
-                'is sent only to Anthropic, and is never saved to disk, to a deal file or to the PDF. '
-                'Usage is billed to your key. Everything else on this page works without one.</div></div>')
-        with key_col:
-            with st.form("connect_key", border=False):
-                pasted_key = st.text_input("Anthropic API key", type="password", placeholder="sk-ant-...",
-                                           key=f"key_input_{ss['key_ver']}", autocomplete="off",
-                                           label_visibility="collapsed")
-                connect = st.form_submit_button("Connect Claude", type="primary", width="stretch")
-            st.link_button("Get an API key in the Claude Console", "https://platform.claude.com/settings/keys",
-                           icon=":material/key:", width="stretch")
-            if connect:
-                with st.spinner("Checking the key"):
-                    usable, key_message = llm.check_key(pasted_key)
-                if usable:
-                    ss["api_key"] = pasted_key.strip()
-                    ss["key_ver"] += 1          # clears the input box
-                    if key_message:
-                        ss["key_notice"] = key_message
-                    st.rerun()
-                else:
-                    st.error(key_message)
-elif ss.get("key_notice"):
-    st.warning(ss.pop("key_notice"))
-for notice in ss.pop("notices", []) or []:
-    st.info(notice)
-
-# ----- add a car: one link or one screenshot builds the whole deal -----
-has_car = bool(ss["car_make"] or ss["car_model"])
-with st.container(key="intake"):
-    if has_car:
-        if st.button("Close" if ss["intake_open"] else "Add a car: a link, a screenshot, or just its name", width="stretch",
-                     icon=":material/close:" if ss["intake_open"] else ":material/add_circle:", key="intake_toggle"):
-            ss["intake_open"] = not ss["intake_open"]
-            st.rerun()
-    if ss["intake_open"] or not has_car:
-        put('<div class="ds-intake"><div class="ds-label">Add a car</div>'
-            '<div class="ds-intake-t">Paste a listing link, add a screenshot, or just name the car</div></div>')
-        link_col, shot_col = st.columns([1.25, 1], gap="medium")
-        with link_col:
-            intake_link = st.text_input("Listing link", key=f"intake_link_{ss['intake_ver']}",
-                                        placeholder="https://www.dealer.com/used-2020-porsche-911")
-        with shot_col:
-            intake_shot = st.file_uploader("Screenshot of the listing", type=IMAGE_TYPES,
-                                           key=f"intake_shot_{ss['intake_ver']}")
-        intake_wanted = st.text_input("No listing? Name the car you want priced", key=f"intake_wanted_{ss['intake_ver']}",
-                                      placeholder="2020 BMW M2 CS, manual, about 15,000 miles")
-        build_clicked = st.button("Build the deal sheet", type="primary", width="stretch", disabled=client is None,
-                                  help=None if client else needs_key)
-        st.caption("Claude reads the listing, finds comps, suggests an offer and drafts the message. With only a "
-                   "car's name, it finds what that car sells for. It takes about two minutes and runs on your key "
-                   f"(up to {int(ss['max_searches'])} web searches). Some sites do not let apps read their pages. "
-                   "For those, add a screenshot.")
-        if build_clicked:
-            link = intake_link.strip()
-            if link and not re.match(r"https?://", link, re.I):
-                link = "https://" + link
-            wanted = intake_wanted.strip()
-            if not link and intake_shot is None and not wanted:
-                st.warning("Paste a listing link, add a screenshot, or name the car first.")
-            else:
-                with st.status("Building the deal sheet", expanded=True) as progress:
-                    new_deal, build_notes = build_deal(client, model, link, intake_shot,
-                                                       int(ss["max_searches"]), settings["buyer"], wanted=wanted)
-                    progress.update(label="Deal sheet ready" if new_deal else "Could not build the deal sheet",
-                                    state="complete" if new_deal else "error", expanded=not new_deal)
-                if new_deal:
-                    queue({"add": new_deal})
-                    ss["notices"] = build_notes
-                    ss["intake_ver"] += 1             # clears the link and the screenshot
-                    ss["intake_open"] = False
-                else:
-                    for build_note in build_notes:
-                        st.error(build_note)
-
-hero_box = st.container()
-if ss["is_sample"]:
-    st.caption("The sample comes from the Nov 14, 2026 research on the green Carrera S in McKinney. "
-               "Change anything to see the sheet update, or add your own car above.")
-
-tab_car, tab_comps, tab_offer, tab_sheet = st.tabs(["Car", "Comps", "Offer", "Sheet"])
+with details_box:
+    tab_car, tab_comps, tab_offer, tab_sheet = st.tabs(["Car", "Comps", "Offer", "Sheet"])
 
 # ----- 1. the car -----
 with tab_car:
@@ -698,7 +764,7 @@ with tab_car:
     with read_col:
         st.markdown("#### Read a listing")
         st.caption("Updates this car only: paste the listing's text or link, add a screenshot, or both. "
-                   "Claude fills in the form. To add another car with comps and an offer, use Add a car at the top.")
+                   "Claude fills in the form. To add another car with comps and an offer, use the bar on the main screen.")
         st.text_area("Listing text", key="listing_text", height=150,
                      placeholder="Paste the listing text or link here")
         listing_shot = st.file_uploader("Listing screenshot", type=IMAGE_TYPES,
@@ -758,10 +824,14 @@ with tab_car:
                     format_func=lambda value: value.title() if value else "Not set")
         c.text_input("Location", key="car_location")
         st.text_input("Listing link", key="car_url", help="Becomes the QR code at the top of the sheet.")
+        a, b = st.columns([2.2, 1])
+        a.text_area("Options (one per line)", key="car_options", height=110,
+                    help="Factory options change the price. Copy them from the listing or the window sticker.")
+        b.text_input("Original sticker price", key="car_msrp", help="The MSRP with options, if you know it.")
         st.text_area("Notes", key="car_notes", height=80)
         a, b = st.columns(2)
         a.selectbox("3D body shape", list(SHAPE_NAMES), key="car_shape", format_func=SHAPE_NAMES.get,
-                    help="The shape of the 3D car in the showroom. Auto reads it from the Body field.")
+                    help="The shape of the 3D car on the main screen. Auto reads it from the Body field.")
         b.selectbox("Engine position", list(LAYOUT_NAMES), key="car_layout", format_func=LAYOUT_NAMES.get,
                     help="Sets the 3D car's proportions. Auto draws a front-engine car.")
 
@@ -777,7 +847,7 @@ with tab_comps:
             comps_frame(ss["comps_base"]),
             key=f"comps_editor_{ss['comps_ver']}",
             num_rows="dynamic", hide_index=True, width="stretch",
-            column_order=["use", "status", "price", "miles", "title", "date", "source", "url", "note"],
+            column_order=["use", "status", "price", "miles", "title", "date", "source", "url", "options", "note"],
             column_config={
                 "use": st.column_config.CheckboxColumn("Use", default=True, width="small"),
                 "status": st.column_config.SelectboxColumn("Status", options=list(calc.STATUSES), default="sold", required=True),
@@ -787,6 +857,8 @@ with tab_comps:
                 "date": st.column_config.TextColumn("Date"),
                 "source": st.column_config.TextColumn("Source"),
                 "url": st.column_config.TextColumn("Link", width="medium"),
+                "options": st.column_config.TextColumn("Options", width="medium"),
+                "vin": st.column_config.TextColumn("VIN", help="Filled in from the link when the link contains it."),
                 "note": st.column_config.TextColumn("Note", width="medium"),
             },
         )
@@ -970,38 +1042,60 @@ with tab_sheet:
         st.text_area("Message", key="message_text", height=280, label_visibility="collapsed",
                      placeholder="Your offer message appears here. Edit it before you send it.")
 
-# ----- fill the boxes that needed the finished state -----
-with hero_box:
-    SHOWROOM(
-        data=json.dumps(showcase.build_payload(car, comps, offer, settings, is_sample=ss["is_sample"],
-                                               connected=bool(api_key), photo=photo_bytes, comp_images=comp_images,
-                                               comp_photos=ss["comp_photos"], detailed=bool(ss["detailed_car"]))),
-        key="showroom",
-    )
-
-# ----- the garage: remember this car, then add, switch or remove -----
+# ----- the garage: remember this car -----
 own_photo = uploaded_photo or ss["auto_photo"]
 ss["garage"][ss["active"]] = {
     "car": car, "comps": comps, "offer": offer, "summary": ss["research_summary"], "message": ss["message_text"],
     "sample": ss["is_sample"], "car_photo": own_photo,
     "photos": {comp["img"]: ss["comp_photos"][comp["img"]] for comp in comps if comp.get("img") in ss["comp_photos"]},
 }
-actions = ss.pop("_garage_actions", [])
-picked = ss.get("garage_pick")
-if not actions and picked in ss["garage"] and picked != ss["active"]:
-    actions.append({"switch": picked})
-pills_drawn = not actions
-if pills_drawn:
-    if picked not in ss["garage"]:
-        ss["garage_pick"] = ss["active"]
-    with garage_box:
-        count = len(ss["garage_order"])
-        put(f'<div class="ds-label">Garage{DOT}{count} car{"s" if count != 1 else ""}</div>')
-        st.pills("Garage", ss["garage_order"], key="garage_pick", label_visibility="collapsed",
-                 format_func=lambda car_id: garage_label(car_id, car if car_id == ss["active"] else None))
+this_car = export_deal(ss["garage"][ss["active"]])
+
+
+def plain(deal: dict) -> dict:
+    """A car as the browser keeps it: its facts, without the photos (those travel separately)."""
+    return {key: deal.get(key) for key in ("car", "comps", "offer", "summary", "message")}
+
+
+def short_name(deal_car: dict) -> str:
+    name = " ".join(str(deal_car.get(k) or "").strip() for k in ("model", "trim")).strip()
+    return name or calc.car_title(deal_car) or "New car"
+
+
+garage_chips, kept = [], []
+for car_id in ss["garage_order"]:
+    entry = ss["garage"][car_id]
+    garage_chips.append({"id": car_id, "label": short_name(entry.get("car") or {}), "active": car_id == ss["active"]})
+    if not entry.get("sample"):
+        kept.append({"id": car_id, "deal": plain(entry)})
+has_real_car = any((ss["garage"][c].get("car") or {}).get("make") or (ss["garage"][c].get("car") or {}).get("model")
+                   for c in ss["garage_order"] if not ss["garage"][c].get("sample"))
+if has_real_car:
+    ss["fresh"] = False
+
+# ----- the main screen -----
+flags = {
+    "seq": ss["build_seq"], "busy": bool(ss.get("_garage_actions")), "error": ss.pop("stage_error", ""),
+    "notices": ss.pop("notices", []) or [], "fresh": ss["fresh"], "connected": bool(api_key),
+    "key_error": ss.pop("key_error", ""), "key_forgotten": ss["key_forgotten"], "sample": ss["is_sample"],
+    "message": ss["message_text"], "summary": ss["research_summary"],
+    "prefs": current_prefs(), "prefs_ask": not ss["prefs_asked"],
+}
+with stage_box:
+    STAGE(
+        data=json.dumps(stage.build_payload(
+            car, comps, offer, settings, flags=flags, photo=photo_bytes, photo_own=bool(own_photo),
+            comp_images=comp_images, comp_photos=ss["comp_photos"], garage=garage_chips,
+            persist=None if ss["fresh"] else {"cars": kept, "active": ss["active"]},
+            detailed=bool(ss["detailed_car"]))),
+        key="stage",
+        on_key_change=lambda: stage_event("key"), on_build_change=lambda: stage_event("build"),
+        on_switch_change=lambda: stage_event("switch"), on_offer_change=lambda: stage_event("offer"),
+        on_prefs_change=lambda: stage_event("prefs"),
+        on_restore_change=lambda: stage_event("restore"),
+    )
 
 with deal_file_box:
-    this_car = export_deal(ss["garage"][ss["active"]])
     whole = []
     for car_id in ss["garage_order"]:
         entry = ss["garage"][car_id]
@@ -1018,8 +1112,8 @@ with deal_file_box:
     st.download_button("Save only this car", data=json.dumps(this_car, indent=1), file_name=f"{slug}.json",
                        mime="application/json", width="stretch")
 
+# ----- add, switch or remove cars, now that this one is saved -----
+actions = ss.pop("_garage_actions", [])
 if actions:
     run_garage_actions(actions)
-    if not pills_drawn:                 # a widget's value can only be set before it is drawn
-        ss["garage_pick"] = ss["active"]
     st.rerun()

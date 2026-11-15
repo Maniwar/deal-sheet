@@ -96,7 +96,65 @@ def clean_comp(row: dict) -> dict | None:
         "note": text("note"),
         "link_ok": None if link_ok is None else bool(link_ok),
         "img": text("img"),
+        "options": text("options"),
+        "vin": clean_vin(text("vin")) or find_vin(text("url")),
     }
+
+
+_VIN_SHAPE = re.compile(r"(?<![A-Z0-9])[A-HJ-NPR-Z0-9]{17}(?![A-Z0-9])")
+_VIN_VALUES = {**{str(n): n for n in range(10)},
+               **dict(zip("ABCDEFGH", range(1, 9))), **dict(zip("JKLMN", range(1, 6))), "P": 7, "R": 9,
+               **dict(zip("STUVWXYZ", range(2, 10)))}
+_VIN_WEIGHTS = (8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2)
+
+
+def vin_checks_out(vin: str) -> bool:
+    """True when the VIN's check digit (the 9th character) matches the rest, as North American VINs must."""
+    total = sum(_VIN_VALUES[ch] * weight for ch, weight in zip(vin, _VIN_WEIGHTS))
+    return vin[8] == ("X" if total % 11 == 10 else str(total % 11))
+
+
+def clean_vin(value) -> str:
+    """A VIN someone typed or a source stated: 17 letters and digits, never I, O or Q. '' when it is not one."""
+    vin = re.sub(r"[\s-]", "", str(value or "")).upper()
+    return vin if _VIN_SHAPE.fullmatch(vin) and re.search(r"\d", vin) and re.search(r"[A-Z]", vin) else ""
+
+
+def find_vin(text) -> str:
+    """The VIN inside a link or a line of text, e.g. a Classic.com address. Only one whose check digit is right."""
+    for found in _VIN_SHAPE.findall(str(text or "").upper()):
+        if re.search(r"\d", found) and re.search(r"[A-Z]", found) and vin_checks_out(found):
+            return found
+    return ""
+
+
+# The two auction sites every search covers, under the one name each is shown by.
+_SOURCE_NAMES = (("Bring a Trailer", ("bringatrailer", "bring a trailer", "bringatrailer.com")),
+                 ("Cars & Bids", ("carsandbids", "cars & bids", "cars and bids", "cars&bids")))
+
+
+def source_name(comp: dict) -> str:
+    """Where a comp was sold or listed, with Bring a Trailer and Cars & Bids spelled one way."""
+    source = str(comp.get("source") or "").strip()
+    both = f"{source} {comp.get('url') or ''}".lower()
+    for name, marks in _SOURCE_NAMES:
+        if any(mark in both for mark in marks):
+            return name
+    if source.lower() in ("bat", "c&b"):
+        return "Bring a Trailer" if source.lower() == "bat" else "Cars & Bids"
+    return source or host_of(str(comp.get("url") or ""))
+
+
+def source_counts(comps: list[dict]) -> list[dict]:
+    """How many comps came from each place. Bring a Trailer and Cars & Bids are always listed, even at zero."""
+    counts: dict[str, int] = {name: 0 for name, _ in _SOURCE_NAMES}
+    for comp in comps:
+        name = source_name(comp)
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    first = [name for name, _ in _SOURCE_NAMES]
+    rest = sorted((name for name in counts if name not in first), key=lambda name: (-counts[name], name.lower()))
+    return [{"name": name, "n": counts[name]} for name in first + rest]
 
 
 def clean_comps(rows) -> list[dict]:
@@ -212,3 +270,50 @@ def short_money(value: float) -> str:
         text = f"{value / 1000:.1f}".rstrip("0").rstrip(".")
         return f"${text}k"
     return f"${value:,.0f}"
+
+
+# Which links open one car's own page. For the sites comps usually come from, the part of the
+# address that marks a single listing is known; anything else on those sites is a results page.
+_CAR_PAGES = {
+    "classic.com": ("/veh/",),
+    "bringatrailer.com": ("/listing/",),
+    "carsandbids.com": ("/auctions/",),
+    "pcarmarket.com": ("/auction/",),
+    "cars.com": ("/vehicledetail/",),
+    "autotrader.com": ("/cars-for-sale/vehicle/", "/cars-for-sale/vehicledetails"),
+    "cargurus.com": ("/details/", "listing=", "/vdp"),
+    "edmunds.com": ("/vin/",),
+    "carfax.com": ("/vehicle/",),
+    "truecar.com": ("/used-cars-for-sale/listing/",),
+    "finder.porsche.com": ("/details/",),
+    "hagerty.com": ("/marketplace/auction/", "/marketplace/listing/"),
+    "ebay.com": ("/itm/",),
+    "carmax.com": ("/car/",),
+    "carvana.com": ("/vehicle/",),
+    "facebook.com": ("/marketplace/item/",),
+    "mecum.com": ("/lots/",),
+    "rmsothebys.com": ("/lots/",),
+}
+_LIST_WORDS = ("/search", "/shopping", "/for-sale", "/inventory", "/market", "/results", "/listings", "/used-cars",
+               "/browse", "/category", "/m/")
+
+
+def link_kind(url: str) -> str:
+    """'car' when a link opens one car's own page, 'page' when it opens a results or market page, '' when unsure."""
+    link = (url or "").strip().lower()
+    if not link:
+        return ""
+    host = host_of(link).lower()
+    rest = link.split("://", 1)[-1]
+    path = "/" + rest.split("/", 1)[1] if "/" in rest else "/"
+    for site, marks in _CAR_PAGES.items():
+        if host == site or host.endswith("." + site):
+            # the marker has to be followed by something: /auctions/ alone is the list, not a car
+            return "car" if any(mark in path and path.split(mark, 1)[1].strip("/") for mark in marks) else "page"
+    if path.strip("/") == "":
+        return "page"
+    if re.search(r"[a-hj-npr-z0-9]{17}", path) and re.search(r"\d", path):     # a VIN in the address
+        return "car"
+    if any(word in path for word in _LIST_WORDS) and not re.search(r"\d{5,}", path):
+        return "page"
+    return ""

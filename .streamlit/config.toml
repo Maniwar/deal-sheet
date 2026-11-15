@@ -6,11 +6,11 @@ gatherUsageStats = false
 
 [theme]
 base = "dark"
-primaryColor = "#10b981"
-backgroundColor = "#020617"
-secondaryBackgroundColor = "#0f172a"
-textColor = "#e2e8f0"
-borderColor = "#1e293b"
+primaryColor = "#34d399"
+backgroundColor = "#0b0c0e"
+secondaryBackgroundColor = "#16181c"
+textColor = "#f5f6f8"
+borderColor = "#262930"
 linkColor = "#34d399"
 font = "'DM Sans', sans-serif"
 headingFont = "'DM Sans', sans-serif"
@@ -18,8 +18,8 @@ codeFont = "'JetBrains Mono', monospace"
 baseRadius = "0.7rem"
 buttonRadius = "0.7rem"
 showWidgetBorder = true
-dataframeBorderColor = "#1e293b"
-dataframeHeaderBackgroundColor = "#0b1222"
+dataframeBorderColor = "#262930"
+dataframeHeaderBackgroundColor = "#111317"
 
 [[theme.fontFaces]]
 family = "DM Sans"

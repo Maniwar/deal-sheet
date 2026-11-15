@@ -24,7 +24,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas as pdfcanvas
 
 from calc import (STATUS_LABEL, car_facts, car_title, comp_stats, host_of, money,
-                  monthly_payment, out_the_door, price_axis, short_money)
+                  monthly_payment, out_the_door, price_axis, short_money, link_kind, source_name)
 
 FONT_DIR = Path(__file__).parent / "assets" / "fonts"
 PAGE_W, PAGE_H = letter
@@ -478,13 +478,17 @@ class _Sheet:
             meta.append(f"{comp['miles']:,} mi")
         if comp.get("date"):
             meta.append(_clean(comp["date"]))
-        source = _clean(comp.get("source")) or host_of(url)
+        source = source_name(comp) or host_of(url)
         if source:
-            meta.append(source)
+            meta.append(_clean(source))
+        if comp.get("vin"):
+            meta.append(f"VIN {_clean(comp['vin'])}")
         blocks = {
             "title": _wrap(comp["title"], SANS_M, 8.8, text_w, 2),
             "meta": _wrap("  \u00b7  ".join(meta), SANS, 7.7, text_w, 2),
-            "note": _wrap(comp.get("note"), SANS, 7.3, text_w, 2),
+            "note": _wrap(" ".join(filter(None, [
+                "Link opens a results page, not this car." if link_kind(url) == "page" else "",
+                _clean(comp.get("note"))])), SANS, 7.3, text_w, 2),
             "link": _wrap_link(_link_text(url), MONO, 5.9, text_w, 3) if url else [],
         }
         height = 19.0
