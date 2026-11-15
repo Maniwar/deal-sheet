@@ -183,9 +183,17 @@ def merge_comps(*groups) -> list[dict]:
     """
     rows = [comp for group in groups for comp in group]
     seen, keep = _Seen(rows), set()
-    for full in (True, False):
+
+    def rank(comp) -> int:
+        """0: the auction site's or seller's own page. 1: another site's page for that one car (Classic.com's
+        vehicle page). 2: a lead with a date. 3: a lead without one."""
+        if is_lead(comp):
+            return 2 if _full(comp) else 3
+        return 1 if host_of(comp["url"]).endswith("classic.com") else 0
+
+    for level in range(4):
         for comp in rows:
-            if _full(comp) == full and not seen.has(comp):
+            if rank(comp) == level and not seen.has(comp):
                 seen.add(comp)
                 keep.add(id(comp))
     return [comp for comp in rows if id(comp) in keep]
@@ -246,7 +254,8 @@ def clean_comp(row: dict) -> dict | None:
         "available": available,
         "body": text("body"),
         "history": text("history"),
-        "aside": text("aside") if text("aside") == "lead" else "",        # set aside by the app because it cannot be opened and checked
+        # 'lead': set aside by the app because it cannot be opened and checked. 'mine': the buyer chose, so the app leaves it.
+        "aside": text("aside") if text("aside") in ("lead", "mine") else "",
         "seen": text("seen") if text("seen") in ("live", "gone", "unknown") and status == "asking" else "",
         "seen_on": text("seen_on") if status == "asking" else "",
     }
@@ -465,7 +474,8 @@ def set_aside_leads(comps: list[dict], fresh: list[dict] | None = None) -> int:
     for group in ("sold", "live"):
         enough = sum(comp_group(comp) == group and comp["use"] and not is_lead(comp) for comp in comps) >= 3
         for comp in fresh:
-            if comp_group(comp) == group and comp["use"] and is_lead(comp) and (enough or marketplace_find(comp)):
+            if (comp_group(comp) == group and comp["use"] and comp.get("aside") != "mine" and is_lead(comp)
+                    and (enough or marketplace_find(comp))):
                 comp["use"], comp["aside"] = False, "lead"
                 count += 1
     return count
@@ -496,6 +506,47 @@ def upgrade_leads(have: list[dict], found: list[dict]) -> int:
                 old["use"], old["aside"] = True, ""
             count += 1
             break
+    return count
+
+
+_AUCTION_HOSTS = {"Cars & Bids": "carsandbids.com", "Bring a Trailer": "bringatrailer.com", "PCARMARKET": "pcarmarket.com",
+                  "Hagerty": "hagerty.com", "Collecting Cars": "collectingcars.com", "Hemmings": "hemmings.com"}
+
+
+def link_pages(comps: list[dict], pages: list[dict]) -> int:
+    """Give a sale the auction's own page when another site reported the result. Returns how many were linked.
+
+    Classic.com says a car sold on Cars & Bids for a price on a date; the Cars & Bids search saw that auction's
+    page but, copied while the auction ran, it showed no final price. The two are the same auction when the VINs
+    match, or the model years match and the dates are a day apart at most. The sale then opens on the auction's
+    page and takes its VIN and miles; the price and date stay as the other site reported them.
+    """
+    left, count = list(pages or []), 0
+    for comp in comps:
+        if comp["status"] == "asking":
+            continue
+        named = f"{source_name(comp)} {comp.get('source') or ''}".lower()
+        site = next((host for name, host in _AUCTION_HOSTS.items() if name.lower() in named), "")
+        if not site or host_of(comp["url"]).endswith(site):
+            continue                               # no auction site named, or it already opens there
+        year, day, vin = _year_of(comp["title"]), date_key(comp["date"]), comp.get("vin") or ""
+        for page in left:
+            if not host_of(page["url"]).endswith(site):
+                continue
+            if vin and page.get("vin"):
+                same = vin == page["vin"]
+            else:
+                other = date_key(page.get("date"))
+                same = bool(year and year == _year_of(page.get("title")) and day and other and abs(day - other) <= 1)
+            if same:
+                comp.update(url=page["url"], link_ok=True, vin=vin or page.get("vin") or "",
+                            miles=comp["miles"] if comp.get("miles") is not None else page.get("miles"),
+                            note=re.sub(r"(?i)listed on classic\.com\.?\s*", "", comp["note"]).strip())
+                if comp.get("aside") == "lead":
+                    comp["use"], comp["aside"] = True, ""
+                left.remove(page)
+                count += 1
+                break
     return count
 
 

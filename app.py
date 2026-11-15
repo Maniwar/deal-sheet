@@ -879,8 +879,11 @@ def handle_stage_requests(progress_slot) -> None:
                 both, _ = drop_spare_trims(have + fresh)       # with enough exact matches now, other trims go, old ones too
                 stays = {id(comp) for comp in both}
                 have, fresh = [comp for comp in have if id(comp) in stays], [comp for comp in fresh if id(comp) in stays]
-                calc.set_aside_leads(have + fresh, fresh)
+                # a refresh also tidies what was there: a lead the buyer never chose to count is set aside too
+                calc.set_aside_leads(have + fresh, None if refresh else fresh)
                 if refresh:
+                    # a Marketplace car read from a list has no page of its own to open: it goes, unless the buyer kept it
+                    have = [comp for comp in have if not (calc.marketplace_find(comp) and comp.get("aside") != "mine")]
                     back = 0
                     for comp in have:                          # a sale set aside only because its page left out a detail of the trim line
                         row = {**comp, "trim": ""}
@@ -934,7 +937,7 @@ def handle_stage_requests(progress_slot) -> None:
         have = calc.clean_comps((ss["garage"].get(ss["active"]) or {}).get("comps") or [])
         at = calc.to_int(request.get("i"))
         if at is not None and 0 <= at < len(have) and have[at]["price"] == calc.to_int(request.get("price")):
-            have[at]["use"], have[at]["aside"] = bool(request.get("use")), ""       # the buyer's own choice from here on
+            have[at]["use"], have[at]["aside"] = bool(request.get("use")), "mine"   # the buyer's own choice: the app leaves it
             ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
         else:
             ss["stage_error"] = "That car has moved in the list. Try again."

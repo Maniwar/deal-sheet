@@ -25,8 +25,8 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import (MIRROR_SITES, car_facts, car_title, clean_comps, ease_trim_mark, host_of, is_list_page, is_mirror, link_kind,
-                  loose_trim, mark_other_trim, merge_comps, money, normalize_url)
+from calc import (MIRROR_SITES, car_facts, car_title, clean_comps, clean_vin, ease_trim_mark, find_vin, host_of, is_list_page,
+                  is_mirror, link_kind, link_pages, loose_trim, mark_other_trim, merge_comps, money, normalize_url, to_int)
 
 MODELS = {                                   # the first one is the default
     "Haiku 5.5 (fastest)": "claude-haiku-5-5",
@@ -212,7 +212,13 @@ def _watch(event, kinds: dict, parts: dict, progress: Progress, label: str, stre
             if code:
                 progress.say(f"{label}: {_FETCH_ERRORS.get(str(code), 'that page could not be read')}")
             else:
-                progress.say(f"{label}: read that page")
+                inner = body.get("content") if isinstance(body, dict) else getattr(body, "content", None)
+                source = inner.get("source") if isinstance(inner, dict) else getattr(inner, "source", None)
+                data = source.get("data") if isinstance(source, dict) else getattr(source, "data", "")
+                page = str(body.get("url") if isinstance(body, dict) else getattr(body, "url", "") or "")
+                cars = sum("/veh/" in url or "/lots/" in url or "/auctions/" in url for url in _urls_in(data if isinstance(data, str) else "", page))
+                progress.say(f"{label}: read that page, {cars} link{'s' if cars != 1 else ''} to cars' own pages on it" if cars
+                             else f"{label}: read that page, but it came back without links to the cars' own pages")
         elif kinds[index] == "server_tool_use":
             parts[("name", index)] = getattr(block, "name", "") or ""
         elif kinds[index] == "tool_use":
@@ -512,7 +518,8 @@ COMPS_TOOL = {
                         "history": {"type": "string", "description": "Accident, damage or title history as the source states it: 'Clean Carfax', "
                                                                     "'Accident reported', 'Salvage title', 'Paintwork on two panels'. Leave out if not stated."},
                         "miles": {"type": "integer"},
-                        "price": {"type": "integer", "description": "Whole US dollars."},
+                        "price": {"type": "integer", "description": "Whole US dollars. 0 only where the instructions ask for an "
+                                                                      "auction page whose result is not shown."},
                         "date": {"type": "string", "description": "Sale or listing date as the source gives it."},
                         "source": {"type": "string", "description": "Where the car sold or is listed: the auction site or dealer, e.g. "
                                                                  "Bring a Trailer, Cars & Bids. If an aggregator such as Classic.com "
@@ -741,7 +748,7 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
     elif never:
         search["blocked_domains"] = list(never)
     reader = {"type": WEB_FETCH_TYPE, "name": "web_fetch", "max_uses": int(opens), "allowed_domains": list(only or []),
-              "max_content_tokens": 7000}
+              "max_content_tokens": 16000}
     can_open = bool(opens and only and not _FETCH_OFF)
     tools = [search, reader, COMPS_TOOL] if can_open else [search, COMPS_TOOL]
     messages = [{"role": "user", "content": prompt}]
@@ -778,6 +785,12 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
             comps = clean_comps(rows)
             for comp in comps:
                 comp["link_ok"] = normalize_url(comp["url"]) in seen_urls if comp["url"] else False
+            # an auction's own page whose result the search did not show: no price, so not a comp, but a page to
+            # join to the result that another site reports for the same auction
+            pages = [{"url": str(row["url"]).strip(), "title": str(row.get("title") or ""), "date": str(row.get("date") or ""),
+                      "vin": clean_vin(row.get("vin")) or find_vin(str(row["url"])), "miles": to_int(row.get("miles"))}
+                     for row in rows if not to_int(row.get("price")) and row.get("url")
+                     and normalize_url(str(row["url"]).strip()) in seen_urls]
             if progress:
                 progress.say(f"{label}: {len(comps)} car{'s' if len(comps) != 1 else ''} recorded{_tokens_note(used)}")
             return {
@@ -785,6 +798,7 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
                 "summary": str(recorded.get("summary") or "").strip(),
                 "searched": len(seen_urls),
                 "failed": failed,
+                "pages": pages,
             }
         messages.append({"role": "assistant", "content": _field(response, "content")})
         if _field(response, "stop_reason") == "pause_turn":
@@ -838,10 +852,15 @@ _SITE_NOTES = {
     ),
     "Cars & Bids": (
         "Cars & Bids pages in the results are often copies made while the auction was still running: they say "
-        "'Auction ends' with a date and show a current bid, not the result. Record an auction only when the result "
-        "itself says how it ended ('Sold for', 'Bid to', 'Reserve not met') and gives that price. A current bid is "
-        "never a sale. An auction whose end date is still ahead of today is asking, with a note that starts 'Live "
-        "auction'.\n"
+        "'Auction ends' with a date and show a current bid, not the result.\n"
+        "- When the result itself says how the auction ended ('Sold for', 'Bid to', 'Reserve not met') and gives "
+        "that price, record it as usual.\n"
+        "- When it does not, still record the page, so the app can join it to the result another site reports: "
+        "status high_bid, price 0, the day the auction ended in date (written like 'Nov 12, 2026'), the VIN, the "
+        "miles and the page's URL, with a note that starts 'Result not shown'. A current bid is never a sale: never "
+        "give it as the price of an ended auction.\n"
+        "- An auction whose end date is still ahead of today is asking, with its current bid as the price and a note "
+        "that starts 'Live auction'.\n"
     ),
 }
 
@@ -964,6 +983,9 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
     if not results:
         raise first_error
     comps = merge_comps(*[result["comps"] for result in results])
+    joined = link_pages(comps, [page for result in results for page in result.get("pages", [])])
+    if joined and progress:
+        progress.say(f"{joined} sale{'s' if joined != 1 else ''} reported by another site now open{'s' if joined == 1 else ''} on the auction's own page")
     told = [f"{one['site']}: did not finish ({one['error']})" if one["error"] else f"{one['site']}: {one['found']}" for one in passes]
     lead = "Each source was searched on its own. " + ". ".join(told) + ". A sale found twice is listed once."
     if closed or any(tuple(domains) in _UNSEARCHABLE for _, domains in sites):
@@ -1018,7 +1040,9 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
                          progress=progress, label="Facebook Marketplace")
 
     jobs = [("For sale now", everywhere)]
-    if ("facebook.com",) not in _UNSEARCHABLE:
+    # Marketplace's lists give a car, a price and a town, but never the ad's own address, so by default they are
+    # not searched: a car that cannot be opened is noise. DEALSHEET_MARKETPLACE=1 turns the list search back on.
+    if os.environ.get("DEALSHEET_MARKETPLACE") == "1" and ("facebook.com",) not in _UNSEARCHABLE:
         jobs.append(("Facebook Marketplace", marketplace))
     done = dict(_run_side_by_side(jobs, progress))
     result, lists = done["For sale now"], done.get("Facebook Marketplace")
