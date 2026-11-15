@@ -109,19 +109,46 @@ def load_sample() -> dict:
     return json.loads((APP_DIR / "sample_deal.json").read_text())
 
 
-def image_for_api(uploaded) -> tuple[bytes, str]:
-    """Uploaded image bytes and media type, shrunk if it is too large to send."""
-    data = uploaded.getvalue()
-    media_type = uploaded.type or "image/jpeg"
-    if len(data) <= 4_000_000 and media_type in ("image/jpeg", "image/png", "image/webp", "image/gif"):
-        return data, media_type
+def images_for_api(data: bytes, media_type: str = "image/jpeg") -> list[tuple[bytes, str]]:
+    """An uploaded image as the API will accept it, as one or more (bytes, media type) pieces.
+
+    The API rejects any image with a side over 8,000 pixels and shrinks anything over about
+    1,600. A long scrolling screenshot would either be refused or shrunk until its text is
+    unreadable, so it is cut into page-sized slices, top to bottom, with a small overlap.
+    Other images go as they are unless they are too big, in which case they are shrunk.
+    """
     from PIL import Image
 
-    image = Image.open(io.BytesIO(data)).convert("RGB")
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except Exception as exc:
+        raise llm.LLMError("That file could not be read as an image. Try a PNG or JPG screenshot.") from exc
+    width, height = image.size
+
+    def jpeg(img) -> tuple[bytes, str]:
+        out = io.BytesIO()
+        img.convert("RGB").save(out, format="JPEG", quality=85)
+        return out.getvalue(), "image/jpeg"
+
+    if height > 2.2 * width and height > 2400:                 # a long screenshot: slice it
+        page = int(width * 1.45)
+        count = min(8, -(-height // page))
+        step = height / count
+        overlap = min(80, int(step * 0.05))
+        slices = []
+        for index in range(count):
+            top = max(0, int(index * step) - (overlap if index else 0))
+            bottom = min(height, int((index + 1) * step) + overlap)
+            piece = image.crop((0, top, width, bottom))
+            piece.thumbnail((2400, 3600))                      # keeps every side far below the limit
+            slices.append(jpeg(piece))
+        return slices
+    fine_type = media_type in ("image/jpeg", "image/png", "image/webp", "image/gif")
+    if len(data) <= 4_000_000 and fine_type and max(width, height) <= 7600:
+        return [(data, media_type)]
     image.thumbnail((3000, 3000))
-    out = io.BytesIO()
-    image.save(out, format="JPEG", quality=85)
-    return out.getvalue(), "image/jpeg"
+    return [jpeg(image)]
 
 
 def as_bytes(value) -> bytes | None:
@@ -230,12 +257,15 @@ def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: st
         st.write("Reading the listing page")
         page = previews.read_page(link)
     st.write("Pulling out the car's details")
-    image, media_type = image_for_api(shot) if shot is not None else (None, "image/jpeg")
+    try:
+        shots = images_for_api(shot.getvalue(), shot.type or "image/jpeg") if shot is not None else []
+    except llm.LLMError as exc:
+        return None, [str(exc)]
     text = page["text"]
     if wanted:
         text = (text + "\n\n" if text else "") + "The buyer's own description of the car they want: " + wanted
     try:
-        found = llm.read_listing(client, model, text, image, media_type, url=link)
+        found = llm.read_listing(client, model, text, url=link, images=shots)
     except llm.LLMError as exc:
         return None, [str(exc)]
     box = found.pop("photo_box", None)
@@ -256,8 +286,8 @@ def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: st
             return None, [f"{why}, and the link alone does not name the car. Add a screenshot of the listing and try again."]
         return None, ["Could not find a car in that listing. Try a clearer screenshot, or one that shows the title and price."]
     photo = None
-    if shot is not None and isinstance(box, (list, tuple)) and len(box) == 4:
-        photo = previews.crop_fraction(shot.getvalue(), box)
+    if shots and isinstance(box, (list, tuple)) and len(box) == 4:
+        photo = previews.crop_fraction(shots[0][0], box)       # the box is measured on the first slice
     deal = {**EMPTY_DEAL, "car": car, "car_photo": photo or page["image"]}
     if unread and shot is None:
         notes.append(f"{why}, so only the words in the link were read. "
@@ -683,8 +713,8 @@ with tab_car:
                     pasted_link = pasted if re.fullmatch(r"https?://\S+", pasted) else ""
                     page = previews.read_page(pasted_link) if pasted_link else {"text": pasted, "image": None}
                     try:
-                        image, media_type = image_for_api(listing_shot) if listing_shot else (None, "image/jpeg")
-                        found = llm.read_listing(client, model, page["text"], image, media_type, url=pasted_link)
+                        shots = images_for_api(listing_shot.getvalue(), listing_shot.type or "image/jpeg") if listing_shot else []
+                        found = llm.read_listing(client, model, page["text"], url=pasted_link, images=shots)
                     except llm.LLMError as exc:
                         st.error(str(exc))
                     else:
@@ -692,8 +722,8 @@ with tab_car:
                             found["url"] = pasted_link
                         box = found.pop("photo_box", None)
                         auto_photo = page["image"]
-                        if listing_shot is not None and isinstance(box, (list, tuple)) and len(box) == 4:
-                            auto_photo = previews.crop_fraction(listing_shot.getvalue(), box) or auto_photo
+                        if shots and isinstance(box, (list, tuple)) and len(box) == 4:
+                            auto_photo = previews.crop_fraction(shots[0][0], box) or auto_photo
                         if ss["is_sample"]:
                             # a new car replaces the sample outright: its comps and offer do not carry over
                             ss["_pending"] = {"deal": {**EMPTY_DEAL, "car": found}, "auto_photo": auto_photo}
@@ -798,15 +828,17 @@ with tab_comps:
             else:
                 with st.spinner("Reading the page"):
                     try:
-                        image, media_type = image_for_api(page_shot) if page_shot else (None, "image/jpeg")
-                        result = llm.extract_comps(client, model, car, page_text, image, media_type)
+                        shots = images_for_api(page_shot.getvalue(), page_shot.type or "image/jpeg") if page_shot else []
+                        result = llm.extract_comps(client, model, car, page_text, images=shots)
                     except llm.LLMError as exc:
                         st.error(str(exc))
                     else:
                         for comp in result["comps"]:
                             box = comp.pop("photo_box", None)
-                            if box and page_shot is not None:
-                                cut = previews.crop_fraction(page_shot.getvalue(), box, max_width=560)
+                            piece = comp.pop("photo_image", 1)
+                            if box and shots:
+                                piece = min(max(calc.to_int(piece) or 1, 1), len(shots))
+                                cut = previews.crop_fraction(shots[piece - 1][0], box, max_width=560)
                                 if cut:
                                     comp["img"] = uuid.uuid4().hex[:10]
                                     ss["comp_photos"][comp["img"]] = cut
