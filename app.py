@@ -27,13 +27,18 @@ from styles import CSS
 
 APP_DIR = Path(__file__).parent
 CAR_FIELDS = ["year", "make", "model", "trim", "body", "transmission", "drivetrain", "miles", "price",
-              "vin", "exterior", "interior", "seller", "seller_type", "location", "url", "notes"]
+              "vin", "exterior", "interior", "seller", "seller_type", "location", "url", "notes",
+              "shape", "layout"]
 NUMBER_FIELDS = {"year", "miles", "price"}
 SELLER_TYPES = ["", "dealer", "private", "auction"]
 COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img"]
 DOT = " \u00b7 "
 QR_SIZES = {"Large (1.1 in)": 82, "Extra large (1.5 in)": 108}
 EMPTY_DEAL = {"car": {}, "comps": [], "offer": {}, "summary": "", "message": "", "sample": False}
+IMAGE_TYPES = ["png", "jpg", "jpeg", "webp"]
+SHAPE_NAMES = {"": "Auto", "coupe": "Coupe", "convertible": "Convertible", "sedan": "Sedan", "hatch": "Hatchback",
+               "wagon": "Wagon", "suv": "SUV", "truck": "Pickup", "van": "Van"}
+LAYOUT_NAMES = {"": "Auto", "front": "Front", "mid": "Mid", "rear": "Rear"}
 
 st.set_page_config(page_title="Deal Sheet", page_icon=":material/receipt_long:", layout="centered",
                    initial_sidebar_state="collapsed")
@@ -97,6 +102,156 @@ def image_for_api(uploaded) -> tuple[bytes, str]:
     return out.getvalue(), "image/jpeg"
 
 
+def as_bytes(value) -> bytes | None:
+    """Photo bytes from a garage entry (bytes) or a saved file (base64 text)."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, str) and value:
+        try:
+            return base64.b64decode(value)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def export_deal(deal: dict) -> dict:
+    """One car as it is written to a file: its facts plus its photos as text."""
+    out = {key: deal.get(key) for key in ("car", "comps", "offer", "summary", "message")}
+    out["sample"] = False
+    photo = as_bytes(deal.get("car_photo"))
+    if photo:
+        out["car_photo"] = base64.b64encode(photo).decode("ascii")
+    out["photos"] = {str(key): base64.b64encode(data).decode("ascii")
+                     for key, value in (deal.get("photos") or {}).items() if (data := as_bytes(value))}
+    return out
+
+
+# ---------------------------------------------------------------- the garage: the cars in this session
+
+def queue(action: dict) -> None:
+    """Ask for a garage change. It is applied at the end of the run, after this car's edits are saved."""
+    st.session_state.setdefault("_garage_actions", []).append(action)
+
+
+def run_garage_actions(actions: list[dict]) -> None:
+    ss = st.session_state
+    garage, order = ss["garage"], ss["garage_order"]
+
+    def drop(car_id: str) -> None:
+        garage.pop(car_id, None)
+        if car_id in order:
+            order.remove(car_id)
+
+    def same_car(deal: dict) -> str:
+        """The id of a garage car with the same details and comps, if there is one."""
+        def mark(d: dict) -> tuple:
+            car = d.get("car") or {}
+            return (tuple(str(car.get(f) or "").replace(",", "").strip().lower() for f in CAR_FIELDS),
+                    len(d.get("comps") or []))
+        wanted = mark(deal)
+        return next((c for c in order if mark(garage[c]) == wanted), "")
+
+    def add(deal: dict, from_file: bool = False) -> None:
+        if not deal.get("sample"):                    # a real car replaces the sample
+            for car_id in [c for c in order if garage[c].get("sample")]:
+                drop(car_id)
+        if from_file and same_car(deal):              # already here: show it instead of adding a copy
+            ss["active"] = same_car(deal)
+            return
+        car_id = uuid.uuid4().hex[:8]
+        garage[car_id] = deal
+        order.append(car_id)
+        ss["active"] = car_id
+
+    for action in actions:
+        if "add" in action:
+            add(action["add"], bool(action.get("from_file")))
+        elif "sample" in action:
+            existing = [c for c in order if garage[c].get("sample")]
+            if existing:
+                ss["active"] = existing[0]
+            else:
+                add(load_sample())
+        elif action.get("switch") in garage:
+            ss["active"] = action["switch"]
+        elif "remove" in action:
+            drop(action["remove"])
+    if not order:
+        add(dict(EMPTY_DEAL))
+    if ss["active"] not in garage:
+        ss["active"] = order[-1]
+    ss["_pending"] = {"deal": garage[ss["active"]]}
+    ss["upload_ver"] += 1
+
+
+def garage_label(car_id: str, live_car: dict | None = None) -> str:
+    ss = st.session_state
+    deal = ss["garage"].get(car_id) or {}
+    car = live_car if live_car is not None else (deal.get("car") or {})
+    title = calc.car_title(car) if (car.get("make") or car.get("model")) else "New car"
+    return f"{title} (sample)" if deal.get("sample") else title
+
+
+# ---------------------------------------------------------------- one step: link or screenshot to a full deal
+
+def build_deal(client, model: str, link: str, shot, max_searches: int, buyer: str) -> tuple[dict | None, list[str]]:
+    """Read the listing, research comps, suggest an offer and draft the message. Returns (deal, notes)."""
+    notes: list[str] = []
+    page = {"status": "none", "text": "", "image": None}
+    if link:
+        st.write("Reading the listing page")
+        page = previews.read_page(link)
+    st.write("Pulling out the car's details")
+    image, media_type = image_for_api(shot) if shot is not None else (None, "image/jpeg")
+    try:
+        found = llm.read_listing(client, model, page["text"], image, media_type, url=link)
+    except llm.LLMError as exc:
+        return None, [str(exc)]
+    box = found.pop("photo_box", None)
+    car = {field: (calc.to_int(found.get(field)) if field in NUMBER_FIELDS else str(found.get(field) or "").strip())
+           for field in CAR_FIELDS}
+    if link:
+        car["url"] = link
+    unread = bool(link) and page["status"] != "ok"
+    why = ("That site does not let apps read its pages" if page["status"] == "blocked"
+           else "That link could not be opened")
+    if not (car["make"] and car["model"]):
+        if unread and shot is None:
+            return None, [f"{why}, and the link alone does not name the car. Add a screenshot of the listing and try again."]
+        return None, ["Could not find a car in that listing. Try a clearer screenshot, or one that shows the title and price."]
+    photo = None
+    if shot is not None and isinstance(box, (list, tuple)) and len(box) == 4:
+        photo = previews.crop_fraction(shot.getvalue(), box)
+    deal = {**EMPTY_DEAL, "car": car, "car_photo": photo or page["image"]}
+    if unread and shot is None:
+        notes.append(f"{why}, so only the words in the link were read. "
+                     "Add a screenshot in the Car tab to fill in the price, miles and photo.")
+    elif not car["price"]:
+        notes.append("No asking price was found. Enter it in the Car tab.")
+
+    st.write("Researching comps on the web. This takes a minute or two.")
+    try:
+        result = llm.research_comps(client, model, car, max_searches=max_searches)
+    except llm.LLMError as exc:
+        notes.append(f"The comps search stopped: {exc}")
+        return deal, notes
+    deal["comps"], deal["summary"] = result["comps"], result["summary"]
+    if not deal["comps"]:
+        notes.append("The search found no usable comps. Add some in the Comps tab.")
+        return deal, notes
+    try:
+        st.write("Working out an offer")
+        plan = llm.suggest_offer(client, model, car, deal["comps"])
+        plan["shown"] = plan.get("open")
+        deal["offer"] = plan
+        if plan.get("open"):
+            st.write("Drafting the offer message")
+            deal["message"] = llm.draft_message(client, model, car, deal["comps"], plan["open"], buyer, "text")
+    except llm.LLMError as exc:
+        notes.append(f"The offer step stopped: {exc}")
+    return deal, notes
+
+
 # ---------------------------------------------------------------- state
 
 def init_state() -> None:
@@ -128,7 +283,14 @@ def init_state() -> None:
     ss["key_ver"] = 0
     ss["buyer"] = secret("BUYER_NAME")
     ss["model_label"] = next(iter(llm.MODELS))
-    ss["_pending"] = {"deal": load_sample()}
+    ss["intake_ver"] = 0
+    ss["intake_open"] = False
+    ss["notices"] = []
+    sample = load_sample()
+    ss["active"] = uuid.uuid4().hex[:8]       # the garage starts with the sample car
+    ss["garage"] = {ss["active"]: sample}
+    ss["garage_order"] = [ss["active"]]
+    ss["_pending"] = {"deal": sample}
 
 
 def set_car(car: dict, replace: bool) -> None:
@@ -139,6 +301,10 @@ def set_car(car: dict, replace: bool) -> None:
             continue
         if field == "seller_type":
             value = value if value in SELLER_TYPES else ""
+        elif field == "shape":
+            value = value if value in showcase.BODY_SHAPES else ""
+        elif field == "layout":
+            value = value if value in showcase.LAYOUTS else ""
         ss[f"car_{field}"] = fmt_field(field, value)
 
 
@@ -168,14 +334,9 @@ def apply_pending() -> None:
         ss["message_text"] = str(deal.get("message") or "")
         ss["is_sample"] = bool(deal.get("sample"))
         ss["listing_text"] = ""
-        ss["auto_photo"] = None
-        ss["comp_photos"] = {}
-        try:
-            if deal.get("car_photo"):
-                ss["auto_photo"] = base64.b64decode(deal["car_photo"])
-            ss["comp_photos"] = {str(key): base64.b64decode(value) for key, value in (deal.get("photos") or {}).items()}
-        except (ValueError, TypeError):
-            ss["comp_photos"] = {}
+        ss["auto_photo"] = as_bytes(deal.get("car_photo"))
+        photos = deal.get("photos") if isinstance(deal.get("photos"), dict) else {}
+        ss["comp_photos"] = {str(key): data for key, value in photos.items() if (data := as_bytes(value))}
     if "car" in payload:
         set_car(payload["car"], replace=bool(payload.get("replace_car")))
         ss["is_sample"] = False
@@ -339,25 +500,27 @@ with st.sidebar:
     st.toggle("Load photos from listing pages", key="want_photos",
               help="Fetches each link's preview image, where the site allows it. Turn off to skip those requests.")
 
-    st.markdown("### Deal file")
+    st.markdown("### Garage file")
+    st.caption("Nothing is kept between visits. Save the garage to keep your cars, and open the file to bring them back.")
     deal_file_box = st.container()
-    uploaded_deal = st.file_uploader("Open a saved deal", type=["json"], key=f"deal_upload_{ss['upload_ver']}")
+    uploaded_deal = st.file_uploader("Open a saved garage or car", type=["json"], key=f"deal_upload_{ss['upload_ver']}")
     if uploaded_deal is not None:
         try:
-            ss["_pending"] = {"deal": json.loads(uploaded_deal.getvalue().decode("utf-8"))}
+            loaded = json.loads(uploaded_deal.getvalue().decode("utf-8"))
+            found_deals = loaded.get("garage") if isinstance(loaded, dict) and isinstance(loaded.get("garage"), list) else [loaded]
+            found_deals = [d for d in found_deals if isinstance(d, dict) and isinstance(d.get("car"), dict)]
+            if not found_deals:
+                raise ValueError("no cars")
         except (ValueError, UnicodeDecodeError):
-            st.error("That file is not a saved deal.")
+            st.error("That file is not a saved garage or car.")
         else:
-            ss["upload_ver"] += 1
-            st.rerun()
+            for found_deal in found_deals[:40]:
+                queue({"add": {**EMPTY_DEAL, **found_deal, "sample": False}, "from_file": True})
     left, right = st.columns(2)
-    if left.button("New deal", width="stretch"):
-        ss["_pending"] = {"deal": EMPTY_DEAL}
-        ss["upload_ver"] += 1
-        st.rerun()
+    if left.button("New blank car", width="stretch"):
+        queue({"add": dict(EMPTY_DEAL)})
     if right.button("Sample", width="stretch"):
-        ss["_pending"] = {"deal": load_sample()}
-        st.rerun()
+        queue({"sample": True})
 
 api_key = ss["api_key"]
 client = llm.get_client(api_key) if api_key else None
@@ -365,7 +528,7 @@ model = llm.MODELS[ss["model_label"]]
 settings = current_settings()
 needs_key = "Connect your Anthropic API key at the top of the page to use Claude."
 
-hero_box = st.container()
+garage_box = st.container(key="garage")
 
 # ----- bring your own key -----
 if not api_key:
@@ -398,14 +561,57 @@ if not api_key:
                     st.error(key_message)
 elif ss.get("key_notice"):
     st.warning(ss.pop("key_notice"))
+for notice in ss.pop("notices", []) or []:
+    st.info(notice)
+
+# ----- add a car: one link or one screenshot builds the whole deal -----
+has_car = bool(ss["car_make"] or ss["car_model"])
+with st.container(key="intake"):
+    if has_car:
+        if st.button("Close" if ss["intake_open"] else "Add a car from a link or a screenshot", width="stretch",
+                     icon=":material/close:" if ss["intake_open"] else ":material/add_circle:", key="intake_toggle"):
+            ss["intake_open"] = not ss["intake_open"]
+            st.rerun()
+    if ss["intake_open"] or not has_car:
+        put('<div class="ds-intake"><div class="ds-label">Add a car</div>'
+            '<div class="ds-intake-t">Paste the listing link, add a screenshot, or both</div></div>')
+        link_col, shot_col = st.columns([1.25, 1], gap="medium")
+        with link_col:
+            intake_link = st.text_input("Listing link", key=f"intake_link_{ss['intake_ver']}",
+                                        placeholder="https://www.dealer.com/used-2020-porsche-911")
+            build_clicked = st.button("Build the deal sheet", type="primary", width="stretch", disabled=client is None,
+                                      help=None if client else needs_key)
+        with shot_col:
+            intake_shot = st.file_uploader("Screenshot of the listing", type=IMAGE_TYPES,
+                                           key=f"intake_shot_{ss['intake_ver']}")
+        st.caption("Claude reads the listing, finds comps, suggests an offer and drafts the message. It takes about "
+                   f"two minutes and runs on your key (up to {int(ss['max_searches'])} web searches). "
+                   "Some sites do not let apps read their pages. For those, add a screenshot.")
+        if build_clicked:
+            link = intake_link.strip()
+            if link and not re.match(r"https?://", link, re.I):
+                link = "https://" + link
+            if not link and intake_shot is None:
+                st.warning("Paste a listing link or add a screenshot first.")
+            else:
+                with st.status("Building the deal sheet", expanded=True) as progress:
+                    new_deal, build_notes = build_deal(client, model, link, intake_shot,
+                                                       int(ss["max_searches"]), settings["buyer"])
+                    progress.update(label="Deal sheet ready" if new_deal else "Could not build the deal sheet",
+                                    state="complete" if new_deal else "error", expanded=not new_deal)
+                if new_deal:
+                    queue({"add": new_deal})
+                    ss["notices"] = build_notes
+                    ss["intake_ver"] += 1             # clears the link and the screenshot
+                    ss["intake_open"] = False
+                else:
+                    for build_note in build_notes:
+                        st.error(build_note)
+
+hero_box = st.container()
 if ss["is_sample"]:
-    note, action = st.columns([3, 1], vertical_alignment="center")
-    note.caption("This sample comes from the Nov 14, 2026 research on the green Carrera S in McKinney. "
-                 "Change anything to see the sheet update.")
-    if action.button("Start a new deal", width="stretch"):
-        ss["_pending"] = {"deal": EMPTY_DEAL}
-        ss["upload_ver"] += 1
-        st.rerun()
+    st.caption("The sample comes from the Nov 14, 2026 research on the green Carrera S in McKinney. "
+               "Change anything to see the sheet update, or add your own car above.")
 
 tab_car, tab_comps, tab_offer, tab_sheet = st.tabs(["Car", "Comps", "Offer", "Sheet"])
 
@@ -414,10 +620,11 @@ with tab_car:
     read_col, form_col = st.columns([0.85, 1.4], gap="large")
     with read_col:
         st.markdown("#### Read a listing")
-        st.caption("Paste the listing, add a screenshot, or both. Claude fills in the form.")
+        st.caption("Updates this car only: paste the listing's text or link, add a screenshot, or both. "
+                   "Claude fills in the form. To add another car with comps and an offer, use Add a car at the top.")
         st.text_area("Listing text", key="listing_text", height=150,
                      placeholder="Paste the listing text or link here")
-        listing_shot = st.file_uploader("Listing screenshot", type=["png", "jpg", "jpeg", "webp"],
+        listing_shot = st.file_uploader("Listing screenshot", type=IMAGE_TYPES,
                                         key=f"listing_shot_{ss['upload_ver']}")
         if st.button("Read listing", type="primary", width="stretch", disabled=client is None,
                      help=None if client else needs_key):
@@ -425,24 +632,32 @@ with tab_car:
                 st.warning("Paste the listing text or add a screenshot first.")
             else:
                 with st.spinner("Reading the listing"):
+                    pasted = ss["listing_text"].strip()
+                    pasted_link = pasted if re.fullmatch(r"https?://\S+", pasted) else ""
+                    page = previews.read_page(pasted_link) if pasted_link else {"text": pasted, "image": None}
                     try:
                         image, media_type = image_for_api(listing_shot) if listing_shot else (None, "image/jpeg")
-                        found = llm.read_listing(client, model, ss["listing_text"], image, media_type)
+                        found = llm.read_listing(client, model, page["text"], image, media_type, url=pasted_link)
                     except llm.LLMError as exc:
                         st.error(str(exc))
                     else:
+                        if pasted_link:
+                            found["url"] = pasted_link
                         box = found.pop("photo_box", None)
-                        auto_photo = None
+                        auto_photo = page["image"]
                         if listing_shot is not None and isinstance(box, (list, tuple)) and len(box) == 4:
-                            auto_photo = previews.crop_fraction(listing_shot.getvalue(), box)
+                            auto_photo = previews.crop_fraction(listing_shot.getvalue(), box) or auto_photo
                         if ss["is_sample"]:
                             # a new car replaces the sample outright: its comps and offer do not carry over
                             ss["_pending"] = {"deal": {**EMPTY_DEAL, "car": found}, "auto_photo": auto_photo}
                         else:
                             ss["_pending"] = {"car": found, "replace_car": True, "auto_photo": auto_photo}
                         st.rerun()
-        car_photo = st.file_uploader("Car photo for the sheet (optional)", type=["png", "jpg", "jpeg", "webp"],
+        car_photo = st.file_uploader("Car photo for the sheet (optional)", type=IMAGE_TYPES,
                                      key=f"car_photo_{ss['upload_ver']}")
+        if st.button("Remove this car from the garage", icon=":material/delete:", type="tertiary",
+                     help="Save the garage first (sidebar) if you want to keep this car."):
+            queue({"remove": ss["active"]})
     with form_col:
         st.markdown("#### The car")
         a, b, c, d = st.columns(4)
@@ -467,6 +682,11 @@ with tab_car:
         c.text_input("Location", key="car_location")
         st.text_input("Listing link", key="car_url", help="Becomes the QR code at the top of the sheet.")
         st.text_area("Notes", key="car_notes", height=80)
+        a, b = st.columns(2)
+        a.selectbox("3D body shape", list(SHAPE_NAMES), key="car_shape", format_func=SHAPE_NAMES.get,
+                    help="The shape of the 3D car in the showroom. Auto reads it from the Body field.")
+        b.selectbox("Engine position", list(LAYOUT_NAMES), key="car_layout", format_func=LAYOUT_NAMES.get,
+                    help="Sets the 3D car's proportions. Auto draws a front-engine car.")
 
 car = current_car()
 uploaded_photo = car_photo.getvalue() if car_photo is not None else None
@@ -523,7 +743,7 @@ with tab_comps:
                    "then paste its text or a screenshot here. Claude turns it into comps and cuts each car's "
                    "photo out of the screenshot.")
         page_text = st.text_area("Page text", key="page_text", height=120)
-        page_shot = st.file_uploader("Page screenshot", type=["png", "jpg", "jpeg", "webp"],
+        page_shot = st.file_uploader("Page screenshot", type=IMAGE_TYPES,
                                      key=f"page_shot_{ss['upload_ver']}")
         if st.button("Read comps from this page", disabled=client is None, help=None if client else needs_key):
             if not page_text.strip() and page_shot is None:
@@ -680,13 +900,47 @@ with hero_box:
         key="showroom",
     )
 
+# ----- the garage: remember this car, then add, switch or remove -----
+own_photo = uploaded_photo or ss["auto_photo"]
+ss["garage"][ss["active"]] = {
+    "car": car, "comps": comps, "offer": offer, "summary": ss["research_summary"], "message": ss["message_text"],
+    "sample": ss["is_sample"], "car_photo": own_photo,
+    "photos": {comp["img"]: ss["comp_photos"][comp["img"]] for comp in comps if comp.get("img") in ss["comp_photos"]},
+}
+actions = ss.pop("_garage_actions", [])
+picked = ss.get("garage_pick")
+if not actions and picked in ss["garage"] and picked != ss["active"]:
+    actions.append({"switch": picked})
+pills_drawn = not actions
+if pills_drawn:
+    if picked not in ss["garage"]:
+        ss["garage_pick"] = ss["active"]
+    with garage_box:
+        count = len(ss["garage_order"])
+        put(f'<div class="ds-label">Garage{DOT}{count} car{"s" if count != 1 else ""}</div>')
+        st.pills("Garage", ss["garage_order"], key="garage_pick", label_visibility="collapsed",
+                 format_func=lambda car_id: garage_label(car_id, car if car_id == ss["active"] else None))
+
 with deal_file_box:
-    saved = dict(deal)
-    saved["sample"] = False
-    saved["photos"] = {comp["img"]: base64.b64encode(ss["comp_photos"][comp["img"]]).decode("ascii")
-                       for comp in comps if comp.get("img") in ss["comp_photos"]}
-    own_photo = uploaded_photo or ss["auto_photo"]
-    if own_photo:
-        saved["car_photo"] = base64.b64encode(own_photo).decode("ascii")
-    st.download_button("Save this deal", data=json.dumps(saved, indent=2), file_name=f"{slug}.json",
+    this_car = export_deal(ss["garage"][ss["active"]])
+    whole = []
+    for car_id in ss["garage_order"]:
+        entry = ss["garage"][car_id]
+        if car_id == ss["active"]:
+            whole.append(this_car)
+        else:
+            if "_file" not in entry:
+                entry["_file"] = export_deal(entry)     # other cars do not change, so write them once
+            whole.append(entry["_file"])
+    stamp = dt.date.today().isoformat()
+    st.download_button("Save the garage", data=json.dumps({"garage": whole, "saved": stamp}, indent=1),
+                       file_name=f"deal-sheet-garage-{stamp}.json", mime="application/json", type="primary",
+                       width="stretch")
+    st.download_button("Save only this car", data=json.dumps(this_car, indent=1), file_name=f"{slug}.json",
                        mime="application/json", width="stretch")
+
+if actions:
+    run_garage_actions(actions)
+    if not pills_drawn:                 # a widget's value can only be set before it is drawn
+        ss["garage_pick"] = ss["active"]
+    st.rerun()

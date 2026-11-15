@@ -17,27 +17,73 @@ import calc
 
 STATUS_NAME = {"sold": "Sold", "high_bid": "High bid", "asking": "Asking"}
 
-# Paint names to a display color for the hologram and accents.
+# Paint names to an accent color (glow, rings) and to a paint color for the 3D car.
 _COLOR_WORDS = [
-    (("green", "aventurine", "emerald", "olive", "jade", "mint"), "#22a06b"),
-    (("red", "carmine", "guards", "crimson", "ruby", "burgundy", "maroon"), "#e5484d"),
-    (("blue", "navy", "sapphire", "azure", "misano", "cobalt", "gentian"), "#3b82f6"),
-    (("yellow", "gold", "racing yellow"), "#f5c518"),
-    (("orange", "lava", "copper", "papaya"), "#f97316"),
-    (("purple", "violet", "plum", "amethyst"), "#a855f7"),
-    (("brown", "mahogany", "bronze", "cognac", "espresso"), "#b08968"),
-    (("white", "chalk", "pearl", "ivory", "cream"), "#e8edf5"),
-    (("silver", "grey", "gray", "agate", "graphite", "titanium", "slate", "rhodium"), "#9fb0c7"),
-    (("black", "onyx", "obsidian", "jet"), "#7c8aa5"),
+    (("green", "aventurine", "emerald", "olive", "jade", "mint"), "#22a06b", "#1f6b4f"),
+    (("red", "carmine", "guards", "crimson", "ruby", "burgundy", "maroon"), "#e5484d", "#b3181f"),
+    (("blue", "navy", "sapphire", "azure", "misano", "cobalt", "gentian"), "#3b82f6", "#1f4fb8"),
+    (("yellow", "gold"), "#f5c518", "#e6b800"),
+    (("orange", "lava", "copper", "papaya"), "#f97316", "#e2570b"),
+    (("purple", "violet", "plum", "amethyst"), "#a855f7", "#6d32b8"),
+    (("brown", "mahogany", "bronze", "cognac", "espresso"), "#b08968", "#5e4330"),
+    (("chalk", "crayon"), "#e8edf5", "#c4c7cb"),
+    (("ivory", "cream", "beige"), "#e8edf5", "#e9e1cc"),
+    (("white", "pearl"), "#e8edf5", "#eef1f5"),
+    (("silver", "rhodium"), "#9fb0c7", "#aeb7c2"),
+    (("grey", "gray", "agate", "graphite", "titanium", "slate", "gunmetal"), "#9fb0c7", "#565d68"),
+    (("black", "onyx", "obsidian"), "#7c8aa5", "#1c2028"),
 ]
+_DEFAULT_COLORS = ("#34d399", "#2f9e7a")
+
+
+def _colors(paint: str) -> tuple[str, str]:
+    """(accent, paint) for a paint name. The color word that appears first wins: 'Black Sapphire' is black."""
+    text = (paint or "").lower()
+    best = None
+    for words, accent, body in _COLOR_WORDS:
+        for word in words:
+            at = text.find(word)
+            if at >= 0 and (best is None or at < best[0]):
+                best = (at, accent, body)
+    return (best[1], best[2]) if best else _DEFAULT_COLORS
 
 
 def color_for(paint: str) -> str:
-    text = (paint or "").lower()
-    for words, color in _COLOR_WORDS:
-        if any(word in text for word in words):
-            return color
-    return "#34d399"
+    return _colors(paint)[0]
+
+
+def paint_for(paint: str) -> str:
+    return _colors(paint)[1]
+
+
+BODY_SHAPES = ["coupe", "convertible", "sedan", "hatch", "wagon", "suv", "truck", "van"]
+LAYOUTS = ["front", "mid", "rear"]
+_BODY_WORDS = [
+    ("convertible", ("convertible", "cabriolet", "cabrio", "roadster", "spyder", "spider", "speedster", "targa")),
+    ("truck", ("truck", "pickup", "pick-up", "crew cab", "double cab", "extended cab")),
+    ("van", ("minivan", "van")),
+    ("suv", ("suv", "sport utility", "crossover")),
+    ("wagon", ("wagon", "estate", "shooting brake")),
+    ("hatch", ("hatchback", "hatch", "liftback")),
+    ("sedan", ("sedan", "saloon")),
+    ("coupe", ("coupe", "coup\u00e9", "fastback")),
+]
+
+
+def shape_for(car: dict) -> dict:
+    """The generic 3D shape for a car: its body type and where the engine sits."""
+    layout = str(car.get("layout") or "").lower()
+    layout = layout if layout in LAYOUTS else "front"
+    chosen = str(car.get("shape") or "").lower()
+    if chosen in BODY_SHAPES:
+        return {"body": chosen, "layout": layout}
+    for text in (str(car.get("body") or ""), f"{car.get('trim') or ''} {car.get('model') or ''}"):
+        words = re.findall(r"[a-z\u00e9-]+", text.lower())
+        joined = " ".join(words)
+        for body, names in _BODY_WORDS:
+            if any((name in words) if " " not in name else (name in joined) for name in names):
+                return {"body": body, "layout": layout}
+    return {"body": "coupe", "layout": layout}
 
 
 def data_url(image: bytes | None, mime: str = "image/jpeg") -> str:
@@ -130,13 +176,15 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "title": calc.car_title(car) if has_car else "New deal",
         "chips": chips,
         "seller": " · ".join(bit for bit in seller_bits if bit) if has_car
-        else "Paste a listing below, or load the sample from the sidebar.",
+        else "Add a car above: paste a listing link or add a screenshot.",
         "url": car.get("url") or "",
         "ask": ask, "askText": calc.money(ask) if ask else "n/a",
         "gap": gap, "tags": tags, "ladder": ladder,
         "offer": {"open": offer.get("open"), "target": offer.get("target"), "walk": offer.get("walk_away")},
         "comps": cards, "axis": axis,
         "color": color_for(str(car.get("exterior") or "")),
+        "paint": paint_for(str(car.get("exterior") or "")),
+        "shape": shape_for(car),
         "photo": data_url(photo),
         "counts": {"sold": stats["sold_count"], "asking": stats["asking_count"],
                    "highBid": sum(1 for c in used if c["status"] == "high_bid")},
@@ -516,6 +564,28 @@ function makeScene(THREE, root, S) {
     s.scale.set(size, size, 1); return s;
   };
 
+  /* a generic five-spoke wheel face, drawn once */
+  const wheelTex = (() => {
+    const c = document.createElement("canvas"); c.width = c.height = 256; const g = c.getContext("2d");
+    g.translate(128, 128);
+    g.fillStyle = "#07090d"; g.beginPath(); g.arc(0, 0, 128, 0, 7); g.fill();
+    g.fillStyle = "#11161f"; g.beginPath(); g.arc(0, 0, 90, 0, 7); g.fill();
+    g.strokeStyle = "#d5dde8"; g.lineWidth = 9; g.beginPath(); g.arc(0, 0, 86, 0, 7); g.stroke();
+    g.lineCap = "round"; g.lineWidth = 15;
+    for (let i = 0; i < 5; i++) { const a = (i / 5) * Math.PI * 2 - Math.PI / 2; g.beginPath(); g.moveTo(Math.cos(a) * 18, Math.sin(a) * 18); g.lineTo(Math.cos(a) * 82, Math.sin(a) * 82); g.stroke(); }
+    g.fillStyle = "#d5dde8"; g.beginPath(); g.arc(0, 0, 22, 0, 7); g.fill();
+    g.fillStyle = "#1b2330"; g.beginPath(); g.arc(0, 0, 9, 0, 7); g.fill();
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
+  })();
+  /* soft dark blob for the shadow under the car */
+  const shadeTex = (() => {
+    const c = document.createElement("canvas"); c.width = c.height = 128;
+    const g = c.getContext("2d"); const grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    grd.addColorStop(0, "rgba(0,0,0,.85)"); grd.addColorStop(0.55, "rgba(0,0,0,.55)"); grd.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = grd; g.fillRect(0, 0, 128, 128);
+    return new THREE.CanvasTexture(c);
+  })();
+
   /* floor: grid fading into fog, plus a pool of light under the turntable */
   const grid = new THREE.GridHelper(80, 80, 0x1f3b63, 0x12233f);
   grid.material.transparent = true; grid.material.opacity = 0.55; grid.position.y = -0.001;
@@ -544,51 +614,192 @@ function makeScene(THREE, root, S) {
   const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({ color: 0x9fd8c4, size: 0.035, transparent: true, opacity: 0.55, depthWrite: false }));
   scene.add(dust);
 
+  scene.add(new THREE.HemisphereLight(0xdbeafe, 0x0b1324, 1.25));
+  const keyLight = new THREE.DirectionalLight(0xffffff, 2.4); keyLight.position.set(5, 8, 7); scene.add(keyLight);
+  const rimLight = new THREE.DirectionalLight(0x9fd8ff, 1.2); rimLight.position.set(-7, 4, -6); scene.add(rimLight);
+
   const runway = new THREE.Group(); scene.add(runway);
   let carObj = null, carKey = "", scan = null, hits = [], half = 4.2, labelPoints = [];
-  const CAR_SCALE = 1.32, Z0 = 4.75;
+  const Z0 = 4.75;
   let spin = 0, vel = 0, offset = 0, photoMode = false;
 
   const dispose = (obj) => obj.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
-    if (o.material) { (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { if (m.map && m.map !== glowTex) m.map.dispose(); m.dispose(); }); }
+    if (o.material) { (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { if (m.map && m.map !== glowTex && m.map !== wheelTex && m.map !== shadeTex) m.map.dispose(); m.dispose(); }); }
   });
 
-  /* a generic coupe drawn as a hologram: two extruded profiles, wheels and light bars */
-  function buildCoupe(colorHex) {
-    const color = new THREE.Color(colorHex);
-    const bright = color.clone().lerp(new THREE.Color(0xffffff), 0.45);
-    const g = new THREE.Group();
-    const extrude = (pts, depth, bevel) => {
-      const shape = new THREE.Shape();
-      shape.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) shape.lineTo(pts[i][0], pts[i][1]); shape.closePath();
-      const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 2, curveSegments: 1 });
-      geo.translate(0, 0, -depth / 2); return geo;
+  /* ---- the car: a generic shape for its body type, in the listing's paint colour ----
+     Each body type has a hand-drawn side profile (front of the car at +x) that is lofted
+     into a smooth shell. These are generic shapes: no maker's design is modelled. */
+  const BODIES = {
+    coupe_front: { L: 4.6, W: 1.86, g: 0.28, r: 0.345, ax: [1.42, -1.28],
+      belt: [[-2.3, 0.72], [-1.95, 0.9], [-1.3, 0.95], [0, 0.94], [0.55, 0.93], [1.4, 0.86], [2.0, 0.72], [2.3, 0.55]],
+      roof: [[-1.75, 0.93], [-1.15, 1.2], [-0.6, 1.32], [-0.1, 1.31], [0.55, 0.93]], paint: [[-0.72, -0.08]], glass: [-1.3, 0.45], tub: 1.7 },
+    coupe_rear: { L: 4.5, W: 1.84, g: 0.27, r: 0.345, ax: [1.32, -1.13],
+      belt: [[-2.25, 0.7], [-1.9, 0.86], [-1.2, 0.93], [0.2, 0.93], [0.95, 0.9], [1.6, 0.8], [2.05, 0.66], [2.25, 0.52]],
+      roof: [[-1.95, 0.86], [-1.2, 1.1], [-0.45, 1.27], [0.1, 1.3], [0.45, 1.24], [1.0, 0.9]], paint: [[-1.95, -1.25], [-0.45, 0.45]], glass: [-1.2, 0.9], tub: 1.75 },
+    coupe_mid: { L: 4.5, W: 1.92, g: 0.24, r: 0.345, ax: [1.33, -1.3],
+      belt: [[-2.25, 0.76], [-1.9, 0.94], [-1.0, 0.98], [0.3, 0.9], [1.1, 0.83], [1.7, 0.69], [2.1, 0.55], [2.25, 0.45]],
+      roof: [[-1.3, 0.97], [-0.8, 1.13], [-0.25, 1.2], [0.3, 1.18], [1.12, 0.83]], paint: [[-1.3, -0.85], [-0.3, 0.3]], glass: [-0.75, 1.02], tub: 1.3 },
+    sedan: { L: 4.85, W: 1.86, g: 0.3, r: 0.34, ax: [1.5, -1.4],
+      belt: [[-2.42, 0.76], [-2.15, 0.96], [-1.5, 1.0], [0, 0.99], [0.75, 0.97], [1.6, 0.92], [2.15, 0.78], [2.42, 0.58]],
+      roof: [[-1.6, 1.0], [-1.05, 1.36], [-0.5, 1.45], [0.1, 1.44], [0.78, 0.97]], paint: [[-1.0, 0.05]], glass: [-1.4, 0.68] },
+    hatch: { L: 4.3, W: 1.8, g: 0.3, r: 0.33, ax: [1.33, -1.27],
+      belt: [[-2.15, 0.78], [-1.95, 0.98], [-1.0, 1.0], [0.6, 0.98], [1.35, 0.92], [1.9, 0.78], [2.15, 0.58]],
+      roof: [[-2.06, 0.99], [-1.72, 1.36], [-1.0, 1.47], [0, 1.46], [0.66, 0.98]], paint: [[-1.62, -0.05]], glass: [-1.8, 0.56] },
+    wagon: { L: 4.8, W: 1.86, g: 0.3, r: 0.34, ax: [1.5, -1.38],
+      belt: [[-2.4, 0.78], [-2.2, 0.98], [-1.2, 1.0], [0.75, 0.97], [1.6, 0.92], [2.15, 0.78], [2.4, 0.58]],
+      roof: [[-2.33, 0.99], [-1.98, 1.38], [-1.0, 1.46], [0.1, 1.45], [0.78, 0.97]], paint: [[-1.88, 0.05]], glass: [-2.05, 0.68] },
+    suv: { L: 4.75, W: 1.95, g: 0.42, r: 0.4, ax: [1.45, -1.37],
+      belt: [[-2.37, 0.96], [-2.2, 1.16], [-1.2, 1.2], [0.8, 1.17], [1.6, 1.12], [2.1, 0.98], [2.37, 0.74]],
+      roof: [[-2.31, 1.19], [-2.02, 1.62], [-1.0, 1.72], [0.15, 1.7], [0.86, 1.17]], paint: [[-1.92, 0.1]], glass: [-2.05, 0.76] },
+    truck: { L: 5.5, W: 2.0, g: 0.45, r: 0.42, ax: [1.85, -1.75],
+      belt: [[-2.75, 1.04], [-2.6, 1.24], [-0.6, 1.26], [1.2, 1.24], [2.0, 1.2], [2.5, 1.08], [2.75, 0.82]],
+      roof: [[-0.44, 1.26], [-0.36, 1.76], [0.2, 1.85], [0.75, 1.83], [1.32, 1.24]], paint: [[-0.34, 0.7]], glass: [-0.3, 1.2], bed: [-2.58, -0.5] },
+    van: { L: 5.0, W: 1.98, g: 0.36, r: 0.37, ax: [1.62, -1.5],
+      belt: [[-2.5, 0.96], [-2.4, 1.18], [-1.0, 1.2], [1.6, 1.15], [2.2, 1.02], [2.5, 0.74]],
+      roof: [[-2.46, 1.19], [-2.3, 1.8], [-1.0, 1.9], [0.9, 1.88], [1.78, 1.15]], paint: [[-2.22, 0.85]], glass: [-2.15, 1.62] },
+  };
+  function bodySpec(shape) {
+    const body = (shape && shape.body) || "coupe", layout = (shape && shape.layout) || "front";
+    const open = body === "convertible";
+    const base = BODIES[body === "coupe" || open ? "coupe_" + (layout === "rear" || layout === "mid" ? layout : "front") : body] || BODIES.coupe_front;
+    if (!open) return base;
+    /* open top: keep the windscreen, drop the roof, show the cabin */
+    const cowl = base.roof[base.roof.length - 1], top = Math.max(...base.roof.map((p) => p[1]));
+    return { ...base, roof: [[cowl[0] - 0.6, top - 0.06], cowl], paint: [], glass: [cowl[0] - 0.6, cowl[0]], cabin: [cowl[0] - base.tub, cowl[0] - 0.14] };
+  }
+  /* a smooth curve through points that never overshoots them */
+  const curve = (pts) => {
+    const n = pts.length, d = [], m = new Array(n);
+    for (let i = 0; i < n - 1; i++) d.push((pts[i + 1][1] - pts[i][1]) / (pts[i + 1][0] - pts[i][0]));
+    m[0] = d[0]; m[n - 1] = d[n - 2];
+    for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (2 * d[i - 1] * d[i]) / (d[i - 1] + d[i]);
+    return (x) => {
+      if (x <= pts[0][0]) return pts[0][1];
+      if (x >= pts[n - 1][0]) return pts[n - 1][1];
+      let i = 0; while (x > pts[i + 1][0]) i++;
+      const h = pts[i + 1][0] - pts[i][0], t = (x - pts[i][0]) / h, t2 = t * t, t3 = t2 * t;
+      return (2 * t3 - 3 * t2 + 1) * pts[i][1] + (t3 - 2 * t2 + t) * h * m[i] + (-2 * t3 + 3 * t2) * pts[i + 1][1] + (t3 - t2) * h * m[i + 1];
     };
-    const lower = extrude([[-2.12, 0.30], [-2.2, 0.58], [-2.1, 0.80], [-1.5, 0.88], [1.05, 0.86], [1.95, 0.72], [2.2, 0.52], [2.14, 0.30]], 1.6, 0.1);
-    const cabin = extrude([[-1.55, 0.86], [-1.0, 1.22], [0.1, 1.26], [0.98, 0.86]], 1.22, 0.07);
-    for (const [geo, fill] of [[lower, 0.16], [cabin, 0.10]]) {
-      g.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: fill, depthWrite: false, side: THREE.DoubleSide })));
-      g.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo, 16), new THREE.LineBasicMaterial({ color: bright, transparent: true, opacity: 0.95 })));
+  };
+  /* skin a row of cross-sections; matOf picks the material for each panel */
+  const loft = (rings, closed, matOf, nMat) => {
+    const K = rings[0].length, pos = [];
+    rings.forEach((ring) => ring.forEach((p) => pos.push(p[0], p[1], p[2])));
+    const buckets = Array.from({ length: nMat }, () => []);
+    for (let i = 0; i < rings.length - 1; i++) for (let j = 0; j < (closed ? K : K - 1); j++) {
+      const a = i * K + j, b = i * K + ((j + 1) % K), c = (i + 1) * K + j, e = (i + 1) * K + ((j + 1) % K);
+      buckets[matOf((rings[i][0][0] + rings[i + 1][0][0]) / 2, j)].push(a, c, b, b, c, e);
     }
-    const wheelMat = new THREE.MeshBasicMaterial({ color: bright, transparent: true, opacity: 0.9 });
-    const hubMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.35 });
-    for (const [x, z] of [[-1.36, 0.86], [1.36, 0.86], [-1.36, -0.86], [1.36, -0.86]]) {
-      const w = new THREE.Mesh(new THREE.TorusGeometry(0.33, 0.045, 8, 40), wheelMat); w.position.set(x, 0.36, z); g.add(w);
-      const h = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.02, 6, 28), hubMat); h.position.set(x, 0.36, z); g.add(h);
+    const geo = new THREE.BufferGeometry(); geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    const index = []; let start = 0;
+    buckets.forEach((bucket, m) => { geo.addGroup(start, bucket.length, m); start += bucket.length; bucket.forEach((v) => index.push(v)); });
+    geo.setIndex(index); geo.computeVertexNormals(); return geo;
+  };
+
+  function buildCar(accentHex, paintHex, shape) {
+    const spec = bodySpec(shape), { L, W, r } = spec, hl = L / 2, crown = 0.035;
+    const accent = new THREE.Color(accentHex), bright = accent.clone().lerp(new THREE.Color(0xffffff), 0.45);
+    const g = new THREE.Group();
+    const belt = curve(spec.belt), roof = curve(spec.roof);
+    const bottom = (x) => spec.g + 0.17 * Math.pow(Math.abs(x) / hl, 6);
+    const hw = (x) => { const t = Math.min(Math.abs(x) / hl, 1); return Math.max(0.012, (W / 2) * (1 - (x > 0 ? 0.17 : 0.12) * Math.pow(t, 2.4)) * Math.sqrt(Math.max(0, 1 - Math.pow(t, 20)))); };
+    /* where the rounded nose (dir 1) or tail (dir -1) is `z` wide */
+    const endX = (z, dir) => { let lo = hl * 0.7, hi = hl; for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (hw(dir * mid) > z) lo = mid; else hi = mid; } return dir * lo; };
+    const offsetFill = { polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
+    const paintMat = new THREE.MeshPhongMaterial({ color: new THREE.Color(paintHex), specular: 0x9fb6d4, shininess: 70, side: THREE.DoubleSide, ...offsetFill });
+    const glassMat = new THREE.MeshPhongMaterial({ color: 0x0b1626, specular: 0xbfd8ff, shininess: 140, side: THREE.DoubleSide, transparent: true, opacity: 0.88, ...offsetFill });
+    const darkMat = new THREE.MeshBasicMaterial({ color: 0x04070c, side: THREE.DoubleSide });
+
+    /* lower body */
+    const N = 64, bodyRings = [];
+    for (let i = 0; i < N; i++) {
+      const x = hl * Math.sin((-1 + (2 * i) / (N - 1)) * Math.PI / 2);
+      const w = hw(x), yb = bottom(x), yt = Math.max(belt(x), yb + 0.05), h = yt - yb;
+      const half = [[0, yb], [w * 0.72, yb], [w * 0.95, yb + Math.min(0.07, h * 0.2)], [w, yb + h * 0.32], [w, yb + h * 0.62], [w * 0.975, yb + h * 0.86], [w * 0.9, yb + h * 0.975], [w * 0.6, yt + crown * 0.6], [0, yt + crown]];
+      const ring = half.map((p) => [x, p[1], p[0]]);
+      for (let k = 7; k >= 1; k--) ring.push([x, half[k][1], -half[k][0]]);
+      bodyRings.push(ring);
     }
-    const bar = (x, w, c) => { const m = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.05, w), new THREE.MeshBasicMaterial({ color: c })); m.position.set(x, 0.66, 0); g.add(m); const s = glow(c, 1.5, 0.5); s.position.set(x, 0.66, 0); g.add(s); };
-    bar(2.24, 1.5, 0xe8f4ff); bar(-2.24, 1.5, 0xff4d5e);
-    const under = glow(color, 7.5, 0.5); under.position.set(0, 0.25, 0); g.add(under);
-    scan = new THREE.Mesh(new THREE.PlaneGeometry(1.9, 1.5), new THREE.MeshBasicMaterial({ color: bright, transparent: true, opacity: 0.16, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
-    scan.rotation.y = Math.PI / 2; scan.position.y = 0.78; g.add(scan);
-    /* faint mirror image in the floor */
-    const mirror = new THREE.Group();
-    g.children.filter((o) => o.isLineSegments).forEach((o) => {
-      const c = o.clone(); c.material = o.material.clone(); c.material.opacity = 0.16; mirror.add(c);
+    g.add(new THREE.Mesh(loft(bodyRings, true, () => 0, 1), [paintMat]));
+
+    /* glasshouse and roof */
+    const xs = new Set(), r0 = spec.roof[0][0], r1 = spec.roof[spec.roof.length - 1][0];
+    for (let i = 0; i <= 44; i++) xs.add(+(r0 + ((r1 - r0) * i) / 44).toFixed(4));
+    spec.roof.forEach((p) => xs.add(p[0]));
+    const topRings = [...xs].sort((a, b) => a - b).map((x) => {
+      const w = hw(x), yt = belt(x), yr = Math.max(roof(x), yt), gh = yr - yt, k = Math.min(1, gh / 0.3);
+      const edge = w * (0.9 - 0.2 * k);
+      const half = [[w * 0.9, yt], [w * (0.9 - 0.09 * k), yt + gh * 0.55], [edge, yt + gh * 0.94], [edge * 0.55, yr + 0.012 * k], [0, yr + 0.02 * k]];
+      const ring = half.map((p) => [x, p[1], p[0]]);
+      for (let q = 3; q >= 0; q--) ring.push([x, half[q][1], -half[q][0]]);
+      return ring;
     });
+    const painted = (x) => spec.paint.some((q) => x >= q[0] && x <= q[1]);
+    const topMat = (x, j) => (j < 2 || j > 5 ? (x >= spec.glass[0] && x <= spec.glass[1] ? 1 : 0) : (painted(x) ? 0 : 1));
+    g.add(new THREE.Mesh(loft(topRings, false, topMat, 2), [paintMat, glassMat]));
+
+    /* contour lines: sills, shoulders, spine, roof rails */
+    const lineMat = new THREE.LineBasicMaterial({ color: bright, transparent: true, opacity: 0.8 });
+    const trace = (rings, j) => new THREE.Line(new THREE.BufferGeometry().setFromPoints(rings.map((ring) => new THREE.Vector3(ring[j][0], ring[j][1], ring[j][2]))), lineMat);
+    [2, 6, 10, 14].forEach((j) => g.add(trace(bodyRings, j)));
+    [2, 4, 6].forEach((j) => g.add(trace(topRings, j)));
+
+    /* a dark inset on top of the body: an open cabin or a pickup bed */
+    const inset = (x0, x1, share) => {
+      const pos = [], idx = [], seg = 14;
+      for (let i = 0; i <= seg; i++) {
+        const x = x0 + ((x1 - x0) * i) / seg, y = belt(x) + crown + 0.012, z = hw(x) * share;
+        pos.push(x, y, z, x, y, -z);
+        if (i < seg) { const a = i * 2; idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
+      }
+      const geo = new THREE.BufferGeometry(); geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3)); geo.setIndex(idx);
+      g.add(new THREE.Mesh(geo, darkMat));
+    };
+    if (spec.cabin) {
+      inset(spec.cabin[0], spec.cabin[1], 0.68);
+      const seatMat = new THREE.MeshPhongMaterial({ color: 0x1c2636, specular: 0x475569, shininess: 30 });
+      const sx = spec.cabin[1] - 0.98;
+      for (const s of [1, -1]) { const seat = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.3, 0.42), seatMat); seat.position.set(sx, belt(sx) + 0.05, s * hw(sx) * 0.36); seat.rotation.z = 0.18; g.add(seat); }
+    }
+    if (spec.bed) inset(spec.bed[0], spec.bed[1], 0.82);
+
+    /* wheels */
+    const tireMat = new THREE.MeshPhongMaterial({ color: 0x0a0d13, specular: 0x334155, shininess: 30 });
+    const faceMat = new THREE.MeshBasicMaterial({ map: wheelTex, side: THREE.DoubleSide });
+    const haloMat = new THREE.MeshBasicMaterial({ color: bright, transparent: true, opacity: 0.75 });
+    for (const x of spec.ax) for (const s of [1, -1]) {
+      const w = hw(x);
+      const well = new THREE.Mesh(new THREE.CircleGeometry(r * 1.2, 40, 0, Math.PI), darkMat); well.position.set(x, r, s * (w + 0.004)); g.add(well);
+      const tire = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.25, 40), tireMat); tire.rotation.x = Math.PI / 2; tire.position.set(x, r, s * (w - 0.1)); g.add(tire);
+      const face = new THREE.Mesh(new THREE.CircleGeometry(r * 0.99, 40), faceMat); face.position.set(x, r, s * (w + 0.027)); g.add(face);
+      const halo = new THREE.Mesh(new THREE.TorusGeometry(r * 0.7, 0.01, 6, 40), haloMat); halo.position.set(x, r, s * (w + 0.031)); g.add(halo);
+    }
+
+    /* lamps: two soft headlamps and a light bar across the tail */
+    const lampY = (x) => bottom(x) + (belt(x) - bottom(x)) * 0.62;
+    for (const s of [1, -1]) {
+      const z = (W / 2) * 0.56, x = endX(z + 0.05, 1);
+      const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.075, 16, 12), new THREE.MeshBasicMaterial({ color: 0xeaf6ff })); lamp.scale.set(0.8, 0.55, 1.9); lamp.position.set(x, lampY(x), s * z); g.add(lamp);
+      const flare = glow(0xdff1ff, 1.05, 0.5); flare.position.copy(lamp.position); g.add(flare);
+    }
+    const tail = [];
+    for (let i = -8; i <= 8; i++) { const z = (i / 8) * (W / 2) * 0.8, x = endX(Math.abs(z) + 0.03, -1) - 0.012; tail.push(new THREE.Vector3(x, lampY(x), z)); }
+    g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(tail), 40, 0.02, 6), new THREE.MeshBasicMaterial({ color: 0xff4d5e })));
+    const ember = glow(0xff4d5e, 1.5, 0.45); ember.position.set(tail[8].x, tail[8].y, 0); g.add(ember);
+
+    const top = Math.max(...spec.roof.map((p) => p[1]));
+    const under = glow(accent, 7.5, 0.3); under.position.set(0, 0.1, 0); g.add(under);
+    const shade = new THREE.Mesh(new THREE.PlaneGeometry(L * 1.18, W * 1.5), new THREE.MeshBasicMaterial({ map: shadeTex, transparent: true, depthWrite: false }));
+    shade.rotation.x = -Math.PI / 2; shade.position.y = 0.012; g.add(shade);
+    scan = new THREE.Mesh(new THREE.PlaneGeometry(W + 0.24, top + 0.16), new THREE.MeshBasicMaterial({ color: bright, transparent: true, opacity: 0.16, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+    scan.rotation.y = Math.PI / 2; scan.position.y = (top + 0.16) / 2; scan.userData.reach = hl - 0.06; g.add(scan);
+    /* faint mirror image of the contour lines in the floor */
+    const mirror = new THREE.Group();
+    g.children.filter((o) => o.isLine).forEach((o) => { const c = o.clone(); c.material = o.material.clone(); c.material.opacity = 0.16; mirror.add(c); });
     mirror.scale.y = -1; g.add(mirror);
-    g.scale.setScalar(CAR_SCALE);
+    g.scale.setScalar(Math.min(5.8 / L, 1.9 / top));
     return g;
   }
 
@@ -598,7 +809,7 @@ function makeScene(THREE, root, S) {
     const img = new Image();
     img.onload = () => {
       const aspect = Math.min(Math.max(img.width / img.height, 1.15), 2.1);
-      const h = Math.min(2.6, 5.4 / aspect), w = h * aspect;
+      const h = Math.min(2.25, 5.2 / aspect), w = h * aspect;
       const cw = 1024, ch = Math.round(cw / aspect);
       const round = (alpha) => {
         const c = document.createElement("canvas"); c.width = cw; c.height = ch; const x = c.getContext("2d");
@@ -623,13 +834,13 @@ function makeScene(THREE, root, S) {
   }
 
   function setCar(d) {
-    const key = (d.photo ? "p:" + d.photo.length + d.photo.slice(-24) : "h") + d.color;
+    const key = (d.photo ? "p:" + d.photo.length + d.photo.slice(-24) : "h:" + JSON.stringify(d.shape || {}) + (d.paint || "")) + d.color;
     if (key === carKey) return;
     carKey = key;
     if (carObj) { table.remove(carObj); dispose(carObj); }
     scan = null;
     photoMode = !!d.photo;
-    carObj = photoMode ? buildPhoto(d.photo, d.color) : buildCoupe(d.color);
+    carObj = photoMode ? buildPhoto(d.photo, d.color) : buildCar(d.color, d.paint || d.color, d.shape);
     table.add(carObj);
     spin = photoMode ? 0 : -0.55; offset = 0; vel = 0;
     const c = new THREE.Color(d.color);
@@ -776,7 +987,7 @@ function makeScene(THREE, root, S) {
     t += dt;
     if (photoMode) { offset += vel; vel *= 0.92; offset *= 0.985; offset = Math.max(-1.1, Math.min(1.1, offset)); table.rotation.y = (calm ? 0 : Math.sin(t * 0.45) * 0.3) + offset; }
     else { if (!down) { spin += vel; vel *= 0.94; if (!calm) spin += dt * 0.22; } table.rotation.y = spin; }
-    if (scan) scan.position.x = Math.sin(t * 0.9) * 2.15;
+    if (scan) scan.position.x = Math.sin(t * 0.9) * (scan.userData.reach || 2.15);
     if (!calm) { marks.rotation.y -= dt * 0.08; dust.rotation.y += dt * 0.012; ring2.material.opacity = 0.28 + Math.sin(t * 1.6) * 0.1; }
     renderer.render(scene, camera);
   }

@@ -44,6 +44,12 @@ _lock = threading.Lock()
 _META = re.compile(r"<meta\b[^>]*>", re.I)
 _ATTR = re.compile(r"""([a-zA-Z:_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 _IMAGE_KEYS = ("og:image", "og:image:secure_url", "og:image:url", "twitter:image", "twitter:image:src")
+_TEXT_KEYS = ("og:title", "og:description", "description", "twitter:title", "twitter:description",
+              "product:price:amount", "og:price:amount")
+_TITLE = re.compile(r"<title\b[^>]*>(.*?)</title\s*>", re.I | re.S)
+_LD_JSON = re.compile(r"<script\b[^>]*application/ld\+json[^>]*>(.*?)</script\s*>", re.I | re.S)
+_HIDDEN = re.compile(r"<(script|style|noscript|svg|template|head)\b.*?</\1\s*>", re.I | re.S)
+_TAG = re.compile(r"<[^>]+>")
 
 
 def is_safe_url(url: str) -> bool:
@@ -173,6 +179,70 @@ def _fetch(url: str, max_width: int) -> bytes | None:
         return to_jpeg(data, max_width)
     except Exception:
         return None
+    finally:
+        session.close()
+
+
+def _page_text(page: str) -> str:
+    """What a listing page says, as plain text for Claude: title, share tags, structured data, visible text."""
+    parts = []
+    title = _TITLE.search(page)
+    if title:
+        parts.append("Page title: " + html.unescape(_TAG.sub(" ", title.group(1))).strip())
+    for tag in _META.findall(page):
+        attrs = {}
+        for match in _ATTR.finditer(tag):
+            value = match.group(2) if match.group(2) is not None else match.group(3)
+            attrs[match.group(1).lower()] = html.unescape(value or "")
+        key = (attrs.get("property") or attrs.get("name") or "").strip().lower()
+        content = (attrs.get("content") or "").strip()
+        if key in _TEXT_KEYS and content:
+            parts.append(f"{key}: {content}")
+    structured = " ".join(block.strip() for block in _LD_JSON.findall(page))
+    if structured:
+        parts.append("Structured data: " + re.sub(r"\s+", " ", structured)[:5000])
+    visible = html.unescape(_TAG.sub(" ", _HIDDEN.sub(" ", page)))
+    visible = re.sub(r"\s+", " ", visible).strip()
+    if visible:
+        parts.append("Page text: " + visible[:8000])
+    return "\n".join(parts)
+
+
+def read_page(url: str, max_width: int = 1100) -> dict:
+    """Read a listing page, if its site allows it: the page's text and its share image.
+
+    Returns {"status", "text", "image"}. Status is "ok", "blocked" (robots.txt or the site
+    refused), "unreachable" or "invalid". Nothing here tries to get past a refusal.
+    """
+    result = {"status": "invalid", "text": "", "image": None}
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,image/*;q=0.9,*/*;q=0.5"})
+    try:
+        if not is_safe_url(url):
+            return result
+        if not _allowed(url, session):
+            result["status"] = "blocked"
+            return result
+        status, final_url, content_type, body = _get(url, PAGE_LIMIT, session)
+        if status in (401, 403, 406, 429, 451, 503):
+            result["status"] = "blocked"
+            return result
+        if status != 200 or content_type.lower().startswith("image/"):
+            result["status"] = "unreachable"
+            return result
+        page = body.decode("utf-8", "replace")
+        result["status"] = "ok"
+        result["text"] = _page_text(page)
+        image_url = find_image(page, final_url)
+        if image_url and is_safe_url(image_url) and _allowed(image_url, session):
+            status, _, _, data = _get(image_url, IMAGE_LIMIT, session)
+            if status == 200 and len(data) <= IMAGE_LIMIT:
+                result["image"] = to_jpeg(data, max_width)
+        _store(url, max_width, result["image"])      # the showroom's preview lookup reuses this
+        return result
+    except Exception:
+        result["status"] = "unreachable"
+        return result
     finally:
         session.close()
 

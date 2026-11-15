@@ -100,6 +100,20 @@ a.ds-comp:hover{border-color:var(--line2);transform:translateY(-1px)}
 .ds-byok-s{font:400 13.5px/1.55 var(--sans);color:var(--mute)}
 .ds-byok-s a{color:#6ee7b7;white-space:nowrap}
 
+/* ---------- garage row and add-a-car ---------- */
+.st-key-garage{margin:2px 0 2px}
+.st-key-garage .ds-label{margin-bottom:6px;color:#6ee7b7}
+.st-key-garage [data-testid="stButtonGroup"] button,.st-key-garage [data-testid="stPills"] button{border-radius:999px;
+  border-color:var(--line2);background:var(--card2);font:500 13.5px var(--sans)}
+.st-key-garage [data-testid="stButtonGroup"] button[aria-checked="true"],
+.st-key-garage [data-testid="stButtonGroup"] button[kind="pillsActive"],
+.st-key-garage [data-testid="stPills"] button[aria-pressed="true"]{border-color:rgba(16,185,129,.7);
+  background:rgba(16,185,129,.16);color:#d1fae5}
+.st-key-intake:has(.ds-intake){border:1px solid var(--line2);border-radius:18px;padding:14px 16px 12px;background:var(--card2)}
+.st-key-intake .ds-label{color:#6ee7b7}
+.ds-intake-t{font:700 17px/1.3 var(--sans);color:var(--ink);margin:4px 0 2px}
+.st-key-intake_toggle button{border-style:dashed;border-color:rgba(16,185,129,.45);color:#a7f3d0;background:rgba(16,185,129,.06)}
+
 /* ---------- misc blocks ---------- */
 .ds-h{font:700 11px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin:8px 0 2px}
 .ds-note{border:1px solid var(--line);border-radius:14px;padding:12px 14px;background:var(--card2);color:#cbd5e1;font:400 14px/1.5 var(--sans)}
@@ -143,6 +157,7 @@ h4{letter-spacing:-.01em}
   .ds-tile{padding:10px 12px}
   .ds-railwrap{margin-top:16px}
   .st-key-byok{padding:16px 14px}
+  .st-key-byok [data-testid="stHorizontalBlock"]{gap:.4rem}
   .ds-ask{text-align:left;min-width:0}
   .ds-ladder{grid-template-columns:repeat(2,minmax(0,1fr))}
   .ds-railwrap{padding:12px 10px 8px}

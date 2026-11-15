@@ -2,17 +2,27 @@
 
 A Streamlit app that turns a car listing into a negotiation brief you can print and hand over.
 
+## The short version
+
+Tap **Add a car**, paste a listing link or add a screenshot, and press **Build the deal sheet**.
+Claude reads the listing, researches comps, suggests an offer and drafts the message in one run
+(about two minutes). Every car you add goes in the **garage** at the top of the page.
+
 ## What you see
 
+- **A garage.** Each car you add is a chip at the top. Tap one to switch. Nothing is kept between
+  visits, so save the garage to a file from the sidebar and open that file to bring your cars back.
 - **A 3D showroom.** The car sits on a turntable you can drag to spin (WebGL, three.js). With a photo it
-  shows the photo as a lit slab; without one it draws a hologram in the car's color. In front of it,
-  the comps stand as glowing markers on a price runway, with the asking price as a beacon and your
-  offer range as a lit band. Tap a marker to open that listing.
+  shows the photo as a lit slab. Without one it draws a 3D car of the right body type (coupe,
+  convertible, sedan, hatchback, wagon, SUV, pickup or van), with proportions for a front, mid or rear
+  engine, in the listing's paint color. These are generic shapes, not a model of any maker's design.
+  In front of it, the comps stand as glowing markers on a price runway, with the asking price as a
+  beacon and your offer range as a lit band. Tap a marker to open that listing.
 - **A comps carousel.** Each comp is a card with its photo (or a mini price map), and the whole card
   links straight to its source.
-- **Four steps underneath.**
-  1. **Car.** Paste a listing or add a screenshot. Claude fills in the details and cuts the car's
-     photo out of the screenshot.
+- **Four tabs underneath**, to check and adjust what the one-step build produced, or to do it by hand.
+  1. **Car.** The car's details, and a reader that updates this car from pasted text, a link or a
+     screenshot. Claude cuts the car's photo out of the screenshot.
   2. **Comps.** Claude searches the web for completed sales, unsold auctions and asking prices. You can
      also add comps by hand, or drop in a screenshot of a results page.
   3. **Offer.** Claude suggests an opening offer, a target and a walk-away price. The app works out
@@ -43,6 +53,20 @@ the page; a button beside it opens the Claude Console keys page (https://platfor
   tokens, and the sidebar caps the number of searches per run.
 
 Everything except the Claude buttons works without a key.
+
+## Links and screenshots
+
+A listing link works when the site lets apps read its pages: the app fetches the page the way a
+link preview does, obeying robots.txt, and hands its text to Claude. Many big marketplaces refuse
+(Cars.com, Classic.com, Bring a Trailer, Facebook Marketplace). For those, add a screenshot of the
+listing. If you give only a blocked link, the app reads the words in the link itself (often the
+year, make and model) and tells you what is missing.
+
+## Models
+
+The app offers Claude Sonnet 5.5, Haiku 5.5 and Opus 5.5. Sonnet 5.5 and Opus 5.5 reject a forced
+tool choice, think by default and count thinking toward the output limit, so `llm.py` asks for
+tool calls in the prompt, retries once when a reply has none, and sets generous output limits.
 
 ## Where the pictures come from
 
@@ -83,8 +107,9 @@ Turn the fetch off in the sidebar under Photos.
 | `sheet.py` | Builds the PDF and its QR codes |
 | `calc.py` | Money math and comp helpers |
 | `styles.py` | The stylesheet for the Streamlit widgets |
-| `sample_deal.json` | The sample deal (2020 911 Carrera S, researched Nov 14, 2026) |
+| `sample_deal.json` | The sample car (2020 911 Carrera S, researched Nov 14, 2026) |
 | `static/` | Fonts (DM Sans, JetBrains Mono, SIL Open Font License) and three.js (MIT) |
 | `assets/fonts/` | The same fonts as TTF for the PDF |
 
-Deals save and reopen as JSON files from the sidebar, photos included. Nothing is stored on a server.
+The garage saves and reopens as one JSON file from the sidebar, photos included (a single car can be
+saved too). Nothing is stored on a server.
