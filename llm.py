@@ -16,11 +16,12 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import MIRROR_SITES, car_facts, car_title, clean_comps, is_mirror, link_kind, mark_other_trim, merge_comps, money, normalize_url
+from calc import MIRROR_SITES, car_facts, car_title, clean_comps, host_of, is_mirror, link_kind, mark_other_trim, merge_comps, money, normalize_url
 
 MODELS = {
     "Sonnet 5.5 (balanced)": "claude-sonnet-5-5",
@@ -86,17 +87,97 @@ def _search_urls(response) -> set[str]:
     return found
 
 
-def _create(client, effort: str | None = None, **kwargs):
-    """One Messages API request. `effort` sets how hard the model thinks (low, medium, high)."""
+class Progress:
+    """Lines about what is happening right now, for the screen to show while the person waits.
+
+    Any thread may add a line. Only the thread that made the object draws them, because the page is
+    written from the script's own thread: a worker's lines are drawn at the next `flush` from there.
+    """
+
+    def __init__(self, show=None):
+        self.lines: list[str] = []
+        self._show, self._home, self._lock, self._dirty = show, threading.get_ident(), threading.Lock(), False
+
+    def say(self, text) -> None:
+        text = " ".join(str(text or "").split())[:170]
+        with self._lock:
+            if text and (not self.lines or self.lines[-1] != text):
+                self.lines.append(text)
+                self._dirty = True
+        self.flush()
+
+    def flush(self) -> None:
+        if not self._show or not self._dirty or threading.get_ident() != self._home:
+            return
+        with self._lock:
+            lines, self._dirty = list(self.lines), False
+        try:
+            self._show(lines)
+        except Exception:                      # the commentary is a courtesy: it never stops the work
+            pass
+
+
+def _watch(event, kinds: dict, parts: dict, progress: Progress, label: str) -> None:
+    """Turn one streamed event into a line for the screen: each search as it is sent, and what came back."""
+    kind, index = getattr(event, "type", ""), getattr(event, "index", None)
+    if kind == "content_block_start":
+        block = event.content_block
+        kinds[index] = getattr(block, "type", "")
+        if kinds[index] == "web_search_tool_result":
+            results = getattr(block, "content", None)
+            if isinstance(results, list):
+                hosts: list[str] = []
+                for item in results:
+                    url = item.get("url") if isinstance(item, dict) else getattr(item, "url", "")
+                    host = host_of(str(url or ""))
+                    if host and host not in hosts:
+                        hosts.append(host)
+                where = f" from {', '.join(hosts[:3])}{' and others' if len(hosts) > 3 else ''}" if hosts else ""
+                progress.say(f"{label}: {len(results)} page{'s' if len(results) != 1 else ''} back{where}")
+            else:
+                progress.say(f"{label}: that search came back empty")
+        elif kinds[index] == "tool_use":
+            progress.say(f"{label}: writing up what it found")
+    elif kind == "content_block_delta" and getattr(event.delta, "type", "") == "input_json_delta":
+        parts[index] = parts.get(index, "") + (getattr(event.delta, "partial_json", "") or "")
+    elif kind == "content_block_stop" and kinds.get(index) == "server_tool_use" and index in parts:
+        try:
+            query = json.loads(parts.pop(index) or "{}").get("query")
+        except ValueError:
+            query = ""
+        if query:
+            progress.say(f"{label}: searching “{query}”")
+
+
+def _create_live(client, progress: Progress, label: str, kwargs: dict):
+    """The same request, streamed, so the screen can say which searches are running. The reply is the same."""
+    kinds: dict = {}
+    parts: dict = {}
+    with client.messages.stream(**kwargs) as stream:
+        for event in stream:
+            try:
+                _watch(event, kinds, parts, progress, label)
+            except Exception:                  # never let the commentary break the request
+                pass
+        return stream.get_final_message()
+
+
+def _create(client, effort: str | None = None, progress: Progress | None = None, label: str = "", **kwargs):
+    """One Messages API request. `effort` sets how hard the model thinks (low, medium, high).
+
+    With `progress`, the request is streamed and each web search is reported as it happens.
+    """
     if effort:
         kwargs["output_config"] = {"effort": effort}
     try:
+        if progress is not None:
+            return _create_live(client, progress, label, kwargs)
         return client.messages.create(**kwargs)
     except anthropic.BadRequestError as exc:
         detail = str(getattr(exc, "message", "") or exc).lower()
         if "output_config" in kwargs and ("effort" in detail or "output_config" in detail):
             kwargs.pop("output_config")        # a model without effort levels: send it again without one
-            return _create(client, **kwargs)
+            return _create(client, progress=progress, label=label, **kwargs)
         raise LLMError(f"The API returned an error ({exc.status_code}): {exc.message}") from exc
     except anthropic.AuthenticationError as exc:
         raise LLMError("Anthropic rejected your API key. Forget it in the sidebar and paste it again.") from exc
@@ -486,7 +567,7 @@ def _known_note(known) -> str:
 
 
 def _research(client, model: str, prompt: str, max_searches: int, max_rounds: int, problem: str,
-              car: dict | None = None, only=None, never=None) -> dict:
+              car: dict | None = None, only=None, never=None, progress: Progress | None = None, label: str = "Search") -> dict:
     """Run one web research turn that ends in a record_comps call.
 
     `only` limits the searches to those sites; `never` keeps sites out. The API takes one or the other.
@@ -500,8 +581,8 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
     messages = [{"role": "user", "content": prompt}]
     seen_urls: set[str] = set()
     for _ in range(max_rounds):
-        response = _create(client, effort="medium", model=model, max_tokens=16000, tools=tools,
-                           messages=list(messages))
+        response = _create(client, effort="medium", progress=progress, label=label, model=model, max_tokens=16000,
+                           tools=tools, messages=list(messages))
         seen_urls |= _search_urls(response)
         recorded = _tool_input(response, "record_comps")
         if isinstance(recorded, dict):
@@ -511,6 +592,8 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
             comps = clean_comps(rows)
             for comp in comps:
                 comp["link_ok"] = normalize_url(comp["url"]) in seen_urls if comp["url"] else False
+            if progress:
+                progress.say(f"{label}: {len(comps)} car{'s' if len(comps) != 1 else ''} recorded")
             return {
                 "comps": comps,
                 "summary": str(recorded.get("summary") or "").strip(),
@@ -561,7 +644,7 @@ def _site_prompt(car: dict, today: str, site: str, max_searches: int, limited: b
 
 
 def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rounds: int = 6,
-                   today: str | None = None, known=None) -> dict:
+                   today: str | None = None, known=None, progress: Progress | None = None) -> dict:
     """Search the web for completed sales. Returns {'comps': [...], 'summary': str, 'searched': int}.
 
     With eight or more searches to spend, each auction site gets its own search first and the wider web
@@ -573,7 +656,7 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
 
     def wide(searches: int) -> dict:
         return _research(client, model, _research_prompt(car, today, searches) + _known_note(known), searches, max_rounds,
-                         problem, car=car, never=MIRROR_SITES)
+                         problem, car=car, never=MIRROR_SITES, progress=progress, label="Wider web")
 
     if budget < 8:
         return wide(budget)
@@ -581,22 +664,35 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
 
     def one_site(entry) -> dict:
         site, domains = entry
+        label = site if len(domains) == 1 else "Other auction sites"
         try:
             return _research(client, model, _site_prompt(car, today, site, each) + _known_note(known), each, max_rounds,
-                             problem, car=car, only=domains)
+                             problem, car=car, only=domains, progress=progress, label=label)
         except LLMError:                       # a site the search tool cannot be limited to: name it in the searches instead
+            if progress:
+                progress.say(f"{label}: could not be searched on its own, so trying it by name")
             return _research(client, model, _site_prompt(car, today, site, each, limited=False) + _known_note(known), each,
-                             max_rounds, problem, car=car, never=MIRROR_SITES)
+                             max_rounds, problem, car=car, never=MIRROR_SITES, progress=progress, label=label)
 
     jobs = [lambda entry=entry: one_site(entry) for entry in AUCTION_SITES]
     jobs.append(lambda: wide(max(2, budget - each * len(AUCTION_SITES))))
     results, errors = [], []
+    if progress:
+        progress.say("Searching each auction site on its own, then the wider web, two at a time")
     with ThreadPoolExecutor(max_workers=2) as pool:           # two at a time keeps a new key inside its rate limit
-        for future in [pool.submit(job) for job in jobs]:
+        futures = [pool.submit(job) for job in jobs]
+        waiting = set(futures)
+        while waiting:                                        # the workers' lines are drawn from this thread
+            _, waiting = wait(waiting, timeout=0.4)
+            if progress:
+                progress.flush()
+        for future in futures:
             try:
                 results.append(future.result())
             except LLMError as exc:
                 errors.append(exc)
+                if progress:
+                    progress.say(f"One search stopped: {exc}")
     if not results:
         raise errors[0]
     comps = merge_comps(*[result["comps"] for result in results])
@@ -609,11 +705,12 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
 
 
 def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_rounds: int = 6,
-                      today: str | None = None, known=None) -> dict:
+                      today: str | None = None, known=None, progress: Progress | None = None) -> dict:
     """Search the web for cars like this one that are for sale now: live auctions, classifieds and dealers."""
     today = today or dt.date.today().strftime("%B %d, %Y")
     result = _research(client, model, _for_sale_prompt(car, today, max_searches) + _known_note(known), max_searches, max_rounds,
-                       "The search for cars for sale did not finish.", car=car, never=MIRROR_SITES)
+                       "The search for cars for sale did not finish.", car=car, never=MIRROR_SITES,
+                       progress=progress, label="For sale now")
     # price-guide sites mirror other sites' listings and keep them up after the car has gone
     result["comps"] = [comp for comp in result["comps"] if comp["status"] == "asking" and not is_mirror(comp["url"])]
     for comp in result["comps"]:

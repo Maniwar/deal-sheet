@@ -53,6 +53,9 @@ CAR_FIELDS = ["year", "make", "model", "trim", "body", "transmission", "drivetra
               "vin", "exterior", "interior", "seller", "seller_type", "location", "url", "notes",
               "shape", "layout", "options", "msrp", "history"]
 NUMBER_FIELDS = {"year", "miles", "price", "msrp"}
+# the facts that can be corrected on the main screen, in Car details
+EDIT_FIELDS = ("year", "make", "model", "trim", "body", "transmission", "drivetrain", "miles", "price", "vin",
+               "exterior", "interior", "seller", "location", "history")
 SELLER_TYPES = ["", "dealer", "private", "auction"]
 COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img", "options", "vin",
                 "available", "seen", "seen_on", "body", "history"]
@@ -303,18 +306,43 @@ def checked_note(count: dict) -> str:
     return f"The app opened {total} for-sale page{'s' if total != 1 else ''}: " + ", ".join(bits) + "."
 
 
-def research_market(client, model: str, car: dict, max_searches: int) -> dict:
+def progress_for(slot):
+    """What the screen shows while work is under way: the step of a build, and lines about what is happening now.
+
+    Returns (progress, say): `progress.say(text)` adds a line, `say(step)` moves a build to its next step.
+    """
+    state = {"step": 0}
+
+    def draw(lines: list[str]) -> None:
+        log = html.escape(json.dumps(lines[-12:]), quote=True)
+        slot.html(f'<i id="ds-progress" data-step="{state["step"]}" data-log="{log}" style="display:none"></i>')
+
+    progress = llm.Progress(draw)
+
+    def say(step: int) -> None:
+        state["step"] = int(step)
+        draw(progress.lines)
+
+    return progress, say
+
+
+def research_market(client, model: str, car: dict, max_searches: int, progress=None) -> dict:
     """Completed sales, then cars for sale now, then a check that each for-sale page still shows its car."""
-    result = llm.research_comps(client, model, car, max_searches=max_searches)
+    tell = progress.say if progress else (lambda text: None)
+    result = llm.research_comps(client, model, car, max_searches=max_searches, progress=progress)
     comps, summary = list(result["comps"]), result["summary"]
+    tell(f"{len(comps)} sale{'s' if len(comps) != 1 else ''} and no-sales found. Now looking for cars for sale today")
     try:
-        sale = llm.research_for_sale(client, model, car, max_searches=min(max_searches, 8))
+        sale = llm.research_for_sale(client, model, car, max_searches=min(max_searches, 8), progress=progress)
     except llm.LLMError:
         sale = {"comps": [], "summary": "The search for cars for sale now did not finish. Use Search for more in the For sale now tab to retry it."}
     seen = {calc.normalize_url(comp["url"]) for comp in comps if comp["url"]}
     comps += [comp for comp in sale["comps"] if not comp["url"] or calc.normalize_url(comp["url"]) not in seen]
     comps, dropped = same_body_only(car, comps)
+    tell("Opening each for-sale page to see whether the car is still there")
     note = checked_note(check_listings(comps))
+    if note:
+        tell(note)
     if dropped:
         note = f"{dropped} car{'s' if dropped != 1 else ''} of a different body style {'were' if dropped != 1 else 'was'} left out. {note}".strip()
     off_trim = sum("different trim" in comp["note"].lower() for comp in comps)
@@ -338,7 +366,7 @@ def tidy_car(found: dict) -> dict:
 
 
 def build_deal(client, model: str, link: str, shot: bytes | None, max_searches: int, buyer: str,
-               wanted: str = "", say=None) -> tuple[dict | None, list[str]]:
+               wanted: str = "", say=None, progress=None) -> tuple[dict | None, list[str]]:
     """Read the listing, research comps, suggest an offer and draft the message. Returns (deal, notes).
 
     `wanted` is the buyer's own description of a car. With no link and no screenshot it is all there
@@ -346,12 +374,15 @@ def build_deal(client, model: str, link: str, shot: bytes | None, max_searches: 
     `say(step)` reports progress (1 reading, 2 searching, 3 pricing, 4 writing).
     """
     say = say or (lambda step: None)
+    tell = progress.say if progress else (lambda text: None)
     notes: list[str] = []
     no_listing = bool(wanted) and not link and shot is None
     page = {"status": "none", "text": "", "image": None}
     say(1)
     if link:
+        tell(f"Opening {calc.host_of(link) or 'the listing'}")
         page = previews.read_page(link)
+    tell("Working out which car this is" if no_listing else "Reading the listing")
     try:
         shots = images_for_api(shot, "image/jpeg") if shot else []
     except llm.LLMError as exc:
@@ -388,30 +419,38 @@ def build_deal(client, model: str, link: str, shot: bytes | None, max_searches: 
     deal = {**EMPTY_DEAL, "car": car, "car_photo": photo or page["image"]}
     if unread and shot is None:
         notes.append(f"{why}, so only the words in the link were read. "
-                     "Add a screenshot in the Car tab to fill in the price, miles and photo.")
+                     "Paste the link again with a screenshot of the page (the picture button in the bar below) to fill in "
+                     "the price, miles and photo, or enter them in Car details.")
     elif no_listing:
         notes.append("There is no listing, so there is no asking price. The numbers show what this car has been "
-                     "selling for. When you find one, paste its link in the Car tab to compare its price.")
+                     "selling for. When you find one, paste its link in the bar below to compare its price.")
     elif not car["price"]:
-        notes.append("No asking price was found. Enter it in the Car tab.")
+        notes.append("No asking price was found. Enter it in Car details.")
 
+    tell("Read: " + " · ".join(bit for bit in (calc.car_title(car), str(car.get("transmission") or ""),
+                                              f"{car['miles']:,} mi" if car.get("miles") else "",
+                                              calc.money(car["price"]) if car.get("price") else "") if bit))
     say(2)
     try:
-        result = research_market(client, model, car, max_searches)
+        result = research_market(client, model, car, max_searches, progress=progress)
     except llm.LLMError as exc:
         notes.append(f"The comps search stopped: {exc}")
         return deal, notes
     deal["comps"], deal["summary"] = result["comps"], result["summary"]
     if not deal["comps"]:
-        notes.append("The search found no usable comps. Add some in the Comps tab.")
+        notes.append("The search found no usable comps. Search again in the Sold tab, or add a sale you know of there.")
         return deal, notes
     try:
         say(3)
+        tell(f"Working out your offer from {len(deal['comps'])} cars")
         plan = llm.suggest_offer(client, model, car, deal["comps"])
         plan["shown"] = plan.get("open")
         deal["offer"] = plan
+        if plan.get("open"):
+            tell(f"Offer: open at {calc.money(plan['open'])}")
         if plan.get("open") and not no_listing:    # no seller to write to yet
             say(4)
+            tell("Writing the message to the seller")
             deal["message"] = llm.draft_message(client, model, car, deal["comps"], plan["open"], buyer, "text")
     except llm.LLMError as exc:
         notes.append(f"The offer step stopped: {exc}")
@@ -515,6 +554,10 @@ def apply_pending() -> None:
         ss["auto_photo"] = payload["auto_photo"]
     if "car_extra" in payload:                     # options, sticker price or VIN added to the car on screen
         set_car(payload["car_extra"], replace=False)
+    if "car_edit" in payload:                      # facts corrected in Car details: only the fields that were sent
+        for field, value in payload["car_edit"].items():
+            if field in EDIT_FIELDS:
+                ss[f"car_{field}"] = fmt_field(field, value)
     if "add_comps" in payload:
         merged = list(payload.get("keep") or [])
         seen = {(calc.normalize_url(c["url"]), c["price"], c["title"]) for c in merged}
@@ -709,6 +752,12 @@ def stage_event(name: str) -> None:
         ss["_verify_request"] = value
     elif name == "photo":
         ss["_photo_request"] = value
+    elif name == "message":
+        ss["_message_request"] = value
+    elif name == "car":
+        ss["_car_request"] = value
+    elif name == "addcomp":
+        ss["_addcomp_request"] = value
     elif name == "detail":
         ss["detailed_car"] = bool(value)          # set before the settings widgets are drawn
     elif name == "switch":
@@ -744,7 +793,9 @@ def handle_stage_requests(progress_slot) -> None:
             continue
         entry = ss["garage"].get(ss["active"]) or {}             # the car on screen, as last drawn
         the_car, have = entry.get("car") or {}, calc.clean_comps(entry.get("comps") or [])
+        progress, _ = progress_for(progress_slot)
         if slot == "_verify_request":                            # look at each for-sale page again
+            progress.say("Opening each for-sale page to see whether the car is still there")
             note = checked_note(check_listings(have))
             ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
             ss["notices"] = [note or "There are no for-sale listings to check yet."]
@@ -756,22 +807,90 @@ def handle_stage_requests(progress_slot) -> None:
             searches, the_client, the_model = int(ss["max_searches"]), llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]]
             try:
                 if wants_sale:
-                    found = llm.research_for_sale(the_client, the_model, the_car, max_searches=min(searches, 8), known=known)
+                    found = llm.research_for_sale(the_client, the_model, the_car, max_searches=min(searches, 8), known=known,
+                                                  progress=progress)
                 else:
-                    found = llm.research_comps(the_client, the_model, the_car, max_searches=searches, known=known)
+                    found = llm.research_comps(the_client, the_model, the_car, max_searches=searches, known=known,
+                                               progress=progress)
             except llm.LLMError as exc:
                 ss["stage_error"] = str(exc)
             else:
                 seen = {calc.normalize_url(url) for url in known}
                 fresh = [comp for comp in found["comps"] if not comp["url"] or calc.normalize_url(comp["url"]) not in seen]
                 fresh, _ = same_body_only(the_car, fresh)
+                if wants_sale and fresh:
+                    progress.say("Opening each new page to see whether the car is still there")
                 note = checked_note(check_listings(fresh)) if wants_sale else ""
                 ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have}
                 what = "car for sale" if wants_sale else "sale"
                 ss["notices"] = [(f"Found {len(fresh)} more {what}{'s' if len(fresh) != 1 and not wants_sale else ''}. {note}".strip()
                                   if fresh else "The search found nothing new this time.")]
         ss.pop(slot, None)
+        progress_slot.empty()
         ss["build_seq"] += 1
+    request = ss.pop("_car_request", None)
+    if isinstance(request, dict):                  # the car's facts, corrected on the main screen
+        before = (ss["garage"].get(ss["active"]) or {}).get("car") or {}
+        fields = {key: str(request.get(key) or "").strip()[:240] for key in EDIT_FIELDS if key in request}
+        if "vin" in fields:
+            fields["vin"] = calc.clean_vin(fields["vin"]) or fields["vin"].upper()
+        named = {key: fields.get(key, str(before.get(key) or "")) for key in ("make", "model")}
+        if not fields:
+            pass
+        elif not named["make"] or not named["model"]:
+            ss["stage_error"] = "A car needs a make and a model."
+        else:
+            ss["_pending"] = {**(ss.get("_pending") or {}), "car_edit": fields}
+            moved = any(fields[key].lower() != str(before.get(key) or "").strip().lower()
+                        for key in ("year", "make", "model", "trim", "body") if key in fields)
+            has_comps = bool((ss["garage"].get(ss["active"]) or {}).get("comps"))
+            ss["notices"] = ["Saved. The comps were found for the car as it was, so search again in the Sold tab to match them."
+                             if moved and has_comps else "Saved."]
+        ss["build_seq"] += 1
+    request = ss.pop("_addcomp_request", None)
+    if isinstance(request, dict):                  # a sale or a listing the buyer knows of, added on the main screen
+        entry = ss["garage"].get(ss["active"]) or {}
+        have = calc.clean_comps(entry.get("comps") or [])
+        status = request.get("status") if request.get("status") in ("sold", "high_bid", "asking") else "sold"
+        row = {key: str(request.get(key) or "").strip()[:500] for key in ("price", "miles", "title", "date", "url", "vin")}
+        row["title"] = row["title"] or calc.car_title(entry.get("car") or {})
+        comp = calc.clean_comp({**row, "status": status, "use": status != "asking", "source": "" if row["url"] else "Added by you",
+                                "available": "yes" if status == "asking" else "", "note": "Added by you."})
+        if not comp:
+            ss["stage_error"] = "Give the price at least."
+        else:
+            ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [comp], "keep": have}
+            ss["notices"] = ["Added."]
+        ss["build_seq"] += 1
+    request = ss.pop("_message_request", None)
+    if isinstance(request, dict):                  # the offer message, written or edited on the main screen
+        kind = str(request.get("kind") or "")
+        entry = ss["garage"].get(ss["active"]) or {}
+        the_car, offer = entry.get("car") or {}, entry.get("offer") or {}
+        used = [comp for comp in calc.clean_comps(entry.get("comps") or []) if comp["use"]]
+        price = calc.to_int(offer.get("shown")) or calc.to_int(offer.get("open"))
+        buyer, message = str(ss.get("buyer") or "").strip(), None
+        if kind == "edit":
+            message = str(request.get("text") or "")[:6000]
+        elif not price:
+            ss["stage_error"] = "There is no offer to put in a message yet. Search for sales first, in the Sold tab."
+        elif kind == "template":
+            message = llm.template_message(the_car, used, price, buyer)
+        elif not ss["api_key"]:
+            ss["stage_error"] = "Connect your Anthropic API key first."
+        else:
+            progress, _ = progress_for(progress_slot)
+            progress.say("Writing the message to the seller")
+            try:
+                message = llm.draft_message(llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]], the_car, used, price,
+                                            buyer, "email" if request.get("channel") == "email" else "text")
+            except llm.LLMError as exc:
+                ss["stage_error"] = str(exc)
+            progress_slot.empty()
+        if message is not None:
+            ss["_pending"] = {**(ss.get("_pending") or {}), "message": message}
+        if kind != "edit":
+            ss["build_seq"] += 1
     request = ss.get("_options_request")
     if request:                                    # a window sticker picture or a dealer description, added on the main screen
         text = str(request.get("text") or "").strip()
@@ -838,11 +957,10 @@ def handle_stage_requests(progress_slot) -> None:
                 link = "https://" + link
             shot = as_bytes(request.get("image"))
 
-            def say(step: int) -> None:
-                progress_slot.html(f'<i id="ds-progress" data-step="{int(step)}" style="display:none"></i>')
-
+            progress, say = progress_for(progress_slot)
             new_deal, notes = build_deal(llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]], link, shot,
-                                         int(ss["max_searches"]), str(ss["buyer"]).strip(), wanted=wanted, say=say)
+                                         int(ss["max_searches"]), str(ss["buyer"]).strip(), wanted=wanted, say=say,
+                                         progress=progress)
             progress_slot.empty()
             if new_deal:
                 queue({"add": new_deal})
@@ -1267,7 +1385,8 @@ flags = {
     "message": ss["message_text"], "summary": ss["research_summary"],
     "prefs": current_prefs(), "prefs_ask": not ss["prefs_asked"],
 }
-stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail", "more", "verify")
+stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail", "more", "verify",
+                "message", "car", "addcomp")
 with stage_box:
     STAGE(
         data=json.dumps(stage.build_payload(

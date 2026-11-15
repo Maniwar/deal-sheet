@@ -328,7 +328,7 @@ def trim_from_vin(car: dict, options: list[str]) -> tuple[str, str]:
         return fits[0][0], f"The VIN decodes as {fits[0][0]}, so the trim was changed {was}."
     names = " or ".join(option for option, _ in keys)
     return read, (f"The VIN decodes as {names}, but the listing reads as {read or 'no trim'}. "
-                  "Check the trim under Edit and print, because comps are matched to it.")
+                  "Check the trim in Car details, because comps are matched to it.")
 
 
 def comp_group(comp: dict) -> str:

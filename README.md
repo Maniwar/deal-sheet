@@ -53,7 +53,16 @@ what that car has been selling for and gives you a typical sale price, the comps
   Each comp has a button that opens that car's own page. A link that opens a list of
   results instead of one car is flagged on the screen and on the PDF, and is never offered as the
   proof link for a point in the case.
-- **Message.** A drafted offer message with a Copy button.
+- **Message.** Your offer message, written right there: **Write it with Claude** (as a text or an
+  email) or **Use the plain version**, which needs no key. Edit it in place; your changes are kept.
+- **Car details.** Every fact about the car, to correct in place: year, make, model, trim, body,
+  transmission, miles, asking price, VIN and the rest.
+- **Nothing sends you elsewhere.** The Sold and For sale tabs each have a form to add a car you know
+  of. When something needs your key and you have not connected it, the key box appears on the spot
+  and the app then carries on with what you asked.
+- **What it is doing.** While it works, the screen shows each step as it happens: the car it read,
+  each search as it is sent ("Cars & Bids: searching ..."), how many pages came back and from
+  where, how many cars each site gave, and a running clock.
 - **Garage.** Each car you add is a chip at the top. Tap one to switch.
 - **Edit and print**, below the main screen: correct any detail of the car, the comps or the offer
   by hand, and make the PDF. The PDF prints every link in full beside a large QR code. The seller

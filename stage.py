@@ -191,6 +191,9 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "modelName": " ".join(str(car.get(k) or "").strip() for k in ("make", "model")).strip(),
         "find3d": " ".join(str(car.get(k) or "").strip() for k in ("make", "model", "trim", "body")).strip(),
         "sample": bool(flags.get("sample")), "hasCar": has_car,
+        "edit": {field: ("" if car.get(field) in (None, "") else str(car.get(field))) for field in
+                 ("year", "make", "model", "trim", "body", "transmission", "drivetrain", "miles", "price", "vin",
+                  "exterior", "interior", "seller", "location", "history")} if has_car else {},
         "title": calc.car_title(car) if has_car else "", "chips": chips,
         "seller": " · ".join(bit for bit in seller_bits if bit), "url": car.get("url") or "",
         "vin": calc.clean_vin(car.get("vin")) or str(car.get("vin") or "").strip(),
@@ -491,6 +494,22 @@ button.opt{cursor:pointer}
 .card.off{opacity:.45}
 .card img{width:92px;height:68px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}
 .credit-text{width:100%;margin-top:2px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--ink);font:400 14px/1.4 var(--sans);resize:vertical}
+.msgbox{min-height:230px;font-size:15px;line-height:1.5;resize:vertical}
+.carform{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;margin-top:14px}
+.carform .fld{display:block;min-width:0}
+.carform .fld span{display:block;font:600 10px var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.carform .fld .linkbox{margin-top:4px}
+.carform .wide,.carform>.btn{grid-column:1/-1}
+.carform>.btn{justify-self:start;margin-top:4px}
+.byhand{margin-top:18px}
+.byhand summary{cursor:pointer;list-style:none;font:500 13.5px var(--sans);color:var(--mute);text-decoration:underline;text-underline-offset:3px}
+.byhand summary::-webkit-details-marker{display:none}
+.livelog{margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.03)}
+.livelog div{font:400 12.5px/1.5 var(--sans);color:var(--dim);overflow-wrap:anywhere}
+.livelog .now{color:var(--ink)}
+.progress .livelog{margin-top:6px;padding:0 18px;border:0;background:none;max-width:520px;text-align:center}
+.progress .clock{font:500 11px var(--mono);color:var(--dim)}
+.keyform{margin-top:10px}
 .msg{white-space:pre-wrap;font:400 14.5px/1.5 var(--sans);padding:14px;border-radius:14px;border:1px solid var(--line);background:rgba(255,255,255,.04)}
 .btn{display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:9px 16px;border-radius:999px;background:var(--ink);color:#0b0c0e;font:700 13.5px var(--sans);text-decoration:none}
 .btn.ghost{background:transparent;color:var(--ink);border:1px solid rgba(255,255,255,.3)}
@@ -813,6 +832,7 @@ function create(root) {
       `<button type="button" class="tab" data-tab="comps">Sold<b>${nSold}</b></button>` +
       `<button type="button" class="tab" data-tab="sale">For sale now<b>${nSale}</b></button>` +
       `<button type="button" class="tab" data-tab="message">Message</button>` +
+      `<button type="button" class="tab" data-tab="car">Car details</button>` +
       `<button type="button" class="tab" data-tab="model">3D model</button>` +
       `<button type="button" class="tab" data-tab="details">Edit and print ↓</button>`;
   }
@@ -828,8 +848,19 @@ function create(root) {
     const list = (groups, title) => { const rows = (d.comps || []).filter((k) => groups.includes(k.group)).sort(order); return rows.length ? `<h3>${title} · ${rows.length}</h3>` + rows.map((k) => compCard(k, true)).join("") : ""; };
     const arrow = (key) => (sort.key === key ? (sort.dir > 0 ? " ↑" : " ↓") : "");
     const sorter = `<div class="sortrow">Sort by ${[["price", "Price"], ["miles", "Miles"], ["when", "Date"]].map(([key, name]) => `<button type="button" class="sortbtn${sort.key === key ? " on" : ""}" data-sort="${key}">${name}${arrow(key)}</button>`).join("")}</div>`;
-    el.sheetTabs.innerHTML = [["case", "The case"], ["comps", `Sold<b>${nSold}</b>`], ["sale", `For sale now<b>${nSale}</b>`], ["message", "Message"], ["model", "3D model"]].map(([id, t]) => `<button type="button" class="tab${S.tab === id ? " lead" : ""}" data-tab="${id}">${t}</button>`).join("");
+    el.sheetTabs.innerHTML = [["case", "The case"], ["comps", `Sold<b>${nSold}</b>`], ["sale", `For sale now<b>${nSale}</b>`], ["message", "Message"], ["car", "Car details"], ["model", "3D model"]].map(([id, t]) => `<button type="button" class="tab${S.tab === id ? " lead" : ""}" data-tab="${id}">${t}</button>`).join("");
     let h = "";
+    if (d.connected) S.needKey = "";
+    /* something here needs the key: ask for it on the spot, then carry on with what was asked */
+    const keyAsk = S.needKey === S.tab ? '<div class="hintbox">That needs your Anthropic API key. Paste it here and it carries on.</div><form class="linkrow keyform"><input type="password" class="linkbox keybox" autocomplete="off" placeholder="Paste your Anthropic API key" aria-label="Anthropic API key"><button type="submit" class="btn">Connect</button></form>' +
+      '<div class="tiny"><label><input type="checkbox" class="keykeep" checked> Remember it on this device</label> · <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">Get a key</a> · Used only to call Anthropic. Billed to your key.</div>' : "";
+    const liveLog = (on) => (on ? `<div class="livelog">${logHtml(5)}</div>` : "");
+    const byHand = (kind) => `<details class="byhand"${S.handOpen === kind ? " open" : ""}><summary>${kind === "sold" ? "Add a sale you know of" : "Add a car for sale you know of"}</summary><form class="carform handform" data-kind="${kind}">` +
+      `<label class="fld"><span>${kind === "sold" ? "Sold for" : "Asking"}</span><input class="linkbox" name="price" inputmode="numeric" placeholder="$"></label><label class="fld"><span>Miles</span><input class="linkbox" name="miles" inputmode="numeric"></label>` +
+      `<label class="fld wide"><span>Car</span><input class="linkbox" name="title" value="${esc(d.title || "")}"></label>` +
+      (kind === "sold" ? '<label class="fld"><span>Date sold</span><input class="linkbox" name="date" placeholder="Jun 3, 2026"></label>' : "") +
+      `<label class="fld${kind === "sold" ? "" : " wide"}"><span>VIN</span><input class="linkbox" name="vin" autocapitalize="characters" spellcheck="false"></label>` +
+      '<label class="fld wide"><span>Link</span><input class="linkbox" name="url" inputmode="url" placeholder="https://"></label><button type="submit" class="btn ghost">Add it</button></form></details>';
     if (S.tab === "case") {
       h += `<div class="lead-line">${esc(c.headline || "")}</div>${c.sub ? `<div class="lead-sub">${esc(c.sub)}</div>` : ""}`;
       if ((c.reasons || []).length) h += "<h3>The evidence</h3>" + c.reasons.map((r, i) => `<div class="ev"><span class="n">${i + 1}</span><span class="t">${esc(r.text)}</span>${(r.links || []).filter((l) => safeUrl(l.url)).map((l) => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} ${ARROW}</a>`).join("")}</div>`).join("");
@@ -838,7 +869,7 @@ function create(root) {
       if (have) h += `<div class="opts">${c.options.map((o) => `<span class="opt">${esc(o)}</span>`).join("")}${c.msrp ? `<span class="opt">Sticker ${esc(c.msrp)}</span>` : ""}</div>`;
       else h += '<div class="hintbox">No options were read for this car, and they can move the price by thousands. Add a picture of the window sticker, or paste the dealer\'s description.</div>';
       if (have && !S.optOpen) h += '<button type="button" class="btn ghost optmore">Add more from a sticker or description</button>';
-      else h += `<textarea class="optbox" rows="3" placeholder="Paste the dealer's description, or paste a picture of the window sticker"></textarea>` +
+      else h += keyAsk + `<textarea class="optbox" rows="3" placeholder="Paste the dealer's description, or paste a picture of the window sticker"></textarea>` +
         `<input type="file" class="optfile" accept="image/*" hidden><div class="optrow"><button type="button" class="btn ghost optpic">${S.optShot ? "Change the picture" : "Add a sticker picture"}</button>` +
         `${S.optShot ? `<span class="optthumb"><img src="${esc(S.optShot)}" alt=""><button type="button" class="optdrop" aria-label="Remove the picture">×</button></span>` : ""}` +
         `<button type="button" class="btn readopts"${S.optBusy ? " disabled" : ""}>${S.optBusy ? "Reading" : "Read the options"}</button></div>`;
@@ -849,23 +880,79 @@ function create(root) {
         if (c.summary) h += `<div class="lead-sub">${esc(c.summary)}</div>`;
       }
     } else if (S.tab === "comps") {
-      h = list(["sold"], "Completed sales") + list(["high_bid"], "Auctions that ended without a sale");
-      if (h) h = sorter + h;
-      if (!h) h = '<div class="lead-sub">No completed sales yet. Search for some, or add comps under Edit and print.</div>';
-      h += `<button type="button" class="btn ghost more" data-kind="sold"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sold" ? "Searching. This takes a minute or two." : "Search for more sales"}</button>`;
+      const rows = list(["sold"], "Completed sales") + list(["high_bid"], "Auctions that ended without a sale");
+      const find = `<button type="button" class="btn${rows ? " ghost" : ""} more" data-kind="sold"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sold" ? "Searching" : rows ? "Search for more sales" : "Search for sales"}</button>`;
+      h = (rows ? sorter + rows : '<div class="lead-line">No completed sales yet</div><div class="lead-sub">The search goes through Cars &amp; Bids, Bring a Trailer, the other auction sites and then the wider web.</div>') +
+        keyAsk + `<div>${find}</div>` + liveLog(S.moreBusy === "sold") + byHand("sold");
     } else if (S.tab === "sale") {
-      h = list(["live"], "For sale now") + list(["ended"], "Listings that have sold or gone");
+      const rows = list(["live"], "For sale now") + list(["ended"], "Listings that have sold or gone");
       const tools = (nSale ? `<button type="button" class="btn ghost verify"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "verify" ? "Opening each page" : "Check they are still for sale"}</button> ` : "") +
-        `<button type="button" class="btn ghost more" data-kind="sale"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sale" ? "Searching. This takes a minute or two." : "Search for more cars for sale"}</button>`;
-      if (!nSale) h = '<div class="lead-sub">No cars for sale found yet. The search covers live auctions, enthusiast classifieds and dealers.</div>' + `<div>${tools}</div>` + h;
-      else h = '<div class="lead-sub">Other cars you could buy today, from live auctions, enthusiast classifieds and dealers. Asking prices sit above what cars sell for, so use these as alternatives and leverage, not as the price.</div>' + `<div>${tools}</div>` + sorter + h;
+        `<button type="button" class="btn ghost more" data-kind="sale"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sale" ? "Searching" : "Search for more cars for sale"}</button>`;
+      h = (nSale ? '<div class="lead-sub">Other cars you could buy today, from live auctions, enthusiast classifieds and dealers. Asking prices sit above what cars sell for, so use these as alternatives and leverage, not as the price.</div>'
+        : '<div class="lead-sub">No cars for sale found yet. The search covers live auctions, enthusiast classifieds and dealers.</div>') +
+        keyAsk + `<div>${tools}</div>` + liveLog(S.moreBusy === "sale" || S.moreBusy === "verify") + (nSale ? sorter : "") + rows + byHand("sale");
     } else if (S.tab === "message") {
-      h = d.message ? `<div class="msg">${esc(d.message)}</div><button type="button" class="btn copy">Copy the message</button>` : '<div class="lead-sub">No message yet. Draft one under Edit and print, in the Sheet tab.</div>';
+      const chan = S.msgChannel || "text";
+      const kind = `<div class="choice chan">${[["text", "As a text"], ["email", "As an email"]].map(([id, t]) => `<button type="button" class="btn ghost${chan === id ? " on" : ""}" data-chan="${id}">${t}</button>`).join("")}</div>`;
+      const write = `<div><button type="button" class="btn msgai"${S.msgBusy ? " disabled" : ""}>${S.msgBusy === "claude" ? "Writing" : d.message ? "Write it again with Claude" : "Write it with Claude"}</button> ` +
+        `<button type="button" class="btn ghost msgplain"${S.msgBusy ? " disabled" : ""}>${S.msgBusy === "template" ? "Writing" : "Use the plain version"}</button></div>`;
+      h = d.message
+        ? `<textarea class="linkbox msgbox" rows="12" aria-label="Your offer message">${esc(d.message)}</textarea><div class="tiny">Edit it here before you send it. Your changes are kept.</div><div><button type="button" class="btn copy">Copy the message</button></div><h3>Write it again</h3>${keyAsk}${kind}${write}${liveLog(S.msgBusy === "claude")}`
+        : `<div class="lead-line">Send the seller your offer</div><div class="lead-sub">A short message with your offer and the sales that back it up. You can edit it here before you copy it.</div>${keyAsk}${kind}${write}${liveLog(S.msgBusy === "claude")}`;
+    } else if (S.tab === "car") {
+      const e = d.edit || {};
+      const fields = [["year", "Year", 1], ["make", "Make"], ["model", "Model"], ["trim", "Trim"], ["body", "Body style"], ["transmission", "Transmission"], ["drivetrain", "Drivetrain"], ["miles", "Miles", 1], ["price", "Asking price", 1], ["vin", "VIN"], ["exterior", "Exterior color"], ["interior", "Interior color"], ["seller", "Seller"], ["location", "Location"], ["history", "Accident and title history"]];
+      h = d.hasCar
+        ? `<div class="lead-line">Car details</div><div class="lead-sub">Fix anything the listing got wrong. Comps are matched to the year, model, trim and body style.</div><form class="carform carfacts">` +
+          fields.map(([k, label, num]) => `<label class="fld${k === "history" || k === "vin" ? " wide" : ""}"><span>${label}</span><input class="linkbox" name="${k}" value="${esc(e[k] || "")}" autocomplete="off"${num ? ' inputmode="numeric"' : ""}${k === "vin" ? ' autocapitalize="characters" spellcheck="false"' : ""}></label>`).join("") +
+          `<button type="submit" class="btn">Save</button></form>`
+        : '<div class="lead-sub">Add a car first: paste a listing link or a screenshot in the bar on the main screen, or just name the car.</div>';
     }
     if (S.tab === "model") { renderModelTab(); return; }
     el.sheetBody.innerHTML = h; el.sheetBody.scrollTop = 0;
     el.sheetBody.querySelectorAll(".sortbtn").forEach((b) => { b.onclick = () => { const key = b.dataset.sort; S.sort = S.sort.key === key ? { key, dir: -S.sort.dir } : { key, dir: key === "when" ? -1 : 1 }; const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; }; });
-    const again = (name, value, flag) => { if (name === "more" && !S.d.connected) { toast("Connect your Anthropic API key first, in the bar at the bottom.", true); return; } S.moreBusy = flag; const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; post(name, value); };
+    const keep = () => { const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; };
+    /* no key yet: ask for it here, then press the same button again for them */
+    const needKey = (button) => {
+      S.needKey = S.tab; S.afterKey = () => { const b = el.sheetBody.querySelector(button); if (b) b.click(); };
+      renderSheet(); const box = el.sheetBody.querySelector(".keybox");
+      if (box) { el.sheetBody.scrollTop = Math.max(0, box.offsetTop - 90); box.focus({ preventScroll: true }); }
+    };
+    const keyform = el.sheetBody.querySelector(".keyform");
+    if (keyform) keyform.onsubmit = (e) => {
+      e.preventDefault();
+      const value = keyform.querySelector(".keybox").value.trim(), go = keyform.querySelector("button");
+      if (!value) { toast("Paste your Anthropic API key first.", true); return; }
+      S.remember = el.sheetBody.querySelector(".keykeep").checked; S.pendingKey = value; S.keyTried = true;
+      go.disabled = true; go.textContent = "Connecting"; post("key", { value, saved: false });
+    };
+    const again = (name, value, flag) => { if (name === "more" && !S.d.connected) { needKey(`.more[data-kind="${value.kind}"]`); return; } S.moreBusy = flag; S.log = []; keep(); post(name, value); };
+    /* the offer message, written and edited right here */
+    el.sheetBody.querySelectorAll("[data-chan]").forEach((b) => { b.onclick = () => { S.msgChannel = b.dataset.chan; keep(); }; });
+    const msgbox = el.sheetBody.querySelector(".msgbox"), msgai = el.sheetBody.querySelector(".msgai"), msgplain = el.sheetBody.querySelector(".msgplain");
+    const draft = (kind) => { S.msgBusy = kind; S.log = []; keep(); post("message", { kind, channel: S.msgChannel || "text", at: Date.now() }); };
+    if (msgbox) msgbox.onchange = () => { S.d.message = msgbox.value; post("message", { kind: "edit", text: msgbox.value }); };
+    if (msgai) msgai.onclick = () => { if (!S.d.connected) { needKey(".msgai"); return; } draft("claude"); };
+    if (msgplain) msgplain.onclick = () => draft("template");
+    /* the car's facts, corrected right here */
+    const facts = el.sheetBody.querySelector(".carfacts");
+    if (facts) facts.onsubmit = (e) => {
+      e.preventDefault();
+      const was = S.d.edit || {}, out = {};
+      for (const box of facts.querySelectorAll("input")) { const v = box.value.trim(); if (v !== (was[box.name] || "")) out[box.name] = v; }
+      if (!Object.keys(out).length) { toast("Nothing was changed."); return; }
+      const go = facts.querySelector("button"); go.disabled = true; go.textContent = "Saving";
+      post("car", { ...out, at: Date.now() });
+    };
+    /* a sale or a listing the person knows of */
+    el.sheetBody.querySelectorAll(".byhand").forEach((box) => { const kind = box.querySelector(".handform").dataset.kind; box.ontoggle = () => { if (box.open) S.handOpen = kind; else if (S.handOpen === kind) S.handOpen = ""; }; });
+    el.sheetBody.querySelectorAll(".handform").forEach((f) => { f.onsubmit = (e) => {
+      e.preventDefault();
+      const v = Object.fromEntries([...f.querySelectorAll("input")].map((box) => [box.name, box.value.trim()]));
+      if (!/\d/.test(v.price)) { toast("Give the price at least.", true); return; }
+      const go = f.querySelector("button"); go.disabled = true; go.textContent = "Adding"; S.handOpen = "";
+      post("addcomp", { ...v, status: f.dataset.kind === "sold" ? "sold" : "asking", at: Date.now() });
+    }; });
     el.sheetBody.querySelectorAll(".more").forEach((b) => { b.onclick = () => again("more", { kind: b.dataset.kind, at: Date.now() }, b.dataset.kind); });
     const verify = el.sheetBody.querySelector(".verify");
     if (verify) verify.onclick = () => again("verify", { at: Date.now() }, "verify");
@@ -884,14 +971,14 @@ function create(root) {
       if (drop) drop.onclick = () => { S.optShot = ""; const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; };
       readopts.onclick = () => {
         const text = optbox.value.trim();
-        if (!S.d.connected) { toast("Connect your Anthropic API key first, in the bar at the bottom.", true); return; }
+        if (!S.d.connected) { needKey(".readopts"); return; }
         if (text.length < 8 && !S.optShot) { toast("Add a picture of the sticker or paste the description first.", true); return; }
-        S.optBusy = true; readopts.disabled = true; readopts.textContent = "Reading";
+        S.optBusy = true; S.log = []; readopts.disabled = true; readopts.textContent = "Reading";
         post("options", { text, image: S.optShot || "" });
       };
     }
     const copy = el.sheetBody.querySelector(".copy");
-    if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(S.d.message); copy.textContent = "Copied"; } catch (e) { toast("Could not copy. Select the text and copy it by hand.", true); } };
+    if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(msgbox ? msgbox.value : S.d.message); copy.textContent = "Copied"; } catch (e) { if (msgbox) { msgbox.focus(); msgbox.select(); } toast("Could not copy for you. The message is selected: copy it from there.", true); } };
   }
 
   /* ---------- a 3D model of the actual car: the person finds and loads it; it stays on their device ---------- */
@@ -1232,7 +1319,7 @@ function create(root) {
         e.preventDefault(); if (S.busy) return;
         const text = box.value.trim();
         if (!text && !S.shot) { toast("Paste a link, add a screenshot, or name a car.", true); return; }
-        S.busy = true; S.sentSeq = S.d.seq; S.busyAt = Date.now(); S.asked = text || "From your screenshot"; S.step = 1; el.toast.hidden = true;
+        S.busy = true; S.sentSeq = S.d.seq; S.busyAt = Date.now(); S.asked = text || "From your screenshot"; S.step = 1; S.log = []; el.toast.hidden = true;
         closeSheet(); paintAll(); post("build", { text, image: S.shot });
       };
     }
@@ -1257,14 +1344,30 @@ function create(root) {
   root.addEventListener("drop", (e) => { e.preventDefault(); const f = [...(e.dataTransfer?.files || [])].find((x) => x.type.startsWith("image/")); if (f && S.d.connected) takeImage(f); });
 
   /* ---------- while Claude works ---------- */
+  /* what the server says it is doing right now: each search as it is sent and what came back */
+  function logHtml(count) {
+    const lines = (S.log || []).slice(-count);
+    return lines.length ? lines.map((t, i) => `<div class="${i === lines.length - 1 ? "now" : ""}">${esc(t)}</div>`).join("") : '<div class="now">Starting</div>';
+  }
+  const clock = () => { const s = Math.max(0, Math.round((Date.now() - (S.busyAt || Date.now())) / 1000)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
   function paintBusy() {
     el.progress.hidden = !S.busy;
     if (!S.busy) return;
-    el.progress.innerHTML = STEPS.map((t, i) => `<div class="step ${i + 1 < S.step ? "done" : i + 1 === S.step ? "now" : ""}"><i></i>${esc(t)}</div>`).join("");
+    el.progress.innerHTML = STEPS.map((t, i) => `<div class="step ${i + 1 < S.step ? "done" : i + 1 === S.step ? "now" : ""}"><i></i>${esc(t)}</div>`).join("") +
+      `<div class="livelog">${logHtml(4)}</div><div class="clock">${clock()}</div>`;
   }
   setInterval(() => {
+    if (!S.busy && !S.moreBusy && !S.msgBusy && !S.optBusy) return;
+    const p = document.getElementById("ds-progress");
+    let log = null;
+    try { log = p && p.dataset.log ? JSON.parse(p.dataset.log) : null; } catch (e) {}
+    if (Array.isArray(log) && log.length && log.join("\n") !== (S.log || []).join("\n")) {
+      S.log = log.map(String);
+      if (S.busy) paintBusy(); else { const box = el.sheetBody.querySelector(".livelog"); if (box) box.innerHTML = logHtml(5); }
+    }
     if (!S.busy) return;
-    const p = document.getElementById("ds-progress"), n = p ? +p.dataset.step || 0 : 0;
+    const tick = el.progress.querySelector(".clock"); if (tick) tick.textContent = clock();
+    const n = p ? +p.dataset.step || 0 : 0;
     const step = Math.max(n, S.step || 1);
     if (step !== S.step) { S.step = step; paintBusy(); }
     if (Date.now() - S.busyAt > 420000) { S.busy = false; paintAll(); toast("That took too long and was stopped. Try again.", true); }
@@ -1361,7 +1464,9 @@ function create(root) {
     S.d = d; S.waiting = false; clearTimeout(S.waitTimer);
     if (S.moreBusy && d.seq !== S.optSeq) { S.moreBusy = ""; if (S.tab === "comps" || S.tab === "sale") { const y = el.sheetBody.scrollTop; setTimeout(() => { renderSheet(); el.sheetBody.scrollTop = y; }, 0); } }
     if (S.optBusy && d.seq !== S.optSeq) { S.optBusy = false; if (!d.error) { S.optShot = ""; S.optText = ""; S.optOpen = false; } if (S.tab === "case") renderSheet(); }
+    if (S.msgBusy && d.seq !== S.optSeq) S.msgBusy = "";
     S.optSeq = d.seq;
+    if (d.connected && S.afterKey) { const go = S.afterKey; S.afterKey = null; setTimeout(go, 60); }
     if (S.busy && d.seq !== S.sentSeq && !d.busy) {
       S.busy = false;
       if (d.error) toast(d.error, true, 12000);
