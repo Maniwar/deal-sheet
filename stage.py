@@ -190,6 +190,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "modelKey": re.sub(r"[^a-z0-9]+", "-", f"{car.get('make') or ''} {car.get('model') or ''}".lower()).strip("-"),
         "modelName": " ".join(str(car.get(k) or "").strip() for k in ("make", "model")).strip(),
         "find3d": " ".join(str(car.get(k) or "").strip() for k in ("make", "model", "trim", "body")).strip(),
+        "sid": str(flags.get("sid") or ""),
         "sample": bool(flags.get("sample")), "hasCar": has_car,
         "edit": {field: ("" if car.get(field) in (None, "") else str(car.get(field))) for field in
                  ("year", "make", "model", "trim", "body", "transmission", "drivetrain", "miles", "price", "vin",
@@ -344,6 +345,7 @@ button.opt{cursor:pointer}
 /* while a new car is being worked out, the old car's live view steps aside */
 .stage.busy .liveview{visibility:hidden}
 .stage.busy .liveshadow,.stage.busy .pick3d{display:none}
+.stage.busy .zone::before{display:none}
 /* no model picked yet: the choices sit where the car will go */
 .pick3d{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;gap:8px;padding:0 20px}
 .pick3d[hidden]{display:none}
@@ -1139,13 +1141,28 @@ function create(root) {
     });
   }
   const modelTile = (m, cls) => `<button type="button" class="skitem${cls || ""}" data-uid="${esc(m.uid)}">${m.thumb ? `<img src="${esc(m.thumb)}" alt="" loading="lazy">` : '<span class="noimg"></span>'}<b>${esc(m.name)}</b><span>${esc(m.author)}${m.size ? " · " + mb(m.size) : ""}</span></button>`;
-  async function showModel(m) {
-    try { await store.set(modelSlot(), { embed: m.uid, name: m.name, author: m.author, url: m.url || skSite() + "/3d-models/" + m.uid, down: m.down }); }
-    catch (e) { toast("That choice could not be saved on this device.", true); return false; }
+  async function showModel(m, quiet) {
+    try { await store.set(modelSlot(), { embed: m.uid, name: m.name, author: m.author, url: m.url || skSite() + "/3d-models/" + m.uid, down: m.down, auto: !!quiet }); }
+    catch (e) { if (!quiet) toast("That choice could not be saved on this device.", true); return false; }
     paintLive(); if (S.scene) S.scene.reload(S.d);
-    toast("Showing “" + m.name + "”. Drag it to look around."); return true;
+    if (!quiet) toast("Showing “" + m.name + "”. Drag it to look around.");
+    return true;
   }
-  function paintPicker(rec) {
+  /* The model that best fits the car's name: it must name the model, and the make, trim and year count for more.
+     Nothing that fails to name the model is ever picked: then the person chooses. */
+  function bestModel(items) {
+    const d = S.d, e = d.edit || {}, words = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9.]+/g, " ").split(" ").filter(Boolean);
+    const model = words(e.model), make = words(e.make), trim = words(e.trim), year = String(e.year || "");
+    let best = null, top = 0;
+    for (const m of items || []) {
+      const name = words(m.name), has = (w) => name.includes(w);
+      if (!model.length || !model.every(has)) continue;
+      const fit = 10 + (make.length && make.every(has) ? 4 : 0) + trim.filter(has).length * 2 + (year && has(year) ? 1 : 0);
+      if (fit > top) { top = fit; best = m; }
+    }
+    return best;
+  }
+  function paintPicker(rec, chose) {
     const d = S.d, wanted = !!d.hasCar && !S.busy && !rec && !(d.model && d.model.url), q = d.find3d || d.title || "";
     root.classList.toggle("picking", wanted); el.picker.hidden = !wanted;
     if (!wanted) return;
@@ -1154,11 +1171,17 @@ function create(root) {
     if (!pick.items && !pick.busy && !pick.failed && q) {
       pick.busy = true;
       findModels(q).then((items) => { if (pick.key === key) pick.items = items; }, () => { if (pick.key === key) pick.failed = true; })
-        .then(() => { if (pick.key === key) { pick.busy = false; paintLive(); } });
+        .then(async () => {
+          if (pick.key !== key) return;
+          pick.busy = false;
+          const auto = chose ? null : bestModel(pick.items);       /* pick the car's model for them, unless they removed one */
+          if (auto && await showModel(auto, true)) return;
+          paintLive();
+        });
     }
     const more = '<button type="button" class="p-more">Search or load a file</button>';
     el.picker.innerHTML = pick.items && pick.items.length
-      ? `<div class="p-head"><span>Pick a 3D model of this car</span>${more}</div><div class="p-row">${pick.items.map((m) => modelTile(m)).join("")}</div>`
+      ? `<div class="p-head"><span>${chose ? "Pick a 3D model of this car" : "None of these names this car. Pick one"}</span>${more}</div><div class="p-row">${pick.items.map((m) => modelTile(m)).join("")}</div>`
       : `<div class="p-note">${pick.busy || (!pick.items && !pick.failed) ? "Looking for 3D models of this car" : pick.failed ? "The model library could not be reached." : "No 3D model of this car turned up."}${pick.busy ? "" : " " + more}</div>`;
     el.picker.querySelectorAll(".skitem").forEach((b) => { b.onclick = () => { const m = (pick.items || []).find((x) => x.uid === b.dataset.uid); if (m) showModel(m); }; });
     const btn = el.picker.querySelector(".p-more"); if (btn) btn.onclick = () => openSheet("model");
@@ -1167,6 +1190,8 @@ function create(root) {
     const d = S.d; let rec = null;
     try { if (d.hasCar) rec = await store.get(modelSlot()); } catch (e) {}
     const frame = el.live.querySelector("iframe");
+    const chose = !!rec && !!rec.none;               /* the person took the model away: offer choices, do not pick again */
+    if (rec && !rec.embed && !rec.file) rec = null;
     if (rec && rec.embed) {
       el.live.hidden = false; root.classList.add("live3d");
       if (liveKey !== rec.embed) { liveKey = rec.embed; startLive(frame, rec.embed); }
@@ -1176,13 +1201,14 @@ function create(root) {
     } else if (liveKey || !el.live.hidden) {
       liveKey = ""; liveStop(); frame.removeAttribute("src"); el.live.hidden = true; el.live.classList.remove("plain", "ready"); root.classList.remove("live3d");
     }
-    paintPicker(d.hasCar && !S.busy ? rec : null);
+    paintPicker(d.hasCar && !S.busy ? rec : null, chose);
   }
   const skToken = () => { try { return localStorage.getItem(SK_SLOT) || ""; } catch (e) { return ""; } };
   const mb = (n) => (n ? (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + " MB" : "");
   async function renderModelTab() {
     let rec = null;
     try { rec = await store.get(modelSlot()); } catch (e) {}
+    if (rec && !rec.embed && !rec.file) rec = null;
     if (S.tab !== "model") return;
     const d = S.d, name = d.modelName || "this car";
     const sk = S.skfb || (S.skfb = {});
@@ -1270,7 +1296,7 @@ function create(root) {
       } catch (e) { toast("That site does not let the app load the file from a link. Download it and choose the file instead.", true); }
     });
     on(".turn", async () => { rec.turn = ((rec.turn || 0) + 1) % 4; await store.set(modelSlot(), rec); refresh(); });
-    on(".drop", async () => { await store.del(modelSlot()); refresh(); });
+    on(".drop", async () => { await store.set(modelSlot(), { none: true }); refresh(); });
     on(".save", async () => { rec.credit = el.sheetBody.querySelector(".credit-text").value.trim(); await store.set(modelSlot(), rec); refresh(); });
     el.sheetBody.querySelectorAll("[data-detail]").forEach((b) => { b.onclick = () => { if (!b.classList.contains("on")) post("detail", b.dataset.detail === "1"); }; });
   }
@@ -1319,10 +1345,15 @@ function create(root) {
         e.preventDefault(); if (S.busy) return;
         const text = box.value.trim();
         if (!text && !S.shot) { toast("Paste a link, add a screenshot, or name a car.", true); return; }
-        S.busy = true; S.sentSeq = S.d.seq; S.busyAt = Date.now(); S.asked = text || "From your screenshot"; S.step = 1; S.log = []; el.toast.hidden = true;
-        closeSheet(); paintAll(); post("build", { text, image: S.shot });
+        sendBuild(text, S.shot);
       };
     }
+  }
+  /* ask for a deal sheet. The request is remembered, so it can be sent again if the app restarts while it is out. */
+  function sendBuild(text, image) {
+    S.lastBuild = { text, image };
+    S.busy = true; S.sentSeq = S.d.seq; S.busyAt = Date.now(); S.asked = text || "From your screenshot"; S.step = 1; S.log = []; el.toast.hidden = true;
+    closeSheet(); paintAll(); post("build", { text, image });
   }
   const focusBar = () => { const f = el.dock.querySelector("textarea, input[type=password]"); if (f) f.focus(); };
   function setShot(url) { S.shot = url; const t = el.dock.querySelector(".thumb"); if (t) { t.hidden = !url; if (url) t.querySelector("img").src = url; } }
@@ -1462,11 +1493,22 @@ function create(root) {
   let noticeKey = "";
   S.update = (d) => {
     S.d = d; S.waiting = false; clearTimeout(S.waitTimer);
+    /* The app restarted underneath this page (a new version went out, or it had been asleep). The server has
+       forgotten the key, the settings, the cars and anything it was working on, so bring them back and send
+       again what was out, instead of waiting for an answer that will never come. */
+    if (S.sid && d.sid && d.sid !== S.sid) {
+      const out = S.busy ? S.lastBuild : null, lost = S.busy || S.moreBusy || S.msgBusy || S.optBusy;
+      Object.assign(S, { triedSaved: false, triedPrefs: false, triedRestore: false, keyTried: false, busy: false, moreBusy: "", msgBusy: "", optBusy: false, resend: out });
+      let saved = ""; try { saved = localStorage.getItem(KEY_SLOT) || ""; } catch (e) {}
+      if (lost) toast(out ? (saved ? "The app restarted. Reconnecting and sending that again." : "The app restarted and lost your key. Paste it again and your request is sent.") : "The app restarted, so that was lost. Tap it again.", !saved || !out);
+    }
+    if (d.sid) S.sid = d.sid;
     if (S.moreBusy && d.seq !== S.optSeq) { S.moreBusy = ""; if (S.tab === "comps" || S.tab === "sale") { const y = el.sheetBody.scrollTop; setTimeout(() => { renderSheet(); el.sheetBody.scrollTop = y; }, 0); } }
     if (S.optBusy && d.seq !== S.optSeq) { S.optBusy = false; if (!d.error) { S.optShot = ""; S.optText = ""; S.optOpen = false; } if (S.tab === "case") renderSheet(); }
     if (S.msgBusy && d.seq !== S.optSeq) S.msgBusy = "";
     S.optSeq = d.seq;
     if (d.connected && S.afterKey) { const go = S.afterKey; S.afterKey = null; setTimeout(go, 60); }
+    if (d.connected && S.resend && !S.busy) { const again = S.resend; S.resend = null; setTimeout(() => sendBuild(again.text, again.image), 80); }
     if (S.busy && d.seq !== S.sentSeq && !d.busy) {
       S.busy = false;
       if (d.error) toast(d.error, true, 12000);
@@ -1773,6 +1815,7 @@ function makeScene(THREE, addons, root, S) {
     store.get("glb:" + (d.modelKey || d.activeId || "")).catch(() => null).then((rec) => {
       if (carKey !== key) return;
       if (rec && rec.embed) { if (S.paintLive) S.paintLive(); return; }   /* shown live by the page, in the library's viewer */
+      if (rec && rec.none) rec = null;
       if (rec && rec.file) loadOwn(rec, key); else if (d.model && d.model.url) loadModel(d, key);
     });
   }

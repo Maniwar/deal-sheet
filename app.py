@@ -464,6 +464,7 @@ def init_state() -> None:
     if ss.get("_ready"):
         return
     ss["_ready"] = True
+    ss["sid"] = uuid.uuid4().hex[:12]            # names this server session, so the page can tell when the app restarted
     ss["comps_base"] = []
     ss["comps_ver"] = 0
     ss["upload_ver"] = 0
@@ -1387,7 +1388,7 @@ flags = {
     "notices": ss.pop("notices", []) or [], "fresh": ss["fresh"], "connected": bool(api_key),
     "key_error": ss.pop("key_error", ""), "key_forgotten": ss["key_forgotten"], "sample": ss["is_sample"],
     "message": ss["message_text"], "summary": ss["research_summary"],
-    "prefs": current_prefs(), "prefs_ask": not ss["prefs_asked"],
+    "prefs": current_prefs(), "prefs_ask": not ss["prefs_asked"], "sid": ss["sid"],
 }
 stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail", "more", "verify",
                 "message", "car", "addcomp")

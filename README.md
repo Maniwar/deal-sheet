@@ -17,11 +17,14 @@ what that car has been selling for and gives you a typical sale price, the comps
 
 ## What you see
 
-- **The car.** Until you pick one, the place where the car goes shows 3D models of that car from
-  Sketchfab's public library (the app searches it for the car's name). Tap one and it becomes the
-  car on the main screen, for every car of that make and model in your garage. **Search or load a
-  file** opens the **3D model** tab for other searches, your own `.glb`, or the built-in concept
-  coupe (see Credits). The app does not draw a stand-in car of its own.
+- **The car.** The app searches Sketchfab's public library for the car's name and shows the model
+  that names it best (it must name the model; make, trim and year count for more). It is used for
+  every car of that make and model in your garage. Change it or remove it in the **3D model** tab.
+  If nothing in the library names the car, or you removed the model, the place where the car goes
+  shows the choices to tap instead. The app does not draw a stand-in car of its own.
+- **If the app restarts while you wait** (a new version went out, or it had gone to sleep), the page
+  notices, reconnects your saved key, brings your cars and settings back and sends your request
+  again, instead of waiting for an answer that will not come.
 - **The listing photo.** The listing's own picture sits beside the title on a phone and beside the
   car on a wide screen. Tap it to see it large. If the site would not give the app a picture, tap
   **Add photo**.
