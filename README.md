@@ -184,10 +184,12 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   for another year. A car with nothing to open (read from a list, or with a link the search did
   not return) is a lead: once a car has three results that can be checked, leads are folded away
   and left out of the numbers. Paste a lead's own link into the box on its card and it is counted.
-- Facebook Marketplace shows the search tool only its lists for a city (car, price, miles, town).
-  Those cars are always leads. Each has a link that opens Marketplace searched for that car at
-  about its price in the same area, and a box for the direct link (in Facebook: Share, then Copy
-  link), which the car keeps from then on.
+- Facebook Marketplace is searched for ads themselves: the search is limited to ad pages
+  (facebook.com/marketplace/item), so each result is one car at its own address, with the price,
+  the miles, the town and how long ago it was listed. Ads that are marked sold, older than twelve
+  weeks, abroad or not in dollars are left out. The search index holds only some of Marketplace's
+  ads, so a rare car may have none. A Marketplace car read from a city list by an earlier version
+  has no address of its own and is cleared on the next refresh.
 - The app cannot open sites that block automated visits, so some for-sale cars are marked "not
   confirmed". Open those yourself.
 - Body style and trim are hard requirements: a coupe is compared only with coupes and a Carrera S

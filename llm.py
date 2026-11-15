@@ -999,27 +999,35 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
             "passes": passes}
 
 
-def _marketplace_prompt(car: dict, today: str, max_searches: int = 2) -> str:
-    short = " ".join(str(car.get(key) or "").strip() for key in ("make", "model")).strip() or car_title(car)
+# A search limited to this path returns Marketplace ads themselves: one car each, at its own address.
+MARKETPLACE_ADS = ["facebook.com/marketplace/item"]
+
+
+def _marketplace_prompt(car: dict, today: str, max_searches: int = 3) -> str:
+    year = str(car.get("year") or "").strip()
+    plain = " ".join(str(car.get(key) or "").strip() for key in ("make", "model")).strip() or car_title(car)
+    trim = "" if loose_trim(car) else str(car.get("trim") or "").strip()
     place = str(car.get("location") or "").strip()
-    near = f" and \"{short} for sale {place}\"" if place else ""
     return (
-        f"Today is {today}. Find cars like this one that are listed on Facebook Marketplace.\n\n"
+        f"Today is {today}. Find Facebook Marketplace ads for cars like this one that are for sale now.\n\n"
         f"{_car_block(car)}\n\n"
-        f"Your searches return facebook.com pages only. Run up to {max_searches} searches, such as \"{short} for sale\""
-        f"{near}, then call record_comps once.\n"
-        "Marketplace's public pages are lists for one city. Each entry gives a car, its price, its miles and its town. "
-        "Record every entry that matches this car:\n"
-        "- status asking, available unknown, source Facebook Marketplace.\n"
-        "- title: the year, model and trim as listed, without the town. Start the note with the town, like 'Scottsdale, AZ.'\n"
-        "- url: the address of the list page where you saw the car. A car's own Marketplace page is not in the results, "
-        "so here the list page is the right URL. This is the one exception to the rule about list pages.\n"
-        "- When an entry shows two prices, the first is the price now and the second is the old one.\n"
-        "- The same car is often on several cities' lists. Record it once.\n"
-        "- Leave out entries with no price, and anything that is not this model.\n"
-        + _trim_rule(car) +
-        "- Record only what the lists show. Never fill a gap from memory.\n"
-        "In the summary say how many cars you recorded and in which towns."
+        f"Your searches return Marketplace ad pages only. Each result is one car's own ad, at its own address. Run up "
+        f"to {max_searches} searches worded the way the ads' titles are, then call record_comps once:\n"
+        f"- \"{(year + ' ' + plain).strip()} Cars & Trucks\"\n"
+        f"- \"{(plain + ' ' + trim).strip()} Cars & Trucks\"\n"
+        f"- \"{plain} for sale{(' ' + place) if place else ''}\"\n"
+        "An ad page gives the car, the price, a line like 'Listed 3 weeks ago in Cape Coral, FL', the miles, the "
+        "transmission and often the title status and the seller's description.\n"
+        "Record an ad only when all of these are true:\n"
+        "- It is this model. " + _trim_rule(car).lstrip("- ") +
+        "- Its price is in US dollars and the car is in the United States.\n"
+        "- It is not marked 'Sold', and it was listed within the last 12 weeks. An older ad has nearly always gone.\n"
+        "For each ad you record: status asking, available yes, source Facebook Marketplace, and as the URL the ad's "
+        "own address (it contains /marketplace/item/). Give the title as the ad has it, the miles, and in date the "
+        "day it was listed, worked out from today's date. Start the note with the town, then the transmission and "
+        "the title status. Record the VIN when the seller's description gives it.\n"
+        "- Record only what the ads show. Never fill a gap from memory.\n"
+        "In the summary say how many ads you recorded and how many you left out for being sold, old or abroad."
     )
 
 
@@ -1036,23 +1044,23 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
                       progress, "For sale now")
 
     def marketplace() -> dict:
-        return _research(client, model, _marketplace_prompt(car, today), 2, 3, problem, car=car, only=["facebook.com"],
+        return _research(client, model, _marketplace_prompt(car, today), 3, 3, problem, car=car, only=MARKETPLACE_ADS,
                          progress=progress, label="Facebook Marketplace")
 
     jobs = [("For sale now", everywhere)]
-    # Marketplace's lists give a car, a price and a town, but never the ad's own address, so by default they are
-    # not searched: a car that cannot be opened is noise. DEALSHEET_MARKETPLACE=1 turns the list search back on.
-    if os.environ.get("DEALSHEET_MARKETPLACE") == "1" and ("facebook.com",) not in _UNSEARCHABLE:
+    if tuple(MARKETPLACE_ADS) not in _UNSEARCHABLE:        # Marketplace ads, each at its own address
         jobs.append(("Facebook Marketplace", marketplace))
     done = dict(_run_side_by_side(jobs, progress))
     result, lists = done["For sale now"], done.get("Facebook Marketplace")
     if isinstance(lists, LLMError):
         if lists.kind == "request":
-            _UNSEARCHABLE.add(("facebook.com",))
+            _UNSEARCHABLE.add(tuple(MARKETPLACE_ADS))
         if progress:
             progress.say("Facebook Marketplace: could not be searched this time, so it was left out")
         lists = None
-    listed = [comp for comp in (lists or {}).get("comps", []) if comp["status"] == "asking"]
+    # only an ad's own page counts: anything else the search handed back is left out
+    listed = [comp for comp in (lists or {}).get("comps", [])
+              if comp["status"] == "asking" and "/marketplace/item/" in comp["url"] and comp.get("link_ok")]
     if isinstance(result, LLMError):
         if not listed:
             raise result
@@ -1062,10 +1070,10 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
     comps = [comp for comp in result["comps"] if comp["status"] == "asking" and not is_mirror(comp["url"])]
     for comp in comps:
         comp["available"] = comp.get("available") or "yes"
-    for comp in listed:                            # read from a list, not from the car's own page, and not opened
-        comp["source"], comp["available"] = "Facebook Marketplace", ""
+    for comp in listed:
+        comp["source"], comp["available"] = "Facebook Marketplace", comp.get("available") or "yes"
     if lists is not None:
-        result["summary"] = f"{result['summary']} Facebook Marketplace's public lists: {len(listed)}.".strip()
+        result["summary"] = f"{result['summary']} Facebook Marketplace ads, each with its own link: {len(listed)}.".strip()
     result["comps"] = merge_comps(comps, listed)
     return result
 
