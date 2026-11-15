@@ -220,8 +220,9 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   search actually returned. A link that was not in the results is flagged.
 - Claude is told to record each car's own page, never a results page, and the app checks the link's
   shape for the common sites. It cannot open blocked sites to confirm a page still shows that car.
-- **Refresh results** on The case tab runs every search again for the car on screen: sales,
-  no-sales and cars for sale now. What you have stays, new finds are added, each for-sale page is
+- **Refresh results**, the button under the price on the main screen (and on The case tab), runs
+  every search again for the car on screen: sales, no-sales and cars for sale now. While it runs,
+  the button shows a clock and the line under it says what is happening. What you have stays, new finds are added, each for-sale page is
   opened again, and a sale that had been set aside only because its page left out a detail of the
   trim line is counted again.
 - Treat every comp as a lead. Open the link and confirm it before you put it in front of a seller.

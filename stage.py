@@ -387,6 +387,19 @@ button.opt{cursor:pointer}
 .gap.is-up{color:var(--warn);border-color:rgba(245,184,74,.45);background:rgba(245,184,74,.08)}
 .gap.is-down{color:#7ee8bd;border-color:rgba(52,211,153,.45);background:rgba(52,211,153,.08)}
 .listing{font:500 12.5px var(--sans);color:var(--mute);text-decoration:none;border-bottom:1px solid rgba(255,255,255,.25);white-space:nowrap}
+.rslot{display:inline-flex}
+.refresh{display:inline-flex;align-items:center;gap:7px;font:700 12.5px var(--sans);padding:6px 13px 6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.4);color:var(--ink);background:rgba(255,255,255,.1);white-space:nowrap;font-variant-numeric:tabular-nums}
+.refresh:hover{background:rgba(255,255,255,.18)}
+.refresh:active{transform:scale(.97)}
+.refresh[disabled]{cursor:default}
+.refresh[disabled]:not(.on){opacity:.5}
+.refresh svg{width:15px;height:15px;flex:none}
+.refresh.on{border-color:rgba(52,211,153,.6);background:rgba(52,211,153,.12);color:#7ee8bd}
+.refresh.on svg{animation:rturn 1s linear infinite}
+@keyframes rturn{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.refresh.on svg{animation:none}}
+.rlog .livelog{margin-top:8px;padding:0;border:0;background:none}
+.rlog .livelog div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--mute)}
 .why{display:-webkit-box;margin-top:9px;text-align:left;font:400 13.5px/1.4 var(--sans);color:#c9cdd5;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .why b{color:var(--ink);font-weight:500;border-bottom:1px solid rgba(255,255,255,.35);white-space:nowrap}
 
@@ -720,9 +733,32 @@ function create(root) {
     const gap = d.gap && d.gap.text ? `<span class="gap is-${esc(d.gap.tone)}">${esc(d.gap.text)}</span>` : "";
     const link = url ? `<a class="listing" href="${esc(url)}" target="_blank" rel="noopener">Open the listing ${ARROW}</a>` : "";
     const why = c.line ? `<button type="button" class="why">${esc(c.line)} <b>See the case</b></button>` : "";
-    el.verdict.innerHTML = `<div class="lbl">${esc(d.priceLabel || "Asking")}</div><div class="num"></div><div class="side">${gap}${link}</div>${why}`;
+    el.verdict.innerHTML = `<div class="lbl">${esc(d.priceLabel || "Asking")}</div><div class="num"></div><div class="side">${gap}<span class="rslot"></span>${link}</div><div class="rlog" hidden></div>${why}`;
     countTo(el.verdict.querySelector(".num"), d.priceValue, d.priceText || "");
     const w = el.verdict.querySelector(".why"); if (w) w.onclick = () => openSheet("case");
+    paintRefresh();
+  }
+  /* Refresh: every search again for the car on screen, one tap, with what is happening shown under the price */
+  const TURN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></svg>';
+  function paintRefresh() {
+    const slot = el.verdict.querySelector(".rslot"), lines = el.verdict.querySelector(".rlog");
+    if (!slot) return;
+    const on = S.moreBusy === "all";
+    slot.innerHTML = `<button type="button" class="refresh${on ? " on" : ""}"${S.moreBusy ? " disabled" : ""} title="Search again for sales and cars for sale">${TURN}${on ? `Refreshing <span class="rclock">${clock()}</span>` : "Refresh results"}</button>`;
+    if (lines) { lines.hidden = !on; lines.innerHTML = on ? `<div class="livelog">${logHtml(1) || "<div class=\"now\">Starting</div>"}</div>` : ""; }
+    slot.querySelector(".refresh").onclick = refreshAll;
+  }
+  function refreshAll() {
+    if (S.busy || S.moreBusy || !S.d.hasCar) return;
+    if (!S.d.connected) {                                    /* the key goes in the bar at the bottom */
+      toast("Connect your Anthropic API key in the bar below, then tap Refresh results.", true);
+      const key = el.dock.querySelector("input[type=password]"); if (key) key.focus();
+      return;
+    }
+    S.moreBusy = "all"; S.busyAt = Date.now(); S.log = [];
+    post("more", { kind: "all", at: Date.now() });
+    paintRefresh();
+    if (S.tab === "case") renderSheet();
   }
 
   /* ---------- the price line ---------- */
@@ -945,7 +981,7 @@ function create(root) {
       S.remember = el.sheetBody.querySelector(".keykeep").checked; S.pendingKey = value; S.keyTried = true;
       go.disabled = true; go.textContent = "Connecting"; post("key", { value, saved: false });
     };
-    const again = (name, value, flag) => { if (name === "more" && !S.d.connected) { needKey(`.more[data-kind="${value.kind}"]`); return; } S.moreBusy = flag; S.log = []; keep(); post(name, value); };
+    const again = (name, value, flag) => { if (name === "more" && !S.d.connected) { needKey(`.more[data-kind="${value.kind}"]`); return; } S.moreBusy = flag; S.busyAt = Date.now(); S.log = []; keep(); post(name, value); paintRefresh(); };
     /* the offer message, written and edited right here */
     el.sheetBody.querySelectorAll("[data-chan]").forEach((b) => { b.onclick = () => { S.msgChannel = b.dataset.chan; keep(); }; });
     const msgbox = el.sheetBody.querySelector(".msgbox"), msgai = el.sheetBody.querySelector(".msgai"), msgplain = el.sheetBody.querySelector(".msgplain");
@@ -1588,7 +1624,9 @@ function create(root) {
     if (Array.isArray(log) && log.length && log.join("\n") !== (S.log || []).join("\n")) {
       S.log = log.map(String);
       if (S.busy) paintBusy(); else { const box = el.sheetBody.querySelector(".livelog"); if (box) box.innerHTML = logHtml(5); }
+      if (S.moreBusy === "all") { const box = el.verdict.querySelector(".rlog .livelog"); if (box) box.innerHTML = logHtml(1); }
     }
+    if (S.moreBusy === "all") { const tick = el.verdict.querySelector(".rclock"); if (tick) tick.textContent = clock(); }
     if (!S.busy) return;
     const tick = el.progress.querySelector(".clock"); if (tick) tick.textContent = clock();
     const n = p ? +p.dataset.step || 0 : 0;
