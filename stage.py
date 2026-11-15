@@ -1001,14 +1001,17 @@ function create(root) {
           const why = [...new Set(out.map((k) => k.why))].slice(0, 2).join(", or ");
           return `<details class="byhand leftout"${S.outOpen ? " open" : ""}><summary>Show ${out.length} not counted (${why})</summary><div class="lead-sub">Left out of the typical price: another trim, or nothing to open and check. Paste a car's own link, or tap Count it.</div>${out.sort(order).map((k) => compCard(k, true)).join("")}</details>`; })() +
         list(["high_bid"], "Auctions that ended without a sale");
+      const ended = (() => { const out = (d.comps || []).filter((k) => k.group === "ended"); if (!out.length) return "";
+          return `<details class="byhand endedfold"${S.endOpen ? " open" : ""}><summary>Show ${out.length} listing${out.length === 1 ? "" : "s"} that ended</summary><div class="lead-sub">These were for sale and their pages now say sold or gone. The price is the last asking price, not what the car sold for, so they are not counted.</div>${out.sort(order).map((k) => compCard(k, true)).join("")}</details>`; })();
       const find = `<button type="button" class="btn${rows ? " ghost" : ""} more" data-kind="sold"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sold" ? "Searching" : rows ? "Search for more sales" : "Search for sales"}</button>`;
       h = (rows ? sorter + rows : '<div class="lead-line">No completed sales yet</div><div class="lead-sub">The search goes through Cars &amp; Bids, Bring a Trailer, the other auction sites and then the wider web.</div>') +
-        keyAsk + `<div>${find}</div>` + liveLog(S.moreBusy === "sold") + byHand("sold");
+        ended + keyAsk + `<div>${find}</div>` + liveLog(S.moreBusy === "sold") + byHand("sold");
     } else if (S.tab === "sale") {
       const rows = list(["live"], "For sale now", (k) => !k.lead) +
         (() => { const out = (d.comps || []).filter((k) => k.group === "live" && k.lead); if (!out.length) return "";
           return `<details class="byhand leftout"${S.outOpen ? " open" : ""}><summary>Show ${out.length} lead${out.length === 1 ? "" : "s"} with no page of ${out.length === 1 ? "its" : "their"} own to check</summary><div class="lead-sub">No page of their own to open and no VIN, so they are not counted. Found one? Paste its link and it moves up.</div>${out.sort(order).map((k) => compCard(k, true)).join("")}</details>`; })() +
-        list(["ended"], "Listings that have sold or gone");
+        (() => { const n = (d.comps || []).filter((k) => k.group === "ended").length;
+          return n ? `<div class="tiny endednote">${n} listing${n === 1 ? " that has" : "s that have"} sold or gone ${n === 1 ? "is" : "are"} under the Sold tab. <button type="button" class="textbtn toended">Show ${n === 1 ? "it" : "them"}</button></div>` : ""; })();
       const tools = (nSale ? `<button type="button" class="btn ghost verify"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "verify" ? "Opening each page" : "Check they are still for sale"}</button> ` : "") +
         `<button type="button" class="btn ghost more" data-kind="sale"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sale" ? "Searching" : "Search for more cars for sale"}</button>`;
       h = (nSale ? '<div class="lead-sub">Other cars you could buy today, from live auctions, enthusiast classifieds and dealers. Asking prices sit above what cars sell for, so use these as alternatives and leverage, not as the price.</div>'
@@ -1070,6 +1073,10 @@ function create(root) {
     };
     const leftout = el.sheetBody.querySelector(".leftout");
     if (leftout) leftout.ontoggle = () => { S.outOpen = leftout.open; };
+    const endedfold = el.sheetBody.querySelector(".endedfold");
+    if (endedfold) endedfold.ontoggle = () => { S.endOpen = endedfold.open; };
+    const toended = el.sheetBody.querySelector(".toended");
+    if (toended) toended.onclick = () => { S.tab = "comps"; S.endOpen = true; renderSheet(); const f = el.sheetBody.querySelector(".endedfold"); if (f) el.sheetBody.scrollTop = Math.max(0, f.offsetTop - 70); };
     /* count a sale in the typical price, or leave it out */
     el.sheetBody.querySelectorAll(".setlink").forEach((f) => { f.onsubmit = (e) => {
       e.preventDefault();

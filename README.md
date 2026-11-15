@@ -61,7 +61,9 @@ what that car has been selling for and gives you a typical sale price, the comps
   "sold or gone" only with proof too: a missing page, a redirect away from the car's page (the
   usual answer for a sold car is the inventory list), words or a badge that say sold, pending or
   removed, or another car's VIN at that address. Everything else, including sites that do not let
-  apps look and pages built by scripts, is marked **Not confirmed**, never for sale. A link the
+  apps look and pages built by scripts, is marked **Not confirmed**, never for sale. A listing
+  that has ended leaves the For sale now tab for a fold at the bottom of the Sold tab, labelled
+  with its last asking price and not counted, so For sale now holds only cars you can buy. A link the
   app opened and found the car on is treated as confirmed. Both lists sort by price, miles or
   date.
 - **Manual or automatic.** When your car states its transmission, the other kind is left out:
