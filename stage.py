@@ -877,7 +877,7 @@ function create(root) {
       const tier = (n) => comps.some((k) => (k.trust || 3) === n);
       el.legend.innerHTML = (has("sold") ? '<span><i class="sold"></i>Sold</span>' : "") + (has("high_bid") ? '<span><i class="high_bid"></i>No sale</span>' : "") +
         (has("live") ? '<span><i class="asking"></i>For sale now</span>' : "") + (a.median ? `<span><i class="med"></i>Median sale ${esc(a.medianText)}</span>` : "") +
-        '<span class="lg-break"></span>' + (tier(1) ? '<span><i class="t1"></i>Own page + VIN</span>' : "") + (tier(2) ? '<span><i class="t2"></i>Own page, to confirm</span>' : "") + (tier(3) ? '<span><i class="t3"></i>Not checkable</span>' : "");
+        '<span class="lg-break"></span>' + (tier(1) ? '<span><i class="t1"></i>Own page + VIN</span>' : "") + (tier(2) ? '<span><i class="t2"></i>To confirm</span>' : "") + (tier(3) ? '<span><i class="t3"></i>Not checkable</span>' : "");
       h += '<button type="button" class="knob open" data-k="open" aria-label="Opening offer"></button><button type="button" class="knob walk" data-k="walk" aria-label="Walk-away price"></button><button type="button" class="knob target" data-k="target" aria-label="Target price"></button>';
       el.track.innerHTML = h;
       if (fresh) el.track.querySelectorAll(".dot").forEach((dot, i) => setTimeout(() => dot.classList.add("in"), 250 + i * 90));
@@ -938,19 +938,21 @@ function create(root) {
   const compCard = (k, big) => {
     const url = safeUrl(k.url);
     const flag = k.kind === "find" ? ""                      /* the fold it sits in says what it is */
+      : k.proof === "listed" ? (k.seen === "listed" ? "" : '<div class="c-flag">Read from a listing site\'s results, with its VIN. The link opens those results, not this car alone.</div>')
       : k.kind === "page" ? '<div class="c-flag">This link opens a results page, not this car.</div>' : (k.linkOk === false ? '<div class="c-flag">Link not confirmed. Open it before you cite it.</div>' : "");
     /* what the last look at its page found, and what that rests on */
     const because = k.seenWhy ? ` (${esc(k.seenWhy)})` : "";
     const seen = k.kind === "find" ? "" : k.group === "ended" ? (k.seen === "gone" && k.seenWhy ? `<div class="c-seen">Checked ${esc(k.seenOn)}: no longer for sale${because}.</div>` : "")
       : k.group !== "live" ? "" : k.seen === "live" ? `<div class="c-seen ok">Checked ${esc(k.seenOn)}: still for sale${because || " (the page still shows it)"}.</div>`
+      : k.seen === "listed" && k.proof === "listed" ? `<div class="c-seen">Checked ${esc(k.seenOn)}: ${esc(k.seenWhy || "seen on a listing site")}, with its VIN. The link opens those results, not this car alone: find it there by VIN or dealer, or call the dealer with the VIN. Listing sites can run days behind the dealer.</div>`
       : k.seen === "listed" ? `<div class="c-seen">Checked ${esc(k.seenOn)}: ${esc(k.seenWhy || "a site that copies listings still shows it")}. That site copies sellers' listings and can be days behind, so open it to be sure.</div>`
       : k.seen === "unknown" ? `<div class="c-seen">Checked ${esc(k.seenOn)}: could not confirm it is still for sale${because}. Open it to check.</div>`
       : '<div class="c-seen">Not checked yet. Tap Check they are still for sale.</div>';
     const out = big && k.group === "sold" && !k.use, flip = big && k.group === "sold" ? `<button type="button" class="textbtn usebtn" data-i="${k.idx}" data-price="${k.price}" data-use="${k.use ? 0 : 1}">${k.use ? "Leave it out" : "Count it"}</button>` : "";
-    const text = `<div><i class="tdot t${k.trust || 3}" title="${k.trust === 1 ? "Opens on its own page, has a VIN, nothing left to confirm" : k.trust === 2 ? "Opens on its own page, with something left to confirm" : "Nothing to open and check"}"></i><span class="pill ${esc(k.group)}${k.unsure ? " unsure" : ""}">${esc(k.label)}</span>${out ? `<span class="pill out">Not counted: ${esc(k.why)}</span>` : ""}<span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
+    const text = `<div><i class="tdot t${k.trust || 3}" title="${k.trust === 1 ? "Opens on its own page, has a VIN, nothing left to confirm" : k.trust === 2 ? (k.proof === "listed" ? "Read from a listing site's results, with its VIN" : "Opens on its own page, with something left to confirm") : "Nothing to open and check"}"></i><span class="pill ${esc(k.group)}${k.unsure ? " unsure" : ""}">${esc(k.label)}</span>${out ? `<span class="pill out">Not counted: ${esc(k.why)}</span>` : ""}<span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
       `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div><div>${k.vin ? vinChip(k.vin, "c-vin", k.vinOk, k.vinYear) : '<span class="vin none c-vin"><b>VIN</b>not found</span>'}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.gearFlag ? '<div class="c-flag">Manual or automatic is not stated. Check before you count on it.</div>' : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${seen}${flag}` +
-      (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">${k.kind === "find" ? "Find it on Marketplace" : "Open"} ${ARROW} <small>${esc(k.kind === "find" ? "" : k.host)}</small></a>` : "") +
-      (big && (k.proof === "list" || k.proof === "loose" || k.proof === "none") ? `<form class="linkrow setlink" data-i="${k.idx}" data-price="${k.price}"><input type="url" class="linkbox" placeholder="${k.kind === "find" ? "Found it? Share, Copy link, paste here" : "Have its own link? Paste it here"}" inputmode="url" aria-label="This car's own link"><button type="submit" class="btn ghost">Save</button></form>` : "") +
+      (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">${k.kind === "find" ? "Find it on Marketplace" : k.kind === "page" ? "Open the results" : "Open"} ${ARROW} <small>${esc(k.kind === "find" ? "" : k.host)}</small></a>` : "") +
+      (big && (k.proof === "list" || k.proof === "listed" || k.proof === "loose" || k.proof === "none") ? `<form class="linkrow setlink" data-i="${k.idx}" data-price="${k.price}"><input type="url" class="linkbox" placeholder="${k.kind === "find" ? "Found it? Share, Copy link, paste here" : "Have its own link? Paste it here"}" inputmode="url" aria-label="This car's own link"><button type="submit" class="btn ghost">Save</button></form>` : "") +
       (flip ? `<div>${flip}</div>` : "") + "</div>";
     return big ? `<div class="card${k.use ? "" : " off"}">${text}${k.image ? `<img src="${esc(k.image)}" alt="" loading="lazy">` : "<span></span>"}</div>` : text;
   };
@@ -1049,7 +1051,7 @@ function create(root) {
           return n ? `<div class="tiny endednote">${n} listing${n === 1 ? " that has" : "s that have"} sold or gone ${n === 1 ? "is" : "are"} under the Sold tab. <button type="button" class="textbtn toended">Show ${n === 1 ? "it" : "them"}</button></div>` : ""; })();
       const tools = (nSale ? `<button type="button" class="btn ghost verify"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "verify" ? "Opening each page" : "Check they are still for sale"}</button> ` : "") +
         `<button type="button" class="btn ghost more" data-kind="sale"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sale" ? "Searching" : "Search for more cars for sale"}</button>`;
-      h = (nSale ? '<div class="lead-sub">Other cars you could buy today, from live auctions, enthusiast classifieds and dealers. Asking prices sit above what cars sell for, so use these as alternatives and leverage, not as the price.</div>'
+      h = (nSale ? '<div class="lead-sub">Other cars you could buy today, from live auctions, classifieds, dealers and the big listing sites (Cars.com, CarGurus, Autotrader, Edmunds). Asking prices sit above what cars sell for, so use these as alternatives and leverage, not as the price.</div>'
         : '<div class="lead-sub">No cars for sale found yet. The search covers live auctions, enthusiast classifieds and dealers.</div>') +
         keyAsk + `<div>${tools}</div>` + liveLog(S.moreBusy === "sale" || S.moreBusy === "verify") + (nSale ? sorter : "") + rows + byHand("sale");
     } else if (S.tab === "message") {

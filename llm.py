@@ -25,8 +25,9 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import (MIRROR_SITES, car_facts, car_title, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind, host_of, is_list_page,
-                  is_mirror, link_kind, link_pages, loose_trim, mark_other_trim, merge_comps, money, normalize_url, to_int)
+from calc import (LISTING_SITES, MIRROR_SITES, car_facts, car_title, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind, host_of,
+                  is_list_page, is_mirror, link_kind, link_pages, listing_site, loose_trim, mark_other_trim, merge_comps, money, normalize_url,
+                  to_int)
 
 MODELS = {                                   # the first one is the default
     "Haiku 5.5 (fastest)": "claude-haiku-5-5",
@@ -132,6 +133,16 @@ def _urls_in(text: str, base: str) -> set[str]:
     if base:
         found |= {normalize_url(urljoin(base, path.rstrip(".,;"))) for path in _PATH_IN_TEXT.findall(text or "")}
     return found
+
+
+def _result_links(response) -> list[str]:
+    """The addresses the web search returned in this response, exactly as given (query string and all)."""
+    links = []
+    for block in _field(response, "content", []) or []:
+        body = _field(block, "content")
+        if _field(block, "type") == "web_search_tool_result" and isinstance(body, list):
+            links += [str(_field(result, "url")) for result in body if _field(result, "url")]
+    return links
 
 
 def _search_urls(response) -> set[str]:
@@ -785,7 +796,8 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
     )
 
 
-def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
+def _for_sale_prompt(car: dict, today: str, max_searches: int = 6, apart: bool = False) -> str:
+    """`apart`: Cars.com, CarGurus, Autotrader and Edmunds are being searched by their own pass, so this one leaves them alone."""
     name = car_title(car) or "this car"
     place = str(car.get("location") or "").strip()
     near = f" and \"{name} for sale {place}\"" if place else ""
@@ -800,8 +812,10 @@ def _for_sale_prompt(car: dict, today: str, max_searches: int = 6) -> str:
         "Porsche, Rennlist Marketplace and the PCA Mart; use the equivalents for other makes).\n"
         "3. The maker's own pre-owned finder and franchised dealers' own sites, including certified cars.\n"
         "4. Listing sites: Classic.com (its 'For Sale' lines give the dealer, the price and the day the listing "
-        "was last updated; 'Last Asking' means the listing has gone, so skip those), Cars.com, Autotrader, CarGurus, "
-        "duPont Registry and Autotrader Classics.\n"
+        "was last updated; 'Last Asking' means the listing has gone, so skip those), "
+        + ("duPont Registry, CarMax, Carvana and Autotrader Classics. (Cars.com, CarGurus, Autotrader and Edmunds are being "
+           "searched separately right now, so they are left out of your results: spend nothing on them.)\n" if apart else
+           "Cars.com, Autotrader, CarGurus, duPont Registry and Autotrader Classics.\n") +
         f"5. Plain searches the way a buyer would type them, e.g. \"{name} for sale\"{near}, to catch independent "
         "dealers and smaller sites.\n"
         "Rules:\n"
@@ -875,6 +889,7 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
     tools = [search, reader, record] if can_open else [search, record]
     messages = [{"role": "user", "content": prompt}]
     seen_urls: set[str] = set()
+    links: list[str] = []
     failed: list[str] = []
     used = {"input_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 0}
     searches = asked = 0
@@ -897,6 +912,7 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
             used[key] += int(_field(usage, key) or 0) if usage is not None else 0
         searches += int(_field(_field(usage, "server_tool_use"), "web_search_requests") or 0) if usage is not None else 0
         seen_urls |= _search_urls(response)
+        links += [link for link in _result_links(response) if link not in links]
         failed += _search_errors(response)
         recorded = _tool_input(response, "record_comps")
         if isinstance(recorded, dict):
@@ -921,6 +937,7 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
                 "searched": len(seen_urls),
                 "failed": failed,
                 "pages": pages,
+                "links": links,                    # every address the searches returned, as given
                 "used": {**used, "searches": searches},
             }
         messages.append({"role": "assistant", "content": _field(response, "content")})
@@ -1177,17 +1194,84 @@ def _marketplace_prompt(car: dict, today: str, max_searches: int = 3) -> str:
     )
 
 
+_NO_LISTING_SITE: set[str] = set()          # listing sites the search tool will not be limited to, once known
+
+
+def _listings_prompt(car: dict, today: str, max_searches: int, sites: list[str]) -> str:
+    name = car_title(car) or "this car"
+    place = str(car.get("location") or "").strip()
+    names = ", ".join({"cars.com": "Cars.com", "cargurus.com": "CarGurus", "autotrader.com": "Autotrader", "edmunds.com": "Edmunds"}[site]
+                      for site in sites)
+    return (
+        f"Today is {today}. Find cars like this one that are listed for sale now on the big listing sites. Your "
+        f"searches are limited to {names}, where most dealers' cars are shown.\n\n"
+        f"{_car_block(car)}\n\n"
+        f"Run up to {max_searches} searches, then call record_comps once. Word them the way a shopper would, for "
+        f"example \"used {name} for sale\"" + (f", \"{name} for sale {place}\"" if place else "") +
+        f" and \"used {str(car.get('make') or '').strip()} {str(car.get('model') or '').strip()} {str(car.get('trim') or '').strip()} for sale\".\n"
+        "What comes back is mostly results pages: each one lists many cars, as lines of text and often again as a "
+        "block of data for each car. Read every car on every page.\n"
+        "Rules:\n"
+        "- Record a car only if it is used, has a price, and is the same model as this one"
+        + (f", of model year {car.get('year')} or the year either side" if car.get("year") else "") + ".\n"
+        + _trim_rule(car) + _gear_rule(car) +
+        "- A drive type is part of the trim on these sites: an all-wheel-drive car and a rear-wheel-drive car are "
+        "different cars. Leave out the other one when this car states which it is.\n"
+        "- For each car: status asking, available yes; the title as the site words it; the price in whole dollars; "
+        "the miles; the dealer or seller in source; the town and state at the start of the note, then the site "
+        "it was seen on, for example 'Plano, TX. Seen on Cars.com.'; the date it was listed when shown.\n"
+        "- The VIN whenever the page shows one for that car (beside 'VIN', or as vehicleIdentificationNumber in the "
+        "car's block of data). Copy it exactly, all 17 characters, and never guess one. It is what lets the buyer "
+        "find the car.\n"
+        "- url: the car's own page when the search returned it (an address with /vehicle/, /vehicledetail/ or "
+        "/vin/ in it). Otherwise the exact address of the results page you read the car on. Never build an address.\n"
+        "- The same car is often on several sites, and twice on one page. Record it once.\n"
+        "- Record up to 30 cars. Prefer the ones nearest this car in miles"
+        + (f" and nearest {place}" if place else "") + ".\n"
+        "- Record only what the pages show. Never fill a gap from memory.\n"
+        "- Send your searches together in one step, then record. Do not search again for more detail on a car.\n"
+        "In the summary say how many cars you recorded from each site and how many of them show a VIN."
+    )
+
+
 def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_rounds: int = 6,
                       today: str | None = None, known=None, progress: Progress | None = None) -> dict:
-    """Search the web for cars like this one that are for sale now: live auctions, classifieds, dealers and
-    Facebook Marketplace's public lists. The two searches run at the same time."""
+    """Search the web for cars like this one that are for sale now: live auctions, classifieds and dealers; the
+    big listing sites, where most dealers' cars are shown; and Facebook Marketplace ads. The three searches run
+    at the same time."""
     today = today or dt.date.today().strftime("%B %d, %Y")
     problem = "The search for cars for sale did not finish."
-    max_searches = max(3, min(8, int(max_searches) * 5 // 12))
+    budget = int(max_searches)
+    max_searches = max(3, min(8, budget * 5 // 12))
+
+    def listings() -> dict:
+        """The big listing sites, searched from the inside. A site the search tool will not be limited to is
+        dropped and the rest are searched without it."""
+        for _ in range(len(LISTING_SITES) + 1):
+            sites = [site for site in LISTING_SITES if site not in _NO_LISTING_SITE]
+            if not sites:
+                break
+            count = max(2, budget // 4)
+            try:
+                return _again(lambda: _research(client, model, _listings_prompt(car, today, count, sites) + _known_note(known), count, 3,
+                                                problem, car=car, only=sites, progress=progress, label="Listing sites"),
+                              progress, "Listing sites")
+            except LLMError as exc:
+                if exc.kind != "request":
+                    raise
+                named = [site for site in sites if site in str(exc).lower()]
+                _NO_LISTING_SITE.update(named or sites)      # the one the API named, or all of them when it named none
+                if progress:
+                    progress.say(f"Listing sites: the search tool cannot look inside {', '.join(named or sites)}, so searching the rest")
+        raise LLMError("The listing sites could not be searched.", "request")
+
+    # the listing sites get a search of their own, so the open search is kept off them and spends itself elsewhere
+    apart = tuple(site for site in LISTING_SITES if site not in _NO_LISTING_SITE)
 
     def everywhere() -> dict:
-        return _again(lambda: _research(client, model, _for_sale_prompt(car, today, max_searches) + _known_note(known), max_searches,
-                                        max_rounds, problem, car=car, never=MIRROR_SITES, progress=progress, label="For sale now"),
+        return _again(lambda: _research(client, model, _for_sale_prompt(car, today, max_searches, bool(apart)) + _known_note(known),
+                                        max_searches, max_rounds, problem, car=car, never=MIRROR_SITES + apart, progress=progress,
+                                        label="For sale now"),
                       progress, "For sale now")
 
     def marketplace() -> dict:
@@ -1195,10 +1279,37 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
                          progress=progress, label="Facebook Marketplace")
 
     jobs = [("For sale now", everywhere)]
+    if apart:
+        jobs.append(("Listing sites", listings))
     if tuple(MARKETPLACE_ADS) not in _UNSEARCHABLE:        # Marketplace ads, each at its own address
         jobs.append(("Facebook Marketplace", marketplace))
     done = dict(_run_side_by_side(jobs, progress))
-    result, lists = done["For sale now"], done.get("Facebook Marketplace")
+    result, lists, sites_found = done["For sale now"], done.get("Facebook Marketplace"), done.get("Listing sites")
+    if isinstance(sites_found, LLMError):
+        if progress:
+            progress.say(f"Listing sites: could not be searched this time ({sites_found}), so they were left out")
+        sites_found = None
+    # a car read off a listing site: priced, on one of those sites, and marked as seen there, not confirmed
+    seen_on, shown = dt.date.today().strftime("%b %-d"), []
+    returned = (sites_found or {}).get("links", [])
+    for comp in (sites_found or {}).get("comps", []):
+        site = listing_site(comp["url"])
+        if comp["status"] != "asking" or not comp["price"] or not site:
+            continue
+        if not comp.get("link_ok"):
+            # the address is not one the search returned (a part dropped, or put together): the car is real
+            # enough to keep when it has a VIN, but its link has to be a page the search did return
+            near = [url for url in returned if listing_site(url) == site and link_kind(url) != "car"]
+            if not near or not comp.get("vin"):
+                continue
+            comp["url"], comp["link_ok"] = near[0], True
+        where = {"cars.com": "Cars.com", "cargurus.com": "CarGurus", "autotrader.com": "Autotrader", "edmunds.com": "Edmunds"}[site]
+        comp["available"] = comp.get("available") or "yes"
+        if link_kind(comp["url"]) != "car":                  # read off a results page: say so, and when
+            comp["seen"], comp["seen_on"], comp["seen_why"] = "listed", seen_on, f"seen in {where} listings"
+            if "seen on" not in comp["note"].lower():
+                comp["note"] = f"{comp['note']} Seen on {where}.".strip()
+        shown.append(comp)
     if isinstance(lists, LLMError):
         if lists.kind == "request":
             _UNSEARCHABLE.add(tuple(MARKETPLACE_ADS))
@@ -1209,7 +1320,7 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
     listed = [comp for comp in (lists or {}).get("comps", [])
               if comp["status"] == "asking" and "/marketplace/item/" in comp["url"] and comp.get("link_ok")]
     if isinstance(result, LLMError):
-        if not listed:
+        if not listed and not shown:
             raise result
         result = {"comps": [], "searched": 0, "failed": [], "used": {},
                   "summary": f"The main search for cars for sale did not finish ({result}). Use Search for more to run it again."}
@@ -1221,8 +1332,13 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
         comp["source"], comp["available"] = "Facebook Marketplace", comp.get("available") or "yes"
     if lists is not None:
         result["summary"] = f"{result['summary']} Facebook Marketplace ads, each with its own link: {len(listed)}.".strip()
-    result["comps"] = merge_comps(comps, listed)
-    result["used"] = add_used(result.get("used"), (lists or {}).get("used"))
+    shown = merge_comps([], shown)                          # the same car on two sites, or twice on one page, once
+    if sites_found is not None:
+        with_vin = sum(bool(comp.get("vin")) for comp in shown)
+        result["summary"] = (f"{result['summary']} Cars.com, CarGurus, Autotrader and Edmunds: {len(shown)} car{'s' if len(shown) != 1 else ''} "
+                             f"listed, {with_vin} with a VIN.").strip()
+    result["comps"] = merge_comps(merge_comps(comps, shown), listed)
+    result["used"] = add_used(result.get("used"), (lists or {}).get("used"), (sites_found or {}).get("used"))
     return result
 
 

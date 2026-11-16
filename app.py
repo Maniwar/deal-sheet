@@ -288,8 +288,10 @@ def same_gearbox_only(car: dict, comps: list[dict], say=None) -> tuple[list[dict
 
 
 def same_body_only(car: dict, comps: list[dict]) -> tuple[list[dict], int]:
-    """Drop comps that are plainly another body style (a cabriolet for a coupe). Returns (kept, how many dropped)."""
-    kept = [comp for comp in comps if not calc.other_body(car, comp)]
+    """Drop comps that are plainly another body style (a cabriolet for a coupe) or drive other wheels (a
+    rear-wheel-drive car for an all-wheel-drive one). A car the buyer added stays. Returns (kept, how many dropped)."""
+    kept = [comp for comp in comps if comp.get("aside") == "mine" or str(comp.get("source") or "") == "Added by you"
+            or not (calc.other_body(car, comp) or calc.other_drive(car, comp))]
     return kept, len(comps) - len(kept)
 
 
@@ -1053,6 +1055,9 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
     else:
         found = llm.research_comps(client, model, the_car, max_searches=searches, known=known, progress=progress)
     better = calc.upgrade_leads(have, found["comps"])            # a lead whose own page has now turned up takes that page
+    relisted = calc.relist(have, found["comps"], dt.date.today().strftime("%b %-d")) if (refresh or wants_sale) else {}
+    if relisted.get("repriced"):
+        progress.say(f"{relisted['repriced']} car{'s' if relisted['repriced'] != 1 else ''} on the listing sites {'have' if relisted['repriced'] != 1 else 'has'} a new price")
     fresh = calc.new_comps(have, found["comps"])
     fresh, _ = same_body_only(the_car, fresh)
     fresh, _ = same_gearbox_only(the_car, fresh, progress.say)
@@ -1075,6 +1080,7 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
         note = checked_note(add_counts(early, count))            # the new ones were opened by the search itself
         sold = sum(comp["status"] != "asking" for comp in fresh)
         bits = [f"{better} car{'s' if better != 1 else ''} now with a direct link and VIN" if better else "",
+                f"{relisted['repriced']} listed car{'s' if relisted['repriced'] != 1 else ''} with a new price" if relisted.get("repriced") else "",
                 f"{sold} more sale{'s' if sold != 1 else ''} and no-sales" if sold else "",
                 f"{len(fresh) - sold} more for sale" if len(fresh) - sold else "",
                 f"{back} sale{'s' if back != 1 else ''} counted again that had been set aside over a trim detail" if back else ""]

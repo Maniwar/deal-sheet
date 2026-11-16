@@ -148,9 +148,10 @@ of the screen; a link beside it opens the Claude Console keys page
 - **What keeps a run cheap.** The API runs a search's steps in a loop and reads everything found
   so far again at each step. Prompt caching is on from the first request, so the API puts a cache
   point after each search result and each later step reads the earlier results from the cache at
-  a tenth of the price. With the default setting a run sends at most 14 searches and opens at
-  most 2 pages (it was 23 and 5): two per auction site, three across the web, five for cars for
-  sale and two on Marketplace. The searches are told to stop when a search brings back cars they
+  a tenth of the price. With the default setting a run sends at most 17 searches and opens at
+  most 2 pages: two per auction site, three across the web, five for cars for sale, three inside
+  the big listing sites and two on Marketplace. The listing-site search costs the most per
+  search, because each result is a page of many cars. The searches are told to stop when a search brings back cars they
   already have, a search that does not record is asked again at most twice, and a search that
   failed is run again only when the failure was a busy server or a dropped connection.
 - **Long work runs on its own.** A build, a search and a check of the for-sale pages each run on
@@ -243,9 +244,9 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   Marketplace. Price-guide mirrors such as KBB are left out because they keep listings up after
   the car has gone.
 - **Most reliable first, and colour-coded.** Every list is sorted "Most reliable" by default: cars
-  that open on their own page, have a VIN and leave nothing to confirm, then cars with their own
-  page and something left to confirm (no VIN, transmission not stated, or a for-sale page the app
-  could not confirm), then the rest, confirmed listings and newest first within each. The price line uses the same three colours (green, white, grey), and shape
+  that open on their own page, have a VIN and leave nothing to confirm, then cars with
+  something left to confirm (no VIN, transmission not stated, a for-sale page the app could not
+  confirm, or a car read from a listing site's results with its VIN), then the rest, confirmed listings and newest first within each. The price line uses the same three colours (green, white, grey), and shape
   for what a car is: a filled dot is a sale, a ring is a car for sale, a diamond is a no-sale.
   Each card carries the same coloured dot.
 - **What can be checked comes first.** A car counts when its link opens that one car's own page
@@ -254,6 +255,24 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   for another year. A car with nothing to open (read from a list, or with a link the search did
   not return) is a lead: once a car has three results that can be checked, leads are folded away
   and left out of the numbers. Paste a lead's own link into the box on its card and it is counted.
+- **The big listing sites are searched from the inside.** Most ordinary cars (a Tesla, a Tacoma,
+  a 3 Series) are sold by dealers who list on Cars.com, CarGurus, Autotrader and Edmunds, and
+  their sale prices are published nowhere, so asking prices on those sites are most of what there
+  is to know. One search is limited to those four sites. What it brings back is mostly results
+  pages, so each matching car is read off the page with its price, miles, dealer, town and VIN.
+  - A car read this way with a valid VIN counts in the numbers. Its card says which site showed
+    it and when, its link opens those results, and it is marked "Listed elsewhere": a listing
+    site can run days behind the dealer. A car with no VIN is a lead.
+  - The same VIN on two sites is one car. A dealer's own page for it wins over the listing site.
+  - Refresh reads the sites again. A car seen again takes today's price, with the old one kept
+    in its note ("Was $53,400 when seen Nov 10"). A car not seen again is marked not confirmed,
+    because a results page shows only some of a site's cars.
+  - The open for-sale search is kept off those four sites while their own search runs, so it
+    spends itself on dealers, auctions and classifieds. If the search tool will not be limited
+    to one of the sites, that site is dropped and the rest are searched.
+- **Drive type is checked.** When the car states its drive (AWD, RWD, FWD), a found car whose
+  title or trim states the other is left out, as with body style: a rear-wheel-drive Model Y is
+  not a comp for an all-wheel-drive one.
 - Facebook Marketplace is searched for ads themselves: the search is limited to ad pages
   (facebook.com/marketplace/item), so each result is one car at its own address, with the price,
   the miles, the town and how long ago it was listed. Ads that are marked sold, older than twelve

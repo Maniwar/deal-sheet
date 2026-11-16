@@ -80,9 +80,22 @@ def is_mirror(url) -> bool:
 _LIST_PAGE = re.compile(r"classic\.com/(m|search|a)/|[?&]tab=comps|facebook\.com/marketplace/(?!item/)", re.I)
 
 
+# The big listing sites, where nearly every dealer's car is shown. A search finds their results pages, each a
+# column of cars with price, miles, dealer and often the VIN, far more often than any one car's own page.
+LISTING_SITES = ("cars.com", "cargurus.com", "autotrader.com", "edmunds.com")
+
+
+def listing_site(url) -> str:
+    """The listing site a page is on ('cars.com'), or ''."""
+    host = host_of(str(url or ""))
+    return next((site for site in LISTING_SITES if host == site or host.endswith("." + site)), "")
+
+
 def is_list_page(url) -> bool:
-    """True for a page that lists many cars rather than one: a Classic.com market page, a Facebook Marketplace city page."""
-    return bool(_LIST_PAGE.search(str(url or "")))
+    """True for a page that lists many cars rather than one: a Classic.com market page, a Facebook Marketplace
+    city page, a results page on one of the big listing sites."""
+    link = str(url or "")
+    return bool(_LIST_PAGE.search(link)) or bool(listing_site(link) and link_kind(link) != "car")
 
 
 _FB_LIST = re.compile(r"facebook\.com/marketplace/(?!item/)", re.I)
@@ -142,6 +155,8 @@ class _Seen:
             hard.append(("page", normalize_url(comp["url"])))
         if comp.get("vin"):
             hard.append(("vin", comp["vin"], comp["status"], comp["price"]))
+            if comp["status"] == "asking":                   # one car for sale, whatever each site says its price is
+                hard.append(("vin", comp["vin"], "asking"))
         if comp["status"] == "asking":
             if year and comp.get("miles"):
                 soft = ("ask", comp["price"], year, round(comp["miles"] / 1000))
@@ -189,7 +204,7 @@ def merge_comps(*groups) -> list[dict]:
         vehicle page). 2: a lead with a date. 3: a lead without one."""
         if is_lead(comp):
             return 2 if _full(comp) else 3
-        return 1 if host_of(comp["url"]).endswith("classic.com") else 0
+        return 1 if host_of(comp["url"]).endswith("classic.com") or proof(comp) == "listed" else 0
 
     for level in range(4):
         for comp in rows:
@@ -197,6 +212,49 @@ def merge_comps(*groups) -> list[dict]:
                 seen.add(comp)
                 keep.add(id(comp))
     return [comp for comp in rows if id(comp) in keep]
+
+
+def from_listings(comp: dict) -> bool:
+    """True for a car for sale that was read off a listing site's results page, rather than opened on a page of its own."""
+    return comp.get("status") == "asking" and bool(listing_site(comp.get("url"))) and is_list_page(comp.get("url"))
+
+
+def relist(have: list[dict], found: list[dict], today: str) -> dict:
+    """Bring the cars held from listing sites up to date after a new search of those sites.
+
+    A held car whose VIN the search read again is marked as seen today and takes today's price and miles, with
+    the old price kept in its note: a price that has moved is news to a buyer. A held car the search did not
+    read this time is marked as not confirmed, since a results page shows only some of a site's cars and its
+    absence proves nothing. Only acts when the search read at least one car from a listing site. Returns counts:
+    again, repriced, missing.
+    """
+    count = {"again": 0, "repriced": 0, "missing": 0}
+    latest = {comp["vin"]: comp for comp in found if comp.get("vin") and comp.get("status") == "asking" and listing_site(comp.get("url"))}
+    if not any(from_listings(comp) for comp in found):
+        return count
+    for comp in have:
+        if not from_listings(comp) or comp_group(comp) != "live":
+            continue
+        new = latest.get(comp.get("vin") or "")
+        if new is None:
+            if comp.get("seen_on") != today:
+                comp["seen"], comp["seen_on"], comp["seen_why"] = "unknown", today, "not among the listings read this time"
+                count["missing"] += 1
+            continue
+        count["again"] += 1
+        if new["price"] and new["price"] != comp["price"]:
+            was = f"Was {money(comp['price'])} when seen {comp.get('seen_on') or 'before'}."
+            note = re.sub(r"\s*Was \$[\d,]+ when seen [^.]*\.", "", str(comp.get("note") or "")).strip()
+            comp["price"], comp["note"] = new["price"], f"{note} {was}".strip()
+            count["repriced"] += 1
+        if new.get("miles"):
+            comp["miles"] = new["miles"]
+        comp["seen"], comp["seen_on"] = new.get("seen") or "listed", today
+        comp["seen_why"] = new.get("seen_why") or comp.get("seen_why") or ""
+        if link_kind(new["url"]) == "car":                   # this time the search returned the car's own page
+            comp["url"], comp["link_ok"] = new["url"], new.get("link_ok")
+            comp["seen"], comp["seen_why"] = "", ""          # to be opened and checked like any other page
+    return count
 
 
 def new_comps(have, found) -> list[dict]:
@@ -275,6 +333,9 @@ _VIN_WEIGHTS = (8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2)
 
 def vin_checks_out(vin: str) -> bool:
     """True when the VIN's check digit (the 9th character) matches the rest, as North American VINs must."""
+    vin = str(vin or "")
+    if len(vin) != 17 or any(ch not in _VIN_VALUES for ch in vin):
+        return False
     total = sum(_VIN_VALUES[ch] * weight for ch, weight in zip(vin, _VIN_WEIGHTS))
     return vin[8] == ("X" if total % 11 == 10 else str(total % 11))
 
@@ -458,6 +519,29 @@ def other_body(car: dict, comp: dict) -> bool:
     return bool(mine and theirs and mine != theirs)
 
 
+_DRIVES = (("awd", re.compile(r"\b(awd|4wd|4x4|all[- ]wheel|four[- ]wheel|dual[- ]motor|quattro|xdrive|4matic|4motion)\b", re.I)),
+           ("rwd", re.compile(r"\b(rwd|rear[- ]wheel)\b", re.I)),
+           ("fwd", re.compile(r"\b(fwd|front[- ]wheel)\b", re.I)),
+           ("2wd", re.compile(r"\b(2wd|two[- ]wheel)\b", re.I)))
+
+
+def drive_kind(text) -> str:
+    """'awd', 'rwd', 'fwd' or '2wd' when a line of text states which wheels are driven, '' when it does not or
+    names more than one."""
+    found = {kind for kind, shape in _DRIVES if shape.search(str(text or ""))}
+    return found.pop() if len(found) == 1 else ""
+
+
+def other_drive(car: dict, comp: dict) -> bool:
+    """True when a comp plainly drives other wheels than the car: a rear-wheel-drive car against an all-wheel-drive
+    one. On ordinary cars that is a different version at a different price, whatever the trim is called."""
+    mine = drive_kind(car.get("drivetrain")) or drive_kind(car.get("trim"))
+    theirs = drive_kind(comp.get("trim")) or drive_kind(comp.get("title"))
+    if not mine or not theirs or mine == theirs:
+        return False
+    return "2wd" not in (mine, theirs) or "awd" in (mine, theirs)     # two-wheel drive only clashes with all-wheel drive
+
+
 _TRIM_NOISE = {"coupe", "coupé", "cabriolet", "convertible", "cabrio", "sedan", "hatchback", "wagon", "pdk", "manual",
                "automatic", "auto", "dct", "tiptronic", "rwd", "awd", "fwd", "4wd", "base", "the", "2+2", "2+0", "2dr", "4dr"}
 
@@ -525,13 +609,15 @@ def vin_check(comp: dict) -> tuple[str, int]:
 
 def proof(comp: dict) -> str:
     """How a buyer can check a comp: 'own' (its link opens that one car's own page, and the search or an opened
-    page gave that link), 'yours' (the buyer added it), 'list' (the link opens a page of many cars), 'loose' (the
-    link was not among the pages the search returned), 'none' (no link at all)."""
+    page gave that link), 'yours' (the buyer added it), 'listed' (read off a listing site's results page with
+    its VIN, so it is one identifiable car), 'list' (the link opens a page of many cars and nothing picks this
+    one out), 'loose' (the link was not among the pages the search returned), 'none' (no link at all)."""
     url = str(comp.get("url") or "")
     if not url:
         return "yours" if str(comp.get("source") or "") == "Added by you" else "none"
     if is_list_page(url) or link_kind(url) == "page":
-        return "list"
+        # a car read off a listing site's results, with its VIN: no page of its own, but one car and findable
+        return "listed" if listing_site(url) and vin_checks_out(clean_vin(comp.get("vin"))) else "list"
     return "loose" if comp.get("link_ok") is False else "own"
 
 
@@ -810,7 +896,7 @@ _CAR_PAGES = {
     "bringatrailer.com": ("/listing/",),
     "carsandbids.com": ("/auctions/",),
     "pcarmarket.com": ("/auction/",),
-    "cars.com": ("/vehicledetail/",),
+    "cars.com": ("/vehicledetail/", "/vehicle/"),
     "autotrader.com": ("/cars-for-sale/vehicle/", "/cars-for-sale/vehicledetails"),
     "classics.autotrader.com": ("/classic-cars/",),
     "cargurus.com": ("/details/", "listing=", "/vdp"),
