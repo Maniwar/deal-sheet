@@ -205,14 +205,40 @@ def merge_comps(*groups) -> list[dict]:
         vehicle page). 2: a lead with a date. 3: a lead without one."""
         if is_lead(comp):
             return 2 if _full(comp) else 3
-        return 1 if host_of(comp["url"]).endswith("classic.com") or proof(comp) == "listed" else 0
+        other = host_of(comp["url"]).endswith("classic.com") or proof(comp) == "listed" or (comp["status"] == "asking" and listing_site(comp["url"]))
+        return 1 if other else 0                              # a listing site's page for the car is not the seller's own
 
     for level in range(4):
         for comp in rows:
             if rank(comp) == level and not seen.has(comp):
                 seen.add(comp)
                 keep.add(id(comp))
-    return [comp for comp in rows if id(comp) in keep]
+    kept = [comp for comp in rows if id(comp) in keep]
+    name_sellers(kept, [comp for comp in rows if id(comp) not in keep])
+    return kept
+
+
+_SITES_NOT_SELLERS = {"classic.com", "facebook marketplace", "kelley blue book", "carfax", "capital one", "autotrader classics",
+                      "bring a trailer", "cars & bids", "pcarmarket", "added by you"}
+
+
+def names_seller(source) -> bool:
+    """True when a comp's source is a dealer or a person, not just the site the car was seen on."""
+    name = re.sub(r"\s*\(.*?\)", "", str(source or "")).strip().lower()
+    sites = {value.lower() for value in SITE_NAMES.values()} | {value.lower() for value in AD_SITES.values()} | _SITES_NOT_SELLERS
+    return bool(name) and name not in sites and not name.startswith("listed on")
+
+
+def name_sellers(have: list[dict], found: list[dict]) -> int:
+    """A car for sale known only by the site it was seen on ('Edmunds') takes the seller's name from another
+    record of the same VIN that gives it ('Marshall Goldman Newport Beach'), so the buyer can tell whose car it
+    is. Returns how many were named."""
+    named = {comp["vin"]: comp["source"] for comp in found if comp.get("vin") and comp.get("status") == "asking" and names_seller(comp.get("source"))}
+    count = 0
+    for comp in have:
+        if comp.get("status") == "asking" and comp.get("vin") in named and not names_seller(comp.get("source")):
+            comp["source"], count = named[comp["vin"]], count + 1
+    return count
 
 
 def from_listings(comp: dict) -> bool:
@@ -301,6 +327,48 @@ def resee_ads(have: list[dict], found: list[dict], today: str) -> int:
             comp["price"] = new["price"]
         comp["seen"], comp["seen_on"], comp["seen_why"] = new["seen"], today, new.get("seen_why") or ""
     return count
+
+
+def listing_facts(text: str) -> dict:
+    """What a listing page's own text gives away about the car: its price, miles and VIN, each only when found.
+    The page title is looked at first, since some dealers' pages put the price nowhere else."""
+    text = str(text or "")
+    title = next((line for line in text.splitlines() if line.lower().startswith("page title:")), "")
+    facts = {}
+    for part in (title, text[:6000]):
+        found = re.search(r"\$\s?(\d{1,3}(?:,\d{3})+|\d{4,7})(?!\s*(?:/|per)\s*mo)", part)
+        if found and 1000 <= int(found.group(1).replace(",", "")) <= 5_000_000:
+            facts["price"] = int(found.group(1).replace(",", ""))
+            break
+    miles = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{1,6})\s*(?:actual |original )?(?:miles|mi\b)", text[:6000], re.I)
+    if miles and int(miles.group(1).replace(",", "")) < 500_000:
+        facts["miles"] = int(miles.group(1).replace(",", ""))
+    vin = find_vin(text)
+    if vin:
+        facts["vin"] = vin
+    return facts
+
+
+def same_listing(have: list[dict], comp: dict) -> dict | None:
+    """The car for sale already held that a listing added by hand is another page for: the same VIN, or, when
+    one side has no VIN, the same price to the dollar on a car of the same model year. Only when exactly one
+    fits, so two cars at one price are never folded together."""
+    year = re.search(r"\b(19|20)\d\d\b", str(comp.get("title") or ""))
+    fits = []
+    for held in have:
+        if held.get("status") != "asking" or comp_group(held) != "live" or not held.get("price"):
+            continue
+        if normalize_url(held.get("url") or "") == normalize_url(comp.get("url") or ""):
+            continue
+        if comp.get("vin") and held.get("vin"):
+            if comp["vin"] == held["vin"]:
+                fits.append(held)
+            continue
+        then = re.search(r"\b(19|20)\d\d\b", str(held.get("title") or ""))
+        miles_fit = not (comp.get("miles") and held.get("miles")) or abs(comp["miles"] - held["miles"]) <= 150
+        if held["price"] == comp.get("price") and miles_fit and (not year or not then or year.group() == then.group()):
+            fits.append(held)
+    return fits[0] if len(fits) == 1 else None
 
 
 def own_adds(comps: list[dict]) -> list[dict]:
@@ -609,6 +677,12 @@ def version_label(car: dict, facts: dict) -> str:
     return ", ".join(bits)
 
 
+def own_page(comp: dict) -> bool:
+    """True when a comp's link opens that one car's own page, so whoever is sent it can check it in one tap."""
+    url = str(comp.get("url") or "")
+    return bool(url) and link_kind(url) != "page" and not is_list_page(url) and comp.get("link_ok") is not False
+
+
 def cite_sales(car: dict, comps: list[dict], limit: int = 3) -> list[dict]:
     """The completed sales worth putting in a message to the seller: the ones nearest this car in miles and
     most recent, newest first. A 500-mile car sold four years ago says little about a 15,000-mile one today,
@@ -619,7 +693,8 @@ def cite_sales(car: dict, comps: list[dict], limit: int = 3) -> list[dict]:
         miles, when = to_int(comp.get("miles")), date_key(plain_date(comp.get("date")))
         gap = abs(math.log((miles + 1000) / (mine + 1000))) if (mine is not None and miles is not None) else 1.0
         years = max(0.0, (today - when) / 365.0) if when else 2.0
-        return gap + 0.35 * years
+        loose = 0.0 if own_page(comp) else 0.5                 # a sale the seller can open and check outranks one that is only on a list
+        return gap + 0.35 * years + loose
 
     sold = [comp for comp in comps if comp.get("status") == "sold" and comp.get("use", True) and comp.get("price")]
     best = sorted(sold, key=far)[:limit]

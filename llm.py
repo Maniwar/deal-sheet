@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import (AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
+from calc import (AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, own_page, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
                   host_of, offer_basis, plain_date,
                   is_list_page, is_mirror, link_kind, link_pages, listing_site, loose_trim, mark_other_trim, merge_comps, money, normalize_url,
                   to_int)
@@ -1738,6 +1738,9 @@ def draft_message(client, model: str, car: dict, comps: list[dict], offer_price:
         "above the offer without saying why it does not apply (far fewer miles, sold in a hotter market). If "
         "even the nearest sales are far from this car's miles, say so in a few words.\n"
         "- Write a date plainly ('Nov 2023'), without words like 'Ended'.\n"
+        "- Give a sale's link only when it opens that one sale's own page. A comp marked as a link to a page of "
+        "many cars gets no link: name where it is recorded instead (for example 'per Classic.com'). Never give "
+        "the same link twice.\n"
         "- Say the buyer can move quickly and wants an inspection before closing.\n"
         "- For a dealer, ask for the out-the-door number with all fees.\n"
         "- Never use em dashes. Use commas, periods or parentheses.\n"
@@ -1779,8 +1782,10 @@ def template_message(car: dict, comps: list[dict], offer_price: int, buyer: str 
             line = f"- {', '.join(bits)}, sold for {money(comp['price'])}"
             if comp.get("date"):
                 line += f" ({plain_date(comp['date'])})"
-            if comp.get("url"):
+            if own_page(comp):
                 line += f": {comp['url']}"
+            elif comp.get("source"):                         # its link opens a list of cars: say where it is recorded instead
+                line += ", per " + re.sub(r"\s*\(.*?\)", "", str(comp["source"])).strip()
             lines.append(line)
     lines += ["", "I'd want to have it inspected before closing."]
     if is_dealer:

@@ -372,3 +372,5 @@ button.opt{cursor:pointer}
 .ver-g{margin-top:2px;font:500 12.5px/1.4 var(--sans);color:var(--warn)}
 .ver-m{margin-top:3px;font:400 12px/1.4 var(--mono);color:var(--dim)}
 .ver-b{margin-top:6px;display:flex;gap:16px}
+
+.c-find{display:inline-flex;align-items:center;gap:5px;margin:8px 0 0 12px;font:500 12.5px var(--sans);color:var(--mute);text-decoration:underline;text-underline-offset:3px}

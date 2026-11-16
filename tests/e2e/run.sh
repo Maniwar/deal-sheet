@@ -34,7 +34,7 @@ echo "== unit: what a listing page says about the car"
 (cd "$repo" && python3 "$work/judge_test.py" | tail -1 && python3 "$work/judge_real.py" | tail -1)
 
 tests=("$@")
-[ ${#tests[@]} -eq 0 ] && tests=(build2 gear check verify ended refresh2 miles blank remove switch listsites details versions zip)
+[ ${#tests[@]} -eq 0 ] && tests=(build2 gear check verify ended refresh2 miles blank remove switch listsites details versions zip pasted)
 failed=0
 for t in "${tests[@]}"; do
   start_app

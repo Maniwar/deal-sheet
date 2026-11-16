@@ -298,6 +298,8 @@ function create(root) {
     const text = `<div><i class="tdot t${k.trust || 3}" title="${k.trust === 1 ? "Opens on its own page, has a VIN, nothing left to confirm" : k.trust === 2 ? (k.proof === "listed" ? "Read from a listing site's results, with its VIN" : "Opens on its own page, with something left to confirm") : "Nothing to open and check"}"></i><span class="pill ${esc(k.group)}${k.unsure ? " unsure" : ""}">${esc(k.label)}</span>${out ? `<span class="pill out">Not counted: ${esc(k.why)}</span>` : ""}<span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
       `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div><div>${k.vin ? vinChip(k.vin, "c-vin", k.vinOk, k.vinYear) : '<span class="vin none c-vin"><b>VIN</b>not found</span>'}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.gearFlag ? '<div class="c-flag">Manual or automatic is not stated. Check before you count on it.</div>' : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${seen}${flag}` +
       (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">${k.kind === "find" ? "Find it on Marketplace" : k.kind === "page" ? "Open the results" : "Open"} ${ARROW} <small>${esc(k.kind === "find" ? "" : k.host)}</small></a>` : "") +
+      /* seen on a listing site, with a VIN: one tap to find the seller's own page for it */
+      (k.group === "live" && k.vin && k.vinOk === "ok" && (k.seen === "listed" || k.proof === "listed") ? `<a class="c-find" href="https://www.google.com/search?q=%22${encodeURIComponent(k.vin)}%22" target="_blank" rel="noopener">Find the seller's page by VIN ${ARROW}</a>` : "") +
       (big && (k.proof === "list" || k.proof === "listed" || k.proof === "loose" || k.proof === "none") ? `<form class="linkrow setlink" data-i="${k.idx}" data-price="${k.price}"><input type="url" class="linkbox" placeholder="${k.kind === "find" ? "Found it? Share, Copy link, paste here" : "Have its own link? Paste it here"}" inputmode="url" aria-label="This car's own link"><button type="submit" class="btn ghost">Save</button></form>` : "") +
       (flip ? `<div>${flip}</div>` : "") + "</div>";
     return big ? `<div class="card${k.use ? "" : " off"}">${text}${k.image ? `<img src="${esc(k.image)}" alt="" loading="lazy">` : "<span></span>"}</div>` : text;
@@ -532,7 +534,7 @@ function create(root) {
     el.sheetBody.querySelectorAll(".handform").forEach((f) => { f.onsubmit = (e) => {
       e.preventDefault();
       const v = Object.fromEntries([...f.querySelectorAll("input")].map((box) => [box.name, box.value.trim()]));
-      if (!/\d/.test(v.price)) { toast("Give the price at least.", true); return; }
+      if (!/\d/.test(v.price) && !/^https?:\/\//i.test(v.url || "")) { toast("Give the price, or paste the listing's link.", true); return; }
       const go = f.querySelector("button"); go.disabled = true; go.textContent = "Adding"; S.handOpen = "";
       post("addcomp", { ...v, status: f.dataset.kind === "sold" ? "sold" : "asking", at: Date.now() });
     }; });

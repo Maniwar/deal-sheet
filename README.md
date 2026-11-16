@@ -215,7 +215,16 @@ of the screen; a link beside it opens the Claude Console keys page
     live, it is shown only once its own page has been opened and still shows the car.
 - **The message cites the right sales.** It quotes the two or three completed sales nearest the
   car in miles and most recent, newest first, with plain dates. A sale that is years old, far
-  from the car's miles, or well above the offer is left out when closer ones exist.
+  from the car's miles, or well above the offer is left out when closer ones exist. A sale whose
+  link opens that sale's own page is preferred, and a link is given only then: a sale known
+  only from a results page is cited by where it is recorded ("per Classic.com").
+- **A listing you paste is matched to what is already there.** In For sale now, "Add a car for
+  sale you know of" takes just the link: the price, miles and VIN are read from the page where
+  it shows them (some dealers' pages put the price only in the title). If a car already found
+  has the same VIN, or the same price to the dollar and model year, it is the same car: its
+  card keeps the VIN and miles and now opens the page you gave, with the other site named in
+  its note. Dealers' own pages are often missing from a search because the listing sites show
+  the car without naming the dealer.
 - **Removing a car.** The car on screen carries a small cross beside its name in the row at the
   top. Tap it, then tap **Remove?** to take the car out of the garage (Car details has the same
   button). It is removed from this device too, so it does not come back. A search still running

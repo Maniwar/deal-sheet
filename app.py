@@ -1100,6 +1100,7 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
                 progress.say(f"Cleared {cleared} car{'s' if cleared != 1 else ''} that came from stored copies of listing-site pages, with no VIN to check")
         relisted = calc.relist(have, found["comps"], now)
         calc.resee_ads(have, found["comps"], now)            # a Craigslist or eBay ad the site's page showed again
+    calc.name_sellers(have, found["comps"])                      # a held car known only by its site takes a seller's name found now
     if relisted.get("repriced"):
         progress.say(f"{relisted['repriced']} car{'s' if relisted['repriced'] != 1 else ''} on the listing sites {'have' if relisted['repriced'] != 1 else 'has'} a new price")
     fresh = calc.new_comps(have, found["comps"])
@@ -1497,13 +1498,37 @@ def handle_stage_requests(progress_slot) -> None:
         status = request.get("status") if request.get("status") in ("sold", "high_bid", "asking") else "sold"
         row = {key: str(request.get(key) or "").strip()[:500] for key in ("price", "miles", "title", "date", "url", "vin")}
         row["title"] = row["title"] or calc.car_title(entry.get("car") or {})
+        unread = ""
+        if row["url"] and re.match(r"https?://", row["url"]) and not (calc.to_int(row["price"]) and row["vin"] and row["miles"]):
+            page = previews.read_page(row["url"])              # a pasted link: take what its own page says for anything not typed
+            if page["status"] == "ok":
+                for key, value in calc.listing_facts(page["text"]).items():
+                    row[key] = row[key] or str(value)
+            else:
+                unread = " Its page could not be read from here, so the card has only what you typed."
         comp = calc.clean_comp({**row, "status": status, "use": status != "asking", "source": "" if row["url"] else "Added by you",
                                 "available": "yes" if status == "asking" else "", "note": "Added by you."})
+        twin = calc.same_listing(have, comp) if comp and status == "asking" and comp["url"] else None
         if not comp:
-            ss["stage_error"] = "Give the price at least."
+            ss["stage_error"] = ("That page could not be read from here, so type the price too." if unread
+                                 else "Give the price at least: the page did not show one." if row["url"] else "Give the price at least.")
+        elif twin is not None:                       # another page for a car already here: one card, opening the page the buyer chose
+            was = twin["source"] or previews.site_name(twin["url"])
+            if re.search(r"Seen on [^.]+\.", twin["note"]):   # where it was first seen becomes the other place it is listed
+                twin["note"] = re.sub(r"Seen on ([^.]+)\.", r"Also listed on \1.", twin["note"], count=1)
+            elif twin["url"]:
+                twin["note"] = f"{twin['note']} Also listed on {previews.site_name(twin['url'])}.".strip()
+            twin["url"], twin["link_ok"], twin["aside"] = comp["url"], None, "mine"
+            twin["source"] = was if was not in llm.SITE_NAMES.values() else previews.site_name(comp["url"])
+            for key in ("vin", "miles"):
+                twin[key] = twin.get(key) or comp.get(key)
+            twin["seen"], twin["seen_on"], twin["seen_why"] = "", "", ""        # its own page has not been opened yet
+            ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
+            ss["notices"] = [f"That is the same car as the {calc.money(twin['price'])} one already here from {was}"
+                             + (f" (VIN {twin['vin']})" if twin.get("vin") else "") + ". Its card now opens the page you gave."]
         else:
             ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [comp], "keep": have}
-            ss["notices"] = ["Added."]
+            ss["notices"] = ["Added." + unread]
         ss["build_seq"] += 1
     request = ss.pop("_message_request", None)
     if isinstance(request, dict):                  # the offer message, written or edited on the main screen

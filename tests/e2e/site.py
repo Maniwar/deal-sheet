@@ -28,6 +28,8 @@ class H(BaseHTTPRequestHandler):
         if path.startswith("/nomatch/"): return self.out(car_page("Used BMW for sale", 0), "text/html")
         if path.startswith("/instock/"): return self.out(car_page("Used 2020 BMW M2 CS", 91000, extra='<script type="application/ld+json">{"@type":"Car","vehicleIdentificationNumber":"WBS1J3C03L7H24156","vehicleTransmission":"6-Speed Manual","offers":{"availability":"https://schema.org/InStock"}}</script>'), "text/html")
         if path.startswith("/oos/"): return self.out(car_page("Used 2020 BMW M2 CS", 91000, vin="WBS1J3C03L7H24156", extra='<script type="application/ld+json">{"offers":{"availability":"https://schema.org/OutOfStock"}}</script>'), "text/html")
+        if path.startswith("/titleonly/"):       # a dealer page built by scripts: the price is in the title and nowhere else, no VIN, no miles
+            return self.out(b'<html><head><title>Used 2019 BMW M2 Competition, Very Low Miles For Sale ($53,400) | Scripted Motors Stock #NP1</title></head><body><div id="app"></div>Vehicles Found:</body></html>', "text/html")
         if path.startswith(("/listing/", "/blocked/")):
             return self.out(car_page("Used 2019 BMW M2 Competition", 54900 if path.endswith("/21") else 58500, vin="WBS2U7C00L7E00000"[:0], gear="6-Speed Manual"), "text/html")
         self.out(b"no", "text/plain", 404)
