@@ -51,7 +51,7 @@ begin
         raise exception 'a car must have its facts, and be under 600 KB';
     end if;
     if not p_deleted then
-        if pg_total_relation_size('public.dealsheet_cars'::regclass) > 200000000 then
+        if pg_total_relation_size('public.dealsheet_cars'::regclass) > 40000000 then      -- 40 MB: about 800 cars
             raise exception 'the garage store is full';
         end if;
         if not exists (select 1 from public.dealsheet_cars c where c.garage_id = p_garage and c.car_id = p_car)
