@@ -220,10 +220,15 @@ def from_listings(comp: dict) -> bool:
     return comp.get("status") == "asking" and bool(listing_site(comp.get("url")))
 
 
+# The words that mark a car as read off a site's own page as it is now. Both the text that is written on a
+# card and the checks below use this one phrase, so rewording one cannot silently break the other.
+READ_LIVE = "read live"
+
+
 def read_live(comp: dict, today: str) -> bool:
     """True for a listing-site car that was read off the site's results page, as it is now, today."""
     return (from_listings(comp) and comp.get("seen") == "listed" and comp.get("seen_on") == today
-            and "read live" in str(comp.get("seen_why") or ""))
+            and READ_LIVE in str(comp.get("seen_why") or ""))
 
 
 def fleeting(comp: dict) -> bool:
@@ -246,7 +251,7 @@ def seen_live_today(comp: dict, today: str) -> bool:
     """True for a car for sale that was read off a site's own results page, as it is now, today: a listing site's
     car, or a Craigslist or eBay Motors ad. Opening its page again the same day costs and adds nothing."""
     return (comp.get("status") == "asking" and comp.get("seen") in ("live", "listed") and comp.get("seen_on") == today
-            and "read live" in str(comp.get("seen_why") or ""))
+            and READ_LIVE in str(comp.get("seen_why") or ""))
 
 
 def clean_zip(text) -> str:

@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import (AD_SITES, LISTING_SITES, MIRROR_SITES, SITE_NAMES, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
+from calc import (AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
                   host_of, offer_basis, plain_date,
                   is_list_page, is_mirror, link_kind, link_pages, listing_site, loose_trim, mark_other_trim, merge_comps, money, normalize_url,
                   to_int)
@@ -1356,7 +1356,7 @@ def _from_listing_sites(found: dict | None, car: dict, progress: Progress | None
                 comp["url"], comp["link_ok"] = page["url"], True
             fresh = found.get("live") or page["at"][:10] == dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
             comp["seen"], comp["seen_on"] = "listed", today
-            comp["seen_why"] = f"on the {where} results page, read live" if fresh else f"on a copy of the {where} results page from {page['at'][:10] or 'an unknown day'}"
+            comp["seen_why"] = f"on the {where} results page, {READ_LIVE}" if fresh else f"on a copy of the {where} results page from {page['at'][:10] or 'an unknown day'}"
             kept.append(comp)
         elif not pages:                                      # nothing could be opened: a lead from a stored copy, never counted
             links = [url for url in found.get("links", []) if listing_site(url) == site and link_kind(url) != "car"]
@@ -1390,7 +1390,7 @@ def _from_listing_sites(found: dict | None, car: dict, progress: Progress | None
         progress.say(f"Listing sites: {left} car{'s' if left != 1 else ''} left out (no VIN, another model year, or not on a page that was opened with that price)")
     read = sorted({_SITE_NAMES[listing_site(page['url'])] for page in pages if listing_site(page["url"])})
     if read:
-        how = "read live" if any("read live" in comp["seen_why"] for comp in cars) or not cars else "read from the page reader's stored copies"
+        how = READ_LIVE if any(READ_LIVE in comp["seen_why"] for comp in cars) or not cars else "read from the page reader's stored copies"
         line = f"Listing sites {how} ({', '.join(read)}): {len(cars)} car{'s' if len(cars) != 1 else ''}, each with a VIN."
     elif cars:
         line = (f"The listing sites' pages could not be opened, so {len(cars)} car{'s' if len(cars) != 1 else ''} from the search's stored "
@@ -1487,14 +1487,14 @@ def _from_classifieds(found: dict | None, car: dict, progress: Progress | None =
         comp["source"] = comp["source"] or where
         if "seen on" not in comp["note"].lower():
             comp["note"] = f"{comp['note']} Seen on {where}.".strip()
-        comp["seen"], comp["seen_on"], comp["seen_why"] = "live", today, f"on the {where} results page, read live"
+        comp["seen"], comp["seen_on"], comp["seen_why"] = "live", today, f"on the {where} results page, {READ_LIVE}"
         kept.append(comp)
     kept = merge_comps([], kept)
     if left and progress:
         progress.say(f"Craigslist and eBay Motors: {left} ad{'s' if left != 1 else ''} left out (not a car like this one, or not on a page that was opened with that price)")
     read = sorted({AD_SITES[ad_site(page["url"])] for page in pages if ad_site(page["url"])})
     if read:
-        line = f"{' and '.join(read)} read live: {len(kept)} ad{'s' if len(kept) != 1 else ''} for cars like this one."
+        line = f"{' and '.join(read)} {READ_LIVE}: {len(kept)} ad{'s' if len(kept) != 1 else ''} for cars like this one."
     else:
         line = "Craigslist and eBay Motors could not be opened this time."
     return kept, line

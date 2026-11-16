@@ -471,7 +471,7 @@ def checked_note(count: dict) -> str:
         bits.append(f"{count['unknown']} could not be confirmed either way, so open those to check")
     cost = llm.used_note(count.get("used"))
     return (f"The app opened {total} for-sale page{'s' if total != 1 else ''}: " + ", ".join(bits) + "."
-            + (f" Claude's page reader helped. {cost}" if cost else ""))
+            + (f" Claude's page reader helped ({cost.replace('This run used ', '').rstrip('.')})." if cost else ""))
 
 
 def progress_for(slot):

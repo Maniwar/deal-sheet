@@ -1,0 +1,42 @@
+// Removing cars: the cross on the car's chip (two taps), no flip back, gone after a reload, safe while a search for it runs.
+const { chromium } = require('playwright');
+const fs = require('fs');
+(async () => {
+  const b = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
+  const ctx = await b.newContext({ viewport: { width: 390, height: 780 }, deviceScaleFactor: 1 });
+  await ctx.route('https://api.sketchfab.com/**', (r) => r.abort());
+  const p = await ctx.newPage(); const errs = [];
+  p.on('pageerror', e => errs.push(String(e).slice(0, 240)));
+  const log = (k, v) => console.log(k + ':', JSON.stringify(v));
+  const posts = () => (fs.readFileSync('/tmp/e2e/calls.log', 'utf8').match(/budget:/g) || []).length;
+  const chips = () => p.locator('.garage .chip:not(.add)').evaluateAll((els) => els.map((e) => (e.classList.contains('on') ? '*' : '') + e.textContent.trim()));
+  const title = async () => (await p.locator('.head .title').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  const build = async () => { await p.locator('.dockbar textarea').fill('http://127.0.0.1:8898/listing/1'); await p.locator('.dockbar .go').click(); for (let i = 0; i < 400; i++) { await p.waitForTimeout(500); if (!(await p.locator('.stage.busy').count()) && i > 6) break; } await p.waitForTimeout(3000); };
+  const watch = () => p.locator('.garage').evaluate((host) => { window.__seen = []; const rec = () => { const on = host.querySelector('.chip.on'); const t = on ? on.textContent.trim() : ''; if (window.__seen[window.__seen.length - 1] !== t) window.__seen.push(t); }; rec(); new MutationObserver(rec).observe(host, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] }); });
+  await p.goto('http://localhost:8766/', { waitUntil: 'networkidle' }); await p.waitForTimeout(14000);
+  await p.locator('.dockbar input[type=password]').fill('sk-ant-test-abcd1234'); await p.locator('.dockbar .go').click(); await p.waitForTimeout(5000);
+  await build();
+  const box = await p.locator('.garage .chipx').boundingBox();
+  log('1 built', { chips: await chips(), cross: await p.locator('.garage .chipx').count(), crossSize: box && [Math.round(box.width), Math.round(box.height)] });
+  await p.screenshot({ path: '/tmp/e2e/remove-top.png', clip: { x: 0, y: 0, width: 390, height: 120 }, timeout: 120000 }).catch(() => {});
+  await watch();
+  await p.locator('.garage .chipx').click(); await p.waitForTimeout(400);
+  log('2 first tap asks', await p.locator('.garage .chipx').innerText());
+  await p.screenshot({ path: '/tmp/e2e/remove-ask.png', clip: { x: 0, y: 0, width: 390, height: 120 }, timeout: 120000 }).catch(() => {});
+  await p.locator('.garage .chipx').click(); await p.waitForTimeout(5000);
+  log('3 second tap removes', { chips: await chips(), title: await title(), highlightHistory: await p.evaluate(() => window.__seen) });
+  await p.reload({ waitUntil: 'networkidle' }); await p.waitForTimeout(10000);
+  log('4 after a reload it stays gone', { chips: await chips(), title: await title() });
+  await build();
+  const before = posts();
+  await p.locator('.refresh').first().click(); await p.waitForTimeout(5000);
+  await p.locator('.garage .chipx').click(); await p.waitForTimeout(300); await p.locator('.garage .chipx').click(); await p.waitForTimeout(5000);
+  log('5 removed while its refresh ran', { chips: await chips(), title: await title(), requestsSoFar: posts() - before });
+  let last = -1; for (let i = 0; i < 40; i++) { await p.waitForTimeout(3000); const n = posts(); if (n === last && i > 6) break; last = n; }
+  await p.waitForTimeout(4000);
+  log('6 once that refresh had finished', { chips: await chips(), title: await title(), toast: (await p.locator('.toast:visible').innerText().catch(() => '')).slice(0, 120), requests: posts() - before });
+  await p.locator('.garage .chipx').click(); await p.waitForTimeout(300); await p.locator('.garage .chipx').click(); await p.waitForTimeout(5000);
+  log('7 the sample removed too', { chips: await chips(), title: await title(), cross: await p.locator('.garage .chipx').count() });
+  log('errors', { exc: await p.locator('[data-testid="stException"]').count(), errs });
+  await b.close();
+})().catch(e => { console.log('TEST ERROR', String(e).slice(0, 900)); process.exit(1); });

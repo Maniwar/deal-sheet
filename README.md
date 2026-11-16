@@ -436,4 +436,6 @@ To bundle another model with the app, put a `.glb` in `static/models/`, add it t
 | `sample_deal.json` | The sample car (2020 911 Carrera S, researched Nov 14, 2026) |
 | `static/` | Fonts, three.js with its glTF loader, and the 3D model in `static/models/` |
 | `tools/` | The script that prepared the 3D model from the original file |
+| `tools/stage/` | The main screen's own source: its Python head, HTML, CSS and JavaScript. `python tools/stage/build.py` checks the JavaScript and writes `stage.py` from them. Edit these, never `stage.py` |
+| `tests/` | Browser tests that run the app against stand-ins for the API and for car sites, with no key and nothing real called. `tests/e2e/run.sh` runs them; `tests/README.md` says what they can and cannot show |
 | `assets/fonts/` | The same fonts as TTF for the PDF |
