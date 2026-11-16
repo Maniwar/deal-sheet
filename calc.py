@@ -82,7 +82,8 @@ _LIST_PAGE = re.compile(r"classic\.com/(m|search|a)/|[?&]tab=comps|facebook\.com
 
 # The big listing sites, where nearly every dealer's car is shown. A search finds their results pages, each a
 # column of cars with price, miles, dealer and often the VIN, far more often than any one car's own page.
-LISTING_SITES = ("cars.com", "cargurus.com", "autotrader.com", "edmunds.com")
+LISTING_SITES = ("cars.com", "cargurus.com", "autotrader.com", "edmunds.com", "truecar.com")
+SITE_NAMES = {"cars.com": "Cars.com", "cargurus.com": "CarGurus", "autotrader.com": "Autotrader", "edmunds.com": "Edmunds", "truecar.com": "TrueCar"}
 
 
 def listing_site(url) -> str:
@@ -225,6 +226,83 @@ def read_live(comp: dict, today: str) -> bool:
             and "read live" in str(comp.get("seen_why") or ""))
 
 
+def fleeting(comp: dict) -> bool:
+    """True for a for-sale ad on Craigslist or eBay Motors. Those ads end within weeks and search engines keep
+    the dead ones, so one is worth showing only once its own page has been opened and still shows the car."""
+    host = host_of(str(comp.get("url") or ""))
+    return comp.get("status") == "asking" and any(host == site or host.endswith("." + site) for site in ("craigslist.org", "ebay.com"))
+
+
+AD_SITES = {"craigslist.org": "Craigslist", "ebay.com": "eBay Motors"}
+
+
+def ad_site(url) -> str:
+    """'craigslist.org' or 'ebay.com' when a page is on one of them, else ''."""
+    host = host_of(str(url or ""))
+    return next((site for site in AD_SITES if host == site or host.endswith("." + site)), "")
+
+
+def seen_live_today(comp: dict, today: str) -> bool:
+    """True for a car for sale that was read off a site's own results page, as it is now, today: a listing site's
+    car, or a Craigslist or eBay Motors ad. Opening its page again the same day costs and adds nothing."""
+    return (comp.get("status") == "asking" and comp.get("seen") in ("live", "listed") and comp.get("seen_on") == today
+            and "read live" in str(comp.get("seen_why") or ""))
+
+
+def clean_zip(text) -> str:
+    """A US ZIP code as five digits, or '' when the text is not one."""
+    found = re.match(r"^\s*(\d{5})(?:-\d{4})?\s*$", str(text or ""))
+    return found.group(1) if found else ""
+
+
+def zip_place(zip_code) -> tuple[str, str] | None:
+    """(town, state) for a ZIP code, looked up on this machine and sent nowhere, or None when it is not known."""
+    code = clean_zip(zip_code)
+    if not code:
+        return None
+    try:
+        import zipcodes
+        rows = zipcodes.matching(code)
+    except Exception:                                          # the lookup is not installed, or the code is not a real one
+        return None
+    row = next((row for row in rows if row.get("city") and row.get("state")), None)
+    return (str(row["city"]), str(row["state"])) if row else None
+
+
+def craigslist_search(zip_code, car: dict, radius: int = 250) -> str:
+    """The address of Craigslist's cars-and-trucks search for this model within `radius` miles of a ZIP code, in
+    the form Craigslist itself sends a browser to. '' when the ZIP code is not known or the car has no name."""
+    place, code = zip_place(zip_code), clean_zip(zip_code)
+    words = " ".join(str(car.get(key) or "").strip() for key in ("make", "model", "trim")).split()
+    if not place or not words:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{place[0]} {place[1]}".lower()).strip("-")
+    return f"https://www.craigslist.org/search/city/{slug}?cat=cta&postal={code}&query={'+'.join(quote(word.lower()) for word in words)}&radius={int(radius)}"
+
+
+def resee_ads(have: list[dict], found: list[dict], today: str) -> int:
+    """Craigslist and eBay ads already held that the site's own page showed again just now: mark them as seen
+    today, with today's price. Returns how many."""
+    latest = {normalize_url(comp["url"]): comp for comp in found if ad_site(comp.get("url")) and seen_live_today(comp, today)}
+    count = 0
+    for comp in have:
+        new = latest.get(normalize_url(comp.get("url") or "")) if ad_site(comp.get("url")) and comp_group(comp) == "live" else None
+        if new is None:
+            continue
+        count += 1
+        if new["price"] and new["price"] != comp["price"]:
+            note = re.sub(r"\s*Was \$[\d,]+ when seen [^.]*\.", "", str(comp.get("note") or "")).strip()
+            comp["note"] = f"{note} Was {money(comp['price'])} when seen {comp.get('seen_on') or 'before'}.".strip()
+            comp["price"] = new["price"]
+        comp["seen"], comp["seen_on"], comp["seen_why"] = new["seen"], today, new.get("seen_why") or ""
+    return count
+
+
+def own_adds(comps: list[dict]) -> list[dict]:
+    """The comps the buyer put in or chose to keep: they stay when the rest are searched for again."""
+    return [comp for comp in comps if comp.get("aside") == "mine" or str(comp.get("source") or "") == "Added by you"]
+
+
 def unproven_listing(comp: dict) -> bool:
     """True for a car that an earlier version read off a search engine's stored copy of a listing site's results
     page: no VIN, no page of its own, and a price and place that may be weeks out of date. Nothing can be checked
@@ -248,7 +326,7 @@ def relist(have: list[dict], found: list[dict], today: str) -> dict:
             if comp["vin"] not in latest or read_live(comp, today):
                 latest[comp["vin"]] = comp
     sites = {listing_site(comp["url"]) for comp in found if read_live(comp, today)}
-    names = {"cars.com": "Cars.com", "cargurus.com": "CarGurus", "autotrader.com": "Autotrader", "edmunds.com": "Edmunds"}
+    names = SITE_NAMES
     for comp in have:
         if not from_listings(comp) or comp_group(comp) != "live":
             continue
@@ -444,6 +522,103 @@ def date_key(text) -> int:
         except ValueError:
             continue
     return 0
+
+
+def plain_date(text) -> str:
+    """A comp's date without the word a site puts before it ('Ended Nov 15, 2023' is 'Nov 15, 2023')."""
+    return re.sub(r"^(ended|sold|closed|listed|sale)\s*(on)?[:\s]+", "", str(text or "").strip(), flags=re.I)
+
+
+def offer_basis(car: dict) -> dict:
+    """The facts about the car that an offer was worked out for: the ones that move what it is worth."""
+    options = [line.strip() for line in str(car.get("options") or "").splitlines() if line.strip()]
+    return {"miles": to_int(car.get("miles")), "exterior": str(car.get("exterior") or "").strip(),
+            "interior": str(car.get("interior") or "").strip(), "options": len(options),
+            "history": str(car.get("history") or "").strip(), "price": to_int(car.get("price"))}
+
+
+def basis_moved(car: dict, basis) -> list[str]:
+    """Which of those facts are different now from when the offer was worked out, in plain words. Empty when
+    the offer has no record of what it was worked out for."""
+    if not isinstance(basis, dict) or not basis:
+        return []
+    now, moved = offer_basis(car), []
+    if now["miles"] != to_int(basis.get("miles")):
+        moved.append("miles")
+    if (now["exterior"].lower(), now["interior"].lower()) != (str(basis.get("exterior") or "").lower(), str(basis.get("interior") or "").lower()):
+        moved.append("colour")
+    if now["options"] != to_int(basis.get("options") or 0):
+        moved.append("options")
+    if now["history"].lower() != str(basis.get("history") or "").lower():
+        moved.append("history")
+    if now["price"] != to_int(basis.get("price")):
+        moved.append("asking price")
+    return moved
+
+
+VERSION_FACTS = ("miles", "price", "transmission", "exterior", "interior", "options")
+
+
+def version_facts(raw) -> dict:
+    """The details of another listing of the same model, as typed: only the ones that were filled in."""
+    raw = raw if isinstance(raw, dict) else {}
+    facts = {}
+    for key in ("miles", "price"):
+        number = to_int(raw.get(key))
+        if number is not None and number >= 0:
+            facts[key] = number
+    for key in ("transmission", "exterior", "interior"):
+        text = str(raw.get(key) or "").strip()[:80]
+        if text:
+            facts[key] = text
+    if "options" in raw:                                       # an empty box means a car with no options to speak of
+        facts["options"] = "\n".join(part.strip() for part in re.split(r"[\n;]+", str(raw.get("options") or "")[:3000]) if part.strip())
+    return facts
+
+
+def variant_car(car: dict, facts: dict) -> dict:
+    """The car with another listing's details in place of its own. What is not given stays as the car has it,
+    and the car's own VIN, link, seller and history do not carry over to a different car."""
+    other = {**car, **{key: value for key, value in facts.items() if key in VERSION_FACTS}}
+    for key in ("vin", "url", "seller", "location", "notes", "msrp"):
+        other.pop(key, None)
+    if "price" not in facts:
+        other.pop("price", None)                               # no asking price given: price it as a car with none
+    return other
+
+
+def version_label(car: dict, facts: dict) -> str:
+    """A short name for a version: '1,000 mi, Automatic, Misano Blue, 2 options'."""
+    other = variant_car(car, facts)
+    bits = []
+    miles = to_int(other.get("miles"))
+    if miles is not None:
+        bits.append(f"{miles:,} mi")
+    gear = gearbox_kind(other.get("transmission"))
+    if gear:
+        bits.append(gear.capitalize())
+    if str(other.get("exterior") or "").strip():
+        bits.append(str(other["exterior"]).strip())
+    count = len([line for line in str(other.get("options") or "").splitlines() if line.strip()])
+    bits.append(f"{count} option{'s' if count != 1 else ''}" if count else "no options")
+    return ", ".join(bits)
+
+
+def cite_sales(car: dict, comps: list[dict], limit: int = 3) -> list[dict]:
+    """The completed sales worth putting in a message to the seller: the ones nearest this car in miles and
+    most recent, newest first. A 500-mile car sold four years ago says little about a 15,000-mile one today,
+    and the other way round."""
+    mine, today = to_int(car.get("miles")), dt.date.today().toordinal()
+
+    def far(comp: dict) -> float:
+        miles, when = to_int(comp.get("miles")), date_key(plain_date(comp.get("date")))
+        gap = abs(math.log((miles + 1000) / (mine + 1000))) if (mine is not None and miles is not None) else 1.0
+        years = max(0.0, (today - when) / 365.0) if when else 2.0
+        return gap + 0.35 * years
+
+    sold = [comp for comp in comps if comp.get("status") == "sold" and comp.get("use", True) and comp.get("price")]
+    best = sorted(sold, key=far)[:limit]
+    return sorted(best, key=lambda comp: -date_key(plain_date(comp.get("date"))))
 
 
 _OPEN_WORDS = ("cabriolet", "convertible", "cabrio", "spyder", "spider", "roadster", "speedster", "drophead", "volante")
@@ -928,6 +1103,7 @@ _CAR_PAGES = {
     "finder.porsche.com": ("/details/",),
     "hagerty.com": ("/marketplace/auction/", "/marketplace/listing/"),
     "ebay.com": ("/itm/",),
+    "craigslist.org": ("/d/",),
     "carmax.com": ("/car/",),
     "carvana.com": ("/vehicle/",),
     "facebook.com": ("/marketplace/item/",),

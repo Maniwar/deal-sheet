@@ -148,11 +148,12 @@ of the screen; a link beside it opens the Claude Console keys page
 - **What keeps a run cheap.** The API runs a search's steps in a loop and reads everything found
   so far again at each step. Prompt caching is on from the first request, so the API puts a cache
   point after each search result and each later step reads the earlier results from the cache at
-  a tenth of the price. With the default setting a run sends at most 16 searches and opens at
-  most 5 pages: two per auction site, three across the web, five for cars for sale, two to find
-  the listing sites' results pages and two on Marketplace, plus up to three listing-site pages
-  opened live. Those three pages are the largest single cost of a run (up to 30,000 tokens
-  each), and they replace opening each of those cars one by one. The searches are told to stop when a search brings back cars they
+  a tenth of the price. With the default setting a run sends at most 17 searches and opens at
+  most 7 pages: two per auction site, three across the web, five for cars for sale, two to find
+  the listing sites' results pages, one to find eBay's, and two on Marketplace; plus up to
+  three listing-site pages, one eBay Motors page and (with a ZIP code) one Craigslist page,
+  opened live. Those pages are the largest single cost of a run (up to 30,000 tokens each), and
+  they replace opening each of those cars one by one. The searches are told to stop when a search brings back cars they
   already have, a search that does not record is asked again at most twice, and a search that
   failed is run again only when the failure was a busy server or a dropped connection.
 - **Long work runs on its own.** A build, a search and a check of the for-sale pages each run on
@@ -162,11 +163,59 @@ of the screen; a link beside it opens the Claude Console keys page
   finished and waiting. Results go to the car the work was started for, even when another car is
   on screen by then; the notice then starts with that car's name. One piece of long work runs at
   a time per browser.
-- **The offer follows the car.** Change the car's miles, asking price or history in Car details
-  and the offer is worked out again by itself from the comps you already have (one short request,
-  no new searches). The case has a **Work out the offer again** button for the other times: after
-  you change which sales are counted, or find more. The typical sale price stays the plain median
-  of the counted sales; the offer is where the miles are weighed against each comp's.
+- **The offer follows the car.** Change the car's miles, colours, options, asking price or
+  history in Car details (options can be typed there, one to a line, or read from a sticker in
+  The case) and the offer is worked out again by itself from the comps you already have: two
+  short requests, no new searches. The message to the seller is written again at the same time,
+  so its miles and its figure never disagree with the offer.
+  - The case says what the numbers were worked out for ("15,000 miles, Misano Blue, 2 options
+    listed") with a Change link, and warns when the car has changed since.
+  - Under it, **What this car's details change** gives one line each for miles, colour, options
+    and history: how far each moved the price against the comps, and why. "Not priced" means
+    the comps give nothing to price it with, which is said instead of a guess.
+  - Miles weigh most. Sales nearest the car's miles lead, old sales count for less, and a very
+    low-mile example of a limited car is priced from low-mile sales when there are any.
+  - The offer uses only the sales that are counted.
+  - The case has a **Work out the offer again** button for the other times: after you change
+    which sales are counted, or find more. The typical sale price stays the plain median of the
+    counted sales; the offer is where the car's own details are weighed.
+- **Price another listing without a new search.** The case has a **Price another listing**
+  form for when you are looking at several of the same model: put in what is different about
+  the other one (its miles, gearbox, colour, options, asking price) and it is priced from the
+  sales you already have, in one short request.
+  - Each one is kept in a list under the form, beside this car: its fair deal, opening offer
+    and limit, how its asking price compares, and which details moved the price ("Miles
+    +$9,000, Transmission -$6,000"). The list is saved with the car.
+  - **Make this the car** gives the car those details and works the offer and the message out
+    again. **Remove** drops it from the list.
+  - A different gearbox is searched for first: the sales held were gathered for this car's
+    gearbox, so sales of the other kind are found and it is priced from those. If none turn up
+    it is priced as a rough guide from this car's sales, and says so.
+- **Searches run when they are needed.** When the car becomes a different one as far as sales
+  go (its gearbox, trim, body style, year or model is changed in Car details, or a version with
+  the other gearbox is made the car), the app searches again for the car as it now is, in place
+  of the sales found for the car as it was, then works out the offer and writes the message
+  from them. Comps you added yourself are kept.
+- **Craigslist and eBay Motors are read live.** Their ads end within weeks and search engines
+  keep the dead ones, so nothing is taken from a search result. Instead each site's own results
+  page is opened as it is now:
+  - **eBay Motors:** one search finds eBay's page of cars for the model, and that page is read.
+  - **Craigslist** is searched one area at a time, so it needs to know where you are. Put your
+    **ZIP code** in Settings (the box under the search slider; the For sale now tab links to it)
+    and each search for cars for sale also reads Craigslist's cars-and-trucks search for the
+    model within 250 miles of you. With no ZIP code, Craigslist is skipped.
+  - An ad is kept only when the opened page gives its own link with that price beside it, and
+    it is a whole car: an ad priced like a part, or named like one and cheap, is left out.
+  - A kept ad opens on its own page and is marked for sale with the reason ("on the Craigslist
+    results page, read live"). Ads read live today are not opened again one by one. Later
+    checks open the ad's page; one that has ended is marked gone.
+  - The ZIP code is kept in this browser with the other settings. It is turned into a town
+    name on the app's own server and goes only into the Craigslist address that is opened.
+  - If the open for-sale search brings back a Craigslist or eBay ad when pages cannot be read
+    live, it is shown only once its own page has been opened and still shows the car.
+- **The message cites the right sales.** It quotes the two or three completed sales nearest the
+  car in miles and most recent, newest first, with plain dates. A sale that is years old, far
+  from the car's miles, or well above the offer is left out when closer ones exist.
 - **Removing a car.** The car on screen carries a small cross beside its name in the row at the
   top. Tap it, then tap **Remove?** to take the car out of the garage (Car details has the same
   button). It is removed from this device too, so it does not come back. A search still running
@@ -257,7 +306,7 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
   not return) is a lead: once a car has three results that can be checked, leads are folded away
   and left out of the numbers. Paste a lead's own link into the box on its card and it is counted.
 - **The big listing sites are read live.** Most ordinary cars (a Tesla, a Tacoma, a 3 Series)
-  are sold by dealers who list on Cars.com, CarGurus, Autotrader and Edmunds, and their sale
+  are sold by dealers who list on Cars.com, CarGurus, Autotrader, Edmunds and TrueCar, and their sale
   prices are published nowhere, so asking prices on those sites are most of what there is to know.
   - A search engine's copy of a results page is not good enough. Copies of the same site's city
     pages are taken on different days, so one car shows up at several prices (a 17,089-mile
@@ -281,7 +330,7 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
     search results show with a VIN are kept as leads only: not counted, and marked as coming
     from a stored copy whose price may have changed. With the plain page reader, which may hand
     back its own stored copy, the card gives that copy's date.
-  - The open for-sale search is kept off those four sites while their own search runs. If the
+  - The open for-sale search is kept off those five sites while their own search runs. If the
     search tool will not be limited to one of the sites, that site is dropped.
 - **Drive type is checked.** When the car states its drive (AWD, RWD, FWD), a found car whose
   title or trim states the other is left out, as with body style: a rear-wheel-drive Model Y is

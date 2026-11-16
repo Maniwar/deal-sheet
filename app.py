@@ -58,7 +58,7 @@ CAR_FIELDS = ["year", "make", "model", "trim", "body", "transmission", "drivetra
 NUMBER_FIELDS = {"year", "miles", "price", "msrp"}
 # the facts that can be corrected on the main screen, in Car details
 EDIT_FIELDS = ("year", "make", "model", "trim", "body", "transmission", "drivetrain", "miles", "price", "vin",
-               "exterior", "interior", "seller", "location", "history")
+               "exterior", "interior", "seller", "location", "history", "options")
 SELLER_TYPES = ["", "dealer", "private", "auction"]
 COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img", "options", "vin",
                 "available", "seen", "seen_on", "seen_why", "body", "history", "aside", "gearbox", "gear_seen"]
@@ -399,8 +399,8 @@ def check_listings(comps: list[dict], car: dict | None = None, say=None, only_ne
         if not listings and calc.from_listings(comp):
             return False
         if calc.comp_group(comp) == "live":
-            if calc.read_live(comp, today):
-                return False                     # read off the listing site's own page today: opening it again costs and adds nothing
+            if calc.seen_live_today(comp, today):
+                return False                     # read off the site's own results page today: opening it again costs and adds nothing
             return not (only_new and comp.get("seen") and comp.get("seen_on") == today)      # `only_new`: not the ones opened a moment ago
         return again and comp.get("seen") == "gone"                                          # one the app itself moved out
 
@@ -417,11 +417,16 @@ def check_listings(comps: list[dict], car: dict | None = None, say=None, only_ne
             else:                                            # neither reader could open it: say so
                 first = looks.get(url, ("unknown", "", "", "", ""))
                 looks[url] = (first[0], first[1], first[2], f"{first[3]}, and {look[3]}", first[4])
+    stale = set()
     for comp in listed:
         state, vin, gearbox, why, _ = looks.get(comp["url"], ("unknown", "", "", "the page did not load in time", "slow"))
         was_gone = calc.comp_group(comp) != "live"
         if was_gone and state not in ("live", "listed"):
             continue                             # still gone, or nothing new to say: it stays where it is
+        if (calc.fleeting(comp) and state not in ("live", "listed") and comp.get("seen") not in ("live", "listed")
+                and comp.get("aside") != "mine" and str(comp.get("source") or "") != "Added by you"):
+            stale.add(id(comp))                  # a Craigslist or eBay ad never seen live: an old copy of a dead ad, not a car for sale
+            continue
         comp["seen"], comp["seen_on"], comp["seen_why"] = state, today, why
         if vin and not comp.get("vin"):
             comp["vin"] = vin                    # the page states it, so it is there to copy
@@ -440,6 +445,10 @@ def check_listings(comps: list[dict], car: dict | None = None, say=None, only_ne
             if "sold or gone" not in comp["note"]:
                 comp["note"] = ("The page now says it has sold or gone. " + comp["note"]).strip()
     kept, count["wrong"] = same_gearbox_only(car or {}, comps, say)
+    if stale:
+        kept = [comp for comp in kept if id(comp) not in stale]
+        if say:
+            say(f"Left out {len(stale)} Craigslist or eBay ad{'s' if len(stale) != 1 else ''} that {'have' if len(stale) != 1 else 'has'} ended or could not be opened")
     stays = {id(comp) for comp in kept}
     for comp in listed:
         if id(comp) in stays and comp.get("seen_on") == today and comp.get("seen") in count:
@@ -494,7 +503,7 @@ def add_counts(*counts) -> dict:
     return total
 
 
-def research_market(client, model: str, car: dict, max_searches: int, progress=None) -> dict:
+def research_market(client, model: str, car: dict, max_searches: int, progress=None, zip_code: str = "") -> dict:
     """Completed sales and cars for sale now, searched at the same time, with a look at each for-sale page.
 
     Nothing waits that does not have to: every search goes out together, and the for-sale pages are opened as
@@ -503,7 +512,7 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     tell = progress.say if progress else (lambda text: None)
 
     def for_sale_side() -> dict:
-        sale = llm.research_for_sale(client, model, car, max_searches=max_searches, progress=progress)
+        sale = llm.research_for_sale(client, model, car, max_searches=max_searches, progress=progress, zip_code=zip_code)
         cars, off_body = same_body_only(car, sale["comps"])
         cars, wrong = same_gearbox_only(car, cars, tell)
         if cars:
@@ -574,7 +583,7 @@ def tidy_car(found: dict) -> dict:
 
 
 def build_deal(client, model: str, link: str, shot: bytes | None, max_searches: int, buyer: str,
-               wanted: str = "", say=None, progress=None) -> tuple[dict | None, list[str]]:
+               wanted: str = "", say=None, progress=None, zip_code: str = "") -> tuple[dict | None, list[str]]:
     """Read the listing, research comps, suggest an offer and draft the message. Returns (deal, notes).
 
     `wanted` is the buyer's own description of a car. With no link and no screenshot it is all there
@@ -640,7 +649,7 @@ def build_deal(client, model: str, link: str, shot: bytes | None, max_searches: 
                                               calc.money(car["price"]) if car.get("price") else "") if bit))
     say(2)
     try:
-        result = research_market(client, model, car, max_searches, progress=progress)
+        result = research_market(client, model, car, max_searches, progress=progress, zip_code=zip_code)
     except llm.LLMError as exc:
         notes.append(f"The comps search stopped: {exc}")
         return deal, notes
@@ -698,6 +707,7 @@ def init_state() -> None:
     ss["detailed_car"] = False   # coupes show the simple shape unless the concept coupe is chosen
     ss["key_ver"] = 0
     ss["buyer"] = secret("BUYER_NAME")
+    ss["buyer_zip"] = ""         # where the buyer is: Craigslist is swept around it
     ss["model_label"] = next(iter(llm.MODELS))
     ss["notices"] = []
     ss["build_seq"] = 0          # goes up after every build, so the screen knows the answer has arrived
@@ -728,14 +738,19 @@ def set_car(car: dict, replace: bool) -> None:
         ss[f"car_{field}"] = fmt_field(field, value)
 
 
-def set_offer(offer: dict) -> None:
+def set_offer(offer: dict, keep_versions: bool = False) -> None:
+    """Put an offer in place. `keep_versions`: a new offer for the same car keeps the other listings priced beside it."""
     ss = st.session_state
+    if not keep_versions or "versions" in offer:
+        ss["offer_versions"] = [dict(item) for item in offer.get("versions") or [] if isinstance(item, dict)][:8]
     ss["offer_open"] = fmt_money_input(offer.get("open"))
     ss["offer_target"] = fmt_money_input(offer.get("target"))
     ss["offer_walk"] = fmt_money_input(offer.get("walk_away"))
     ss["offer_shown"] = fmt_money_input(offer.get("shown") or offer.get("open"))
     ss["reasons_text"] = "\n".join(offer.get("reasons") or [])
     ss["pushback_text"] = "\n".join(offer.get("pushback") or [])
+    ss["offer_moves"] = [dict(item) for item in offer.get("adjustments") or [] if isinstance(item, dict)]
+    ss["offer_for"] = dict(offer.get("for") or {})          # the car's miles, colour and options when it was worked out
 
 
 def merged_comps(keep, add) -> list[dict]:
@@ -788,7 +803,13 @@ def apply_pending() -> None:
             ss["research_summary"] = payload["summary"]
         ss["is_sample"] = False
     if "offer" in payload:
-        set_offer(payload["offer"])
+        set_offer(payload["offer"], keep_versions=True)
+    if "version" in payload:                       # another listing of this model, priced: newest last, one per set of details
+        new = payload["version"]
+        kept = [item for item in ss.get("offer_versions") or [] if item.get("label") != new.get("label")]
+        ss["offer_versions"] = (kept + [new])[-8:]
+    if "drop_version" in payload:
+        ss["offer_versions"] = [item for item in ss.get("offer_versions") or [] if item.get("id") != payload["drop_version"]]
     if "offer_numbers" in payload:
         numbers = payload["offer_numbers"] or {}
         was_open = calc.to_int(ss.get("offer_open"))
@@ -824,6 +845,9 @@ def current_offer() -> dict:
         "shown": calc.to_int(ss.get("offer_shown")) or opening,
         "reasons": lines("reasons_text"),
         "pushback": lines("pushback_text"),
+        "adjustments": list(ss.get("offer_moves") or []),
+        "for": dict(ss.get("offer_for") or {}),
+        "versions": list(ss.get("offer_versions") or []),      # other listings of this model, priced from the same sales
     }
 
 
@@ -839,7 +863,7 @@ def current_prefs() -> dict:
     ss = st.session_state
     prefs = {key: kind(ss[key]) for key, (kind, _, _) in PREF_NUMBERS.items()}
     prefs.update({key: bool(ss[key]) for key in PREF_SWITCHES})
-    prefs.update({"buyer": str(ss["buyer"] or "").strip()[:60], "model_label": ss["model_label"],
+    prefs.update({"buyer": str(ss["buyer"] or "").strip()[:60], "zip": calc.clean_zip(ss.get("buyer_zip")), "model_label": ss["model_label"],
                   "qr_label": ss.get("qr_label"), "v": PREFS_VERSION})
     return prefs
 
@@ -861,6 +885,8 @@ def apply_prefs(saved: dict) -> None:
         queue({"tidy": True})                        # the garage drops the sample at the end of this run
     if isinstance(saved.get("buyer"), str) and saved["buyer"].strip():
         ss["buyer"] = saved["buyer"].strip()[:60]
+    if calc.clean_zip(saved.get("zip")):
+        ss["buyer_zip"] = calc.clean_zip(saved["zip"])
     # Settings saved before the default changed hold the old default, which nobody chose: let the new one apply.
     chosen = saved.get("v") == PREFS_VERSION or saved.get("model_label") != OLD_DEFAULT_MODEL
     if saved.get("model_label") in llm.MODELS and chosen:
@@ -976,6 +1002,8 @@ def stage_event(name: str) -> None:
         ss["_verify_request"] = value
     elif name == "reoffer":
         ss["_reoffer_request"] = value
+    elif name == "version":
+        ss["_version_request"] = value
     elif name == "photo":
         ss["_photo_request"] = value
     elif name == "remove":                          # take a car out of the garage: the one the screen named, else the one on screen
@@ -1023,11 +1051,13 @@ def short_car(car: dict) -> str:
 
 def still_working(job) -> str:
     what = {"build": "building a car", "verify": "checking the for-sale pages",
-            "offer": f"working out the offer for the {job.name}"}.get(job.kind, f"searching for the {job.name}")
+            "offer": f"working out the offer for the {job.name}",
+            "version": f"pricing another {job.name}"}.get(job.kind, f"searching for the {job.name}")
     return f"Still {what}. Its results appear when it finishes, so there is no need to start it again."
 
 
-def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client, model: str, searches: int) -> dict:
+def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client, model: str, searches: int,
+              zip_code: str = "") -> dict:
     """Search for more of one car's comps, refresh them all, or check its for-sale pages. Runs on the job's own
     thread: it is handed copies of the car and its comps and returns what to change, and touches no page state."""
     progress = job.progress
@@ -1049,14 +1079,14 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
             progress.say("Opening the for-sale pages you already had, to see whether each car is still there")
         opened = pool.submit(check_listings, have, the_car, progress.say, False, (client, model), True, False)
         try:
-            found = research_market(client, model, the_car, searches, progress=progress)
+            found = research_market(client, model, the_car, searches, progress=progress, zip_code=zip_code)
         finally:
             kept, early = opened.result()                        # done long before the searches: it has its own time limit
             pool.shutdown(wait=False)
         stays = {id(comp) for comp in kept}
         have = [comp for comp in have if id(comp) in stays]      # less any whose page states the other transmission
     elif wants_sale:
-        found = llm.research_for_sale(client, model, the_car, max_searches=searches, known=known, progress=progress)
+        found = llm.research_for_sale(client, model, the_car, max_searches=searches, known=known, progress=progress, zip_code=zip_code)
     else:
         found = llm.research_comps(client, model, the_car, max_searches=searches, known=known, progress=progress)
     better = calc.upgrade_leads(have, found["comps"])            # a lead whose own page has now turned up takes that page
@@ -1069,6 +1099,7 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
             if cleared:
                 progress.say(f"Cleared {cleared} car{'s' if cleared != 1 else ''} that came from stored copies of listing-site pages, with no VIN to check")
         relisted = calc.relist(have, found["comps"], now)
+        calc.resee_ads(have, found["comps"], now)            # a Craigslist or eBay ad the site's page showed again
     if relisted.get("repriced"):
         progress.say(f"{relisted['repriced']} car{'s' if relisted['repriced'] != 1 else ''} on the listing sites {'have' if relisted['repriced'] != 1 else 'has'} a new price")
     fresh = calc.new_comps(have, found["comps"])
@@ -1116,20 +1147,109 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
                          if fresh else "The search found nothing new this time.") + (f" {cost}" if cost else "")]}
 
 
-def offer_work(job, car: dict, comps: list[dict], client, model: str, had_message: bool) -> dict:
-    """Work the offer out again for a car whose facts or comps have changed. Runs on the job's own thread."""
+def offer_work(job, car: dict, comps: list[dict], client, model: str, had_message: bool, buyer: str = "") -> dict:
+    """Work the offer out again for a car whose facts or comps have changed, and write its message again so the
+    two never disagree. Runs on the job's own thread."""
     job.progress.say(f"Working out the offer again from {len(comps)} cars")
-    plan = llm.suggest_offer(client, model, car, comps)
+    used = [comp for comp in comps if comp["use"]]
+    plan = llm.suggest_offer(client, model, car, used)
     plan["shown"] = plan.get("open")
+    for move in plan.get("adjustments") or []:
+        job.progress.say(f"{move['factor'].capitalize()}: {move['effect']}. {move['why']}")
     bits = [f"open at {calc.money(plan['open'])}" if plan.get("open") else "",
             f"a fair deal is {calc.money(plan['target'])}" if plan.get("target") else "",
             f"do not go past {calc.money(plan['walk_away'])}" if plan.get("walk_away") else ""]
     miles = calc.to_int(car.get("miles"))
     note = ("The offer is worked out again" + (f" for {miles:,} miles" if miles else "") + ": "
             + ", ".join(bit for bit in bits if bit) + ".")
-    if had_message:
-        note += " The message still has the old numbers: write it again in the Message tab."
-    return {"pending": {"offer": plan}, "notices": [note]}
+    pending = {"offer": plan}
+    if had_message and plan.get("open"):
+        job.progress.say("Writing the message again with the new numbers")
+        try:
+            pending["message"] = llm.draft_message(client, model, car, used, plan["open"], buyer, "text")
+            note += " The message is written again to match."
+        except llm.LLMError as exc:
+            note += f" The message still has the old numbers ({exc}): write it again in the Message tab."
+    return {"pending": pending, "notices": [note]}
+
+
+def other_gearbox(car: dict, facts: dict) -> str:
+    """The gearbox another listing has when it is not the car's own ('manual' or 'automatic'), else ''."""
+    theirs, mine = calc.gearbox_kind(facts.get("transmission")), calc.gearbox_kind(car.get("transmission"))
+    return theirs if theirs and mine and theirs != mine else ""
+
+
+def version_work(job, car: dict, facts: dict, comps: list[dict], client, model: str, searches: int = 12) -> dict:
+    """Price another listing of the same model: the car's facts with that listing's miles, gearbox, colour and
+    options in their place. It is priced from the sales already held, in one request, unless its gearbox is the
+    other kind: those sales were gathered for this car's gearbox, so sales of the right kind are searched for
+    first and it is priced from them. Runs on the job's own thread."""
+    other, label = calc.variant_car(car, facts), calc.version_label(car, facts)
+    used, sales, basis = [comp for comp in comps if comp["use"]], [], ""
+    gear = other_gearbox(car, facts)
+    if gear:
+        job.progress.say(f"The sales held are for the other gearbox, so searching for {gear} sales first")
+        found = llm.research_comps(client, model, other, max_searches=searches, progress=job.progress)
+        sales, _ = same_body_only(other, found["comps"])
+        sales, _ = same_gearbox_only(other, sales, job.progress.say)
+        sales, _ = drop_spare_trims(sales)
+        counted = [comp for comp in sales if comp["use"] and comp["status"] != "asking"]
+        if counted:
+            used, basis = [comp for comp in sales if comp["use"]], f"Priced from {len(counted)} {gear} sale{'s' if len(counted) != 1 else ''} searched for it."
+        else:
+            sales, basis = [], f"No {gear} sales were found, so this is a rough guide from this car's sales."
+            job.progress.say(basis)
+    else:
+        basis = f"Priced from this car's {len(used)} counted cars."
+    job.progress.say(f"Pricing {label} from {len(used)} cars")
+    plan = llm.suggest_offer(client, model, other, used)
+    for move in plan.get("adjustments") or []:
+        job.progress.say(f"{move['factor'].capitalize()}: {move['effect']}. {move['why']}")
+    version = {"id": uuid.uuid4().hex[:10], "label": label, "facts": facts, "open": plan.get("open"), "target": plan.get("target"),
+               "walk_away": plan.get("walk_away"), "adjustments": plan.get("adjustments") or [], "basis": basis,
+               "sales": sales[:20],                           # kept, so making this the car does not search for them twice
+               "at": dt.date.today().strftime("%b %-d")}
+    fair = plan.get("target") or plan.get("open")
+    note = f"{label}: a fair deal is about {calc.money(fair)}." if fair else f"{label}: no price could be worked out."
+    if fair and facts.get("price"):
+        gap = facts["price"] - fair
+        note += (f" Its asking price is {calc.money(gap)} more." if gap > 250 else
+                 f" Its asking price is {calc.money(-gap)} under that." if gap < -250 else " Its asking price is about fair.")
+    return {"pending": {"version": version}, "notices": [note]}
+
+
+def refit_work(job, car: dict, seed: list[dict], client, model: str, searches: int, had_message: bool, buyer: str = "",
+               zip_code: str = "") -> dict:
+    """The car is now a different one as far as sales go (another gearbox, trim, body or year). Search for its
+    own sales and for cars like it for sale, in place of the ones found for the car as it was, then work out the
+    offer and write the message from them. `seed` is what is kept: comps the buyer added, and any sales already
+    searched for this version. Runs on the job's own thread."""
+    out = more_work(job, "more", "all", car, seed, client, model, searches, zip_code)      # every search again, as for a new car
+    pending, notices = dict(out.get("pending") or {}), list(out.get("notices") or [])
+    comps = merged_comps(pending.get("keep"), pending.get("add_comps"))
+    if any(comp["use"] for comp in comps):
+        again = offer_work(job, car, comps, client, model, had_message, buyer)
+        pending.update(again["pending"])
+        notices += again["notices"]
+    else:
+        notices.append("The search found no sales to work an offer out from. Add one you know of in the Sold tab.")
+    return {"pending": pending, "notices": notices}
+
+
+def start_refit_job(car: dict, seed: list[dict]) -> str:
+    """Start the search, offer and message for the car on screen as it now is. Returns '' when it started,
+    otherwise why it did not."""
+    ss = st.session_state
+    entry = ss["garage"].get(ss["active"]) or {}
+    if not ss["api_key"]:
+        return "Connect your Anthropic API key, then tap Refresh results to search for it."
+    if my_job() is not None:
+        return still_working(my_job())
+    client, model, searches = llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]], int(ss["max_searches"])
+    had_message, buyer, zip_code = bool(entry.get("message")), str(ss.get("buyer") or "").strip(), calc.clean_zip(ss.get("buyer_zip"))
+    start_job(jobs.Job("refit", lambda job: refit_work(job, car, seed, client, model, searches, had_message, buyer, zip_code),
+                       car_id=ss["active"], name=short_car(car), flag="all"))
+    return ""
 
 
 def start_offer_job(car: dict) -> str:
@@ -1145,7 +1265,8 @@ def start_offer_job(car: dict) -> str:
     if my_job() is not None:
         return still_working(my_job())
     client, model, had_message = llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]], bool(entry.get("message"))
-    start_job(jobs.Job("offer", lambda job: offer_work(job, car, comps, client, model, had_message),
+    buyer = str(ss.get("buyer") or "").strip()
+    start_job(jobs.Job("offer", lambda job: offer_work(job, car, comps, client, model, had_message, buyer),
                        car_id=ss["active"], name=short_car(car), flag="offer"))
     return ""
 
@@ -1169,7 +1290,7 @@ def collect_job() -> None:
     if "add" in out:                                             # a build: the new car joins the garage and is shown
         queue({"add": out["add"]})
     pending = out.get("pending")
-    if job.kind in ("more", "verify") and job.car_id in garage and job.progress.lines:
+    if job.kind in ("more", "verify", "refit") and job.car_id in garage and job.progress.lines:
         ss.setdefault("logs", {})[job.car_id] = list(job.progress.lines)[-200:]
     if pending and job.car_id == ss["active"]:
         ss["_pending"] = {**(ss.get("_pending") or {}), **pending}
@@ -1181,7 +1302,13 @@ def collect_job() -> None:
         if pending.get("summary"):
             entry["summary"] = pending["summary"]
         if "offer" in pending:
-            entry["offer"] = pending["offer"]
+            entry["offer"] = {**pending["offer"], "versions": (entry.get("offer") or {}).get("versions") or []}
+        if "version" in pending:
+            offer = entry.setdefault("offer", {})
+            offer["versions"] = ([item for item in offer.get("versions") or [] if item.get("label") != pending["version"].get("label")]
+                                 + [pending["version"]])[-8:]
+        if "message" in pending:
+            entry["message"] = pending["message"]
         entry.pop("_file", None)
         notices = [f"{job.name}: {text}" for text in notices]
     elif pending:
@@ -1234,9 +1361,50 @@ def handle_stage_requests(progress_slot) -> None:
         else:
             client = llm.get_client(ss["api_key"]) if ss["api_key"] else None      # a check runs without a key, with fewer pages read
             model, searches = llm.MODELS[ss["model_label"]], int(ss["max_searches"])
-            start_job(jobs.Job(kind, lambda job, kind=kind, what=what: more_work(job, kind, what, the_car, have, client, model, searches),
+            zip_code = calc.clean_zip(ss.get("buyer_zip"))
+            start_job(jobs.Job(kind, lambda job, kind=kind, what=what: more_work(job, kind, what, the_car, have, client, model, searches, zip_code),
                                car_id=ss["active"], name=short_car(the_car), flag="verify" if kind == "verify" else (what or "sold")))
             continue                             # the screen keeps showing it as working until the job is collected
+        ss["build_seq"] += 1
+    request = ss.pop("_version_request", None)
+    if isinstance(request, dict):                # another listing of this model: price it, drop it, or make it the car
+        entry = ss["garage"].get(ss["active"]) or {}
+        the_car, kind = dict(entry.get("car") or {}), str(request.get("kind") or "")
+        held = list((entry.get("offer") or {}).get("versions") or [])
+        chosen = next((item for item in held if item.get("id") == str(request.get("id") or "")), None)
+        if kind == "price":
+            facts = calc.version_facts(request.get("facts"))
+            comps = calc.clean_comps(entry.get("comps") or [])
+            if not facts:
+                ss["stage_error"] = "Put in at least one detail of the other listing first: its miles, gearbox, colour or options."
+            elif not any(comp["use"] for comp in comps):
+                ss["stage_error"] = "There are no counted sales to price it from yet. Search for sales first, in the Sold tab."
+            elif not ss["api_key"]:
+                ss["stage_error"] = "Connect your Anthropic API key first."
+            elif my_job() is not None:
+                ss["stage_error"] = still_working(my_job())
+            else:
+                client, model = llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]]
+                searches = int(ss["max_searches"])
+                start_job(jobs.Job("version", lambda job: version_work(job, the_car, facts, comps, client, model, searches),
+                                   car_id=ss["active"], name=short_car(the_car), flag="version"))
+        elif kind == "drop" and chosen:
+            ss["_pending"] = {**(ss.get("_pending") or {}), "drop_version": chosen["id"]}
+        elif kind == "use" and chosen:             # this listing is the one: its details become the car's, and the offer and message follow
+            facts = calc.version_facts(chosen.get("facts"))
+            fields = {key: fmt_field(key, value) if key in NUMBER_FIELDS else str(value) for key, value in facts.items()}
+            ss["_pending"] = {**(ss.get("_pending") or {}), "car_edit": fields, "drop_version": chosen["id"]}    # it is the car now, not a version of it
+            now = {**the_car, **facts}
+            if other_gearbox(the_car, facts):      # the sales held are for the other gearbox: search for this one, then offer and message
+                seed = calc.own_adds(calc.clean_comps(entry.get("comps") or [])) + calc.clean_comps(chosen.get("sales") or [])
+                why_not = start_refit_job(now, seed)
+                note = ("The car now has those details. Its sales were found for the other gearbox, so searching again for this one. "
+                        "The offer and the message follow." if not why_not else
+                        f"The car now has those details, but its sales are still for the other gearbox. {why_not}")
+            else:
+                why_not = start_offer_job(now)
+                note = "The car now has those details. Working out the offer and the message again." if not why_not else f"The car now has those details. {why_not}"
+            ss["notices"] = [note]
         ss["build_seq"] += 1
     request = ss.pop("_reoffer_request", None)
     if request:                                  # work the offer out again, from The case
@@ -1247,7 +1415,9 @@ def handle_stage_requests(progress_slot) -> None:
     request = ss.pop("_car_request", None)
     if isinstance(request, dict):                  # the car's facts, corrected on the main screen
         before = (ss["garage"].get(ss["active"]) or {}).get("car") or {}
-        fields = {key: str(request.get(key) or "").strip()[:240] for key in EDIT_FIELDS if key in request}
+        fields = {key: str(request.get(key) or "").strip()[:(3000 if key == "options" else 240)] for key in EDIT_FIELDS if key in request}
+        if "options" in fields:                    # one option to a line, however it was typed
+            fields["options"] = "\n".join(part.strip() for part in re.split(r"[\n;]+", fields["options"]) if part.strip())
         if "vin" in fields:
             fields["vin"] = calc.clean_vin(fields["vin"]) or fields["vin"].upper()
         named = {key: fields.get(key, str(before.get(key) or "")) for key in ("make", "model")}
@@ -1260,16 +1430,23 @@ def handle_stage_requests(progress_slot) -> None:
             moved = any(fields[key].lower() != str(before.get(key) or "").strip().lower()
                         for key in ("year", "make", "model", "trim", "body") if key in fields)
             has_comps = bool((ss["garage"].get(ss["active"]) or {}).get("comps"))
-            # what the car is worth moves with its miles, its price and its history: the offer follows them
-            priced = [key for key in ("miles", "price", "history") if key in fields and
+            # what the car is worth moves with its miles, its price, its colours, its options and its history: the offer follows them
+            priced = [key for key in ("miles", "price", "exterior", "interior", "options", "history") if key in fields and
                       (calc.to_int(fields[key]) != calc.to_int(before.get(key)) if key in NUMBER_FIELDS
                        else fields[key].lower() != str(before.get(key) or "").strip().lower())]
-            if moved and has_comps:
-                ss["notices"] = ["Saved. The comps were found for the car as it was, so search again in the Sold tab to match them."]
+            regear = "transmission" in fields and bool(other_gearbox(before, {"transmission": fields["transmission"]}))
+            if (moved or regear) and has_comps:    # a different car as far as sales go: search for it, then offer and message
+                now = {**before, **{key: (calc.to_int(value) if key in NUMBER_FIELDS else value) for key, value in fields.items()}}
+                held = calc.clean_comps((ss["garage"].get(ss["active"]) or {}).get("comps") or [])
+                why_not = start_refit_job(now, calc.own_adds(held))
+                ss["notices"] = ["Saved. The sales were found for the car as it was, so searching again for the car as it is now. "
+                                 "The offer and the message follow." if not why_not else
+                                 f"Saved, but the sales still match the car as it was. {why_not}"]
             elif priced and has_comps:
                 now = {**before, **{key: (calc.to_int(value) if key in NUMBER_FIELDS else value) for key, value in fields.items()}}
                 why_not = start_offer_job(now)
-                what = " and ".join({"miles": "miles", "price": "asking price", "history": "history"}[key] for key in priced)
+                words = {"miles": "miles", "price": "asking price", "exterior": "colour", "interior": "interior", "options": "options", "history": "history"}
+                what = " and ".join(dict.fromkeys(words[key] for key in priced))
                 ss["notices"] = [f"Saved. Working out the offer again for the new {what}." if not why_not
                                  else f"Saved, but the offer still reflects the old {what}. {why_not}"]
             else:
@@ -1376,7 +1553,12 @@ def handle_stage_requests(progress_slot) -> None:
                     pending = ss.get("_pending") or {}
                     pending["car_extra"] = extra
                     ss["_pending"] = pending
-                    ss["notices"] = ["Added the options" + (" and the sticker price." if extra.get("msrp") else ".")]
+                    added = "Added the options" + (" and the sticker price." if extra.get("msrp") else ".")
+                    entry = ss["garage"].get(ss["active"]) or {}
+                    if entry.get("comps"):                   # options move what the car is worth: the offer follows them
+                        why_not = start_offer_job({**(entry.get("car") or {}), **extra})
+                        added += " Working out the offer again with them." if not why_not else f" The offer does not count them yet. {why_not}"
+                    ss["notices"] = [added]
                 else:
                     ss["stage_error"] = "No options could be read from that. Try a sharper picture or paste the text."
         ss.pop("_options_request", None)
@@ -1421,11 +1603,11 @@ def handle_stage_requests(progress_slot) -> None:
                 link = "https://" + link
             shot = as_bytes(request.get("image"))
             client, model = llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]]
-            searches, buyer = int(ss["max_searches"]), str(ss["buyer"]).strip()
+            searches, buyer, zip_code = int(ss["max_searches"]), str(ss["buyer"]).strip(), calc.clean_zip(ss.get("buyer_zip"))
 
             def build(job):
                 new_deal, notes = build_deal(client, model, link, shot, searches, buyer, wanted=wanted, say=job.say,
-                                             progress=job.progress)
+                                             progress=job.progress, zip_code=zip_code)
                 if not new_deal:
                     return {"error": " ".join(notes)}
                 new_deal["log"] = list(job.progress.lines)
@@ -1455,6 +1637,14 @@ with st.sidebar:
     st.selectbox("Claude model", list(llm.MODELS), key="model_label")
     st.slider("Web searches per research run", 3, 20, key="max_searches",
               help="Each search is billed by the API. More searches find more comps.")
+    st.text_input("Your ZIP code", key="buyer_zip", max_chars=10, placeholder="For Craigslist around you",
+                  help="Craigslist is searched one area at a time. With your ZIP code, each search for cars for sale also "
+                       "reads Craigslist within 250 miles of you, live. Leave it empty to skip Craigslist. The ZIP code is "
+                       "kept in this browser and goes only into the Craigslist address that is opened.")
+    if str(ss.get("buyer_zip") or "").strip() and not calc.zip_place(ss["buyer_zip"]):
+        st.caption("That is not a ZIP code the app knows, so Craigslist is skipped. Use five digits.")
+    elif calc.zip_place(ss.get("buyer_zip")):
+        st.caption("Craigslist is read within 250 miles of {}, {}.".format(*calc.zip_place(ss["buyer_zip"])))
 
     st.markdown("### Money")
     st.number_input("Sales tax %", min_value=0.0, max_value=15.0, step=0.25, key="tax_rate")
@@ -1692,7 +1882,7 @@ with tab_comps:
                        help=None if can_research else (needs_key if client is None else "Fill in the car first.")):
             with st.spinner("Searching auction results, then cars for sale now. This takes two or three minutes."):
                 try:
-                    result = research_market(client, model, car, int(ss["max_searches"]))
+                    result = research_market(client, model, car, int(ss["max_searches"]), zip_code=calc.clean_zip(ss.get("buyer_zip")))
                 except llm.LLMError as exc:
                     st.error(str(exc))
                 else:
@@ -1855,7 +2045,7 @@ flags = {
                 if my_job() is not None and not my_job().done else None),
 }
 stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail", "more", "verify",
-                "message", "car", "addcomp", "remove", "usecomp", "link", "reoffer")
+                "message", "car", "addcomp", "remove", "usecomp", "link", "reoffer", "version")
 with stage_box:
     STAGE(
         data=json.dumps(stage.build_payload(

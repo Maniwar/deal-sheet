@@ -25,7 +25,8 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import (LISTING_SITES, MIRROR_SITES, car_facts, car_title, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind, host_of,
+from calc import (AD_SITES, LISTING_SITES, MIRROR_SITES, SITE_NAMES, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
+                  host_of, offer_basis, plain_date,
                   is_list_page, is_mirror, link_kind, link_pages, listing_site, loose_trim, mark_other_trim, merge_comps, money, normalize_url,
                   to_int)
 
@@ -499,6 +500,8 @@ def _comps_block(comps: list[dict]) -> str:
             bits.append(comp["date"])
         if comp.get("source"):
             bits.append(comp["source"])
+        if comp.get("gearbox"):
+            bits.append(comp["gearbox"])
         if comp.get("options"):
             bits.append(f"options: {comp['options']}")
         if comp.get("history"):
@@ -813,8 +816,8 @@ def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
     )
 
 
-def _for_sale_prompt(car: dict, today: str, max_searches: int = 6, apart: bool = False) -> str:
-    """`apart`: Cars.com, CarGurus, Autotrader and Edmunds are being searched by their own pass, so this one leaves them alone."""
+def _for_sale_prompt(car: dict, today: str, max_searches: int = 6, apart: bool = False, ads_apart: bool = False) -> str:
+    """`apart`: Cars.com, CarGurus, Autotrader, Edmunds and TrueCar are being read by their own pass, so this one leaves them alone."""
     name = car_title(car) or "this car"
     place = str(car.get("location") or "").strip()
     near = f" and \"{name} for sale {place}\"" if place else ""
@@ -830,11 +833,15 @@ def _for_sale_prompt(car: dict, today: str, max_searches: int = 6, apart: bool =
         "3. The maker's own pre-owned finder and franchised dealers' own sites, including certified cars.\n"
         "4. Listing sites: Classic.com (its 'For Sale' lines give the dealer, the price and the day the listing "
         "was last updated; 'Last Asking' means the listing has gone, so skip those), "
-        + ("duPont Registry, CarMax, Carvana and Autotrader Classics. (Cars.com, CarGurus, Autotrader and Edmunds are being "
+        + ("duPont Registry, CarMax, Carvana and Autotrader Classics. (Cars.com, CarGurus, Autotrader, Edmunds and TrueCar are being "
            "searched separately right now, so they are left out of your results: spend nothing on them.)\n" if apart else
            "Cars.com, Autotrader, CarGurus, duPont Registry and Autotrader Classics.\n") +
         f"5. Plain searches the way a buyer would type them, e.g. \"{name} for sale\"{near}, to catch independent "
         "dealers and smaller sites.\n"
+        + ("" if ads_apart else
+           "6. Private-party ads on eBay Motors (an item's own page, ebay.com/itm/...) and Craigslist (a post's own "
+           "page, with /d/ in its address). These ads end within weeks and search engines keep the dead ones, so "
+           "record one only when its result reads as current, and never from a page that lists many.\n") +
         "Rules:\n"
         "- Only cars that are for sale today. Skip anything whose page or snippet says sold, ended or removed, and "
         "skip results that look more than about 45 days old unless they show the car is still listed.\n"
@@ -1240,7 +1247,7 @@ def _marketplace_prompt(car: dict, today: str, max_searches: int = 3) -> str:
 
 
 _NO_LISTING_SITE: set[str] = set()          # listing sites the search tool will not be limited to, once known
-_SITE_NAMES = {"cars.com": "Cars.com", "cargurus.com": "CarGurus", "autotrader.com": "Autotrader", "edmunds.com": "Edmunds"}
+_SITE_NAMES = SITE_NAMES
 LISTING_OPENS = 3                           # results pages opened live per run, one per site
 LISTING_PAGE_TOKENS = 30000                 # how much of each page is read: about twenty cars with their VINs
 
@@ -1256,7 +1263,8 @@ def _listings_prompt(car: dict, today: str, max_searches: int, sites: list[str],
         "How to work:\n"
         f"1. Search (at most {max_searches} searches, sent together) to find each site's results page for this car, "
         f"for example \"used {name} for sale\"" + (f" and \"used {name} for sale {place}\"" if place else "") + ".\n"
-        f"2. Open up to {opens} results pages with web_fetch, each on a different site. The search engine's copy of "
+        f"2. Open up to {opens} results pages with web_fetch, each on a different site: the sites whose search "
+        "results show the most cars like this one. The search engine's copy of "
         "a results page can be weeks old, with old prices and cars that have gone, so a car counts only when you "
         "read it on a page you opened yourself.\n"
         "   Which page to open on a site: the one for this exact model, year and trim when there is one. For a "
@@ -1274,8 +1282,8 @@ def _listings_prompt(car: dict, today: str, max_searches: int, sites: list[str],
         "- status asking, available yes. title: year, make, model and trim as the page words them. price: the "
         "price shown for that car, in whole dollars, copied exactly. miles: copied exactly.\n"
         "- vin: all 17 characters, copied exactly from that car's entry on the opened page. Never guess one.\n"
-        "- url: the address of that car's own page as the opened page gives it (it has /vin/, /vehicledetail/ or "
-        "/details/ in it), made absolute with the site's host. If the page gives none, the address of the page "
+        "- url: the address of that car's own page as the opened page gives it (it has /vin/, /vehicledetail/, "
+        "/details/ or /listing/ in it), made absolute with the site's host. If the page gives none, the address of the page "
         "you opened. Never build an address from parts.\n"
         "- source: the dealer's name when the page names it, else the site's name.\n"
         "- note: the car's own town and state first (where the dealer is, not how far away the page says it is), "
@@ -1387,11 +1395,112 @@ def _from_listing_sites(found: dict | None, car: dict, progress: Progress | None
     return cars, line
 
 
+def _classifieds_prompt(car: dict, today: str, craigslist: str, zip_code: str) -> str:
+    name = car_title(car) or "this car"
+    plain = " ".join(str(car.get(key) or "").strip() for key in ("make", "model")).strip() or name
+    steps = []
+    if craigslist:
+        steps.append(f"Open this page with web_fetch. It is Craigslist's cars and trucks search for this model around the "
+                     f"buyer's ZIP code {zip_code}:\n   {craigslist}")
+    steps.append(f"Search once for \"ebay motors {plain} cars trucks for sale\", then open with web_fetch the eBay page that "
+                 "lists these cars for sale (its address has /b/, /sch/ or /shop/ in it). Not a page of parts, wheels or models.")
+    return (
+        f"Today is {today}. Find cars like this one that private sellers and small dealers are advertising now on "
+        "Craigslist and eBay Motors. Your search and page opens are limited to those two sites.\n\n"
+        f"{_car_block(car)}\n\n"
+        "What to do:\n" + "\n".join(f"{index}. {step}" for index, step in enumerate(steps, start=1)) + "\n"
+        f"{len(steps) + 1}. Call record_comps once with the cars on the pages you opened.\n"
+        "Rules for each car:\n"
+        "- Only a whole car for sale that is the same model as this one"
+        + (f", of model year {car.get('year')} or the year either side" if car.get("year") else "") +
+        ". Never a part, a set of wheels, a scale model, a wanted ad or a car being parted out.\n"
+        + _trim_rule(car) + _gear_rule(car) +
+        "- Only from a page you opened yourself. An ad that only a search result shows is likely an old copy of "
+        "a dead ad: leave it out.\n"
+        "- status asking, available yes. title as the ad words it. price: the price shown for that ad, in whole "
+        "dollars, copied exactly; an ad with no price is left out. miles when shown.\n"
+        "- url: the address of that ad's own page exactly as the opened page gives it (ebay.com/itm/ and a number, "
+        "or a craigslist address with /d/ in it), made absolute with the site's host. Never build one.\n"
+        "- source: the seller's name when shown, else 'Craigslist' or 'eBay Motors'. note: the town or area the "
+        "ad gives first, then 'Seen on Craigslist.' or 'Seen on eBay Motors.'\n"
+        "- Record up to 15 cars. If a page could not be opened, or has no such cars, record none from it and say "
+        "so in the summary.\n"
+    )
+
+
+def _ad_on_page(comp: dict, pages: list[dict]) -> dict | None:
+    """The opened page that shows this ad: the ad's own address is on the page, with its price close by."""
+    price, path = int(comp.get("price") or 0), urlparse(comp["url"]).path.rstrip("/").lower()
+    if not price or len(path) < 6:
+        return None
+    if path.endswith(".html"):
+        path = path[:-5]
+    forms = (f"{price:,}", str(price))
+    for page in pages:
+        if ad_site(page["url"]) != ad_site(comp["url"]):
+            continue
+        text = page["text"]
+        lower = text.lower()
+        at = lower.find(path)
+        while at >= 0:
+            if any(form in text[max(0, at - 1500):at + 1500] for form in forms):
+                return page
+            at = lower.find(path, at + 1)
+    return None
+
+
+# words that mark an ad for a piece of a car, a model of one, or a request, not a car for sale
+_NOT_A_CAR = re.compile(
+    r"\b(wheels?|rims?|tires?|bumpers?|spoiler|(?:passenger|driver|left|right|front|rear)(?: \w+)? door|hood|fenders?|mirrors?|caps?|exhaust|muffler|headlights?|tail ?lights?|"
+    r"steering wheel|diecast|die-cast|1[:/]\d\d|scale model|model car|brochure|key fob|floor mats?|car cover|parting out|"
+    r"part(?:ing)? out|for parts|parts only|wanted|wtb|looking for)\b", re.I)
+
+
+def _from_classifieds(found: dict | None, car: dict, progress: Progress | None = None) -> tuple[list[dict], str]:
+    """The Craigslist and eBay Motors ads a search recorded, kept only when a page that was opened live shows
+    the ad's own address with its price beside it. Returns (cars, a line for the summary)."""
+    if not found:
+        return [], ""
+    today, pages, year = dt.date.today().strftime("%b %-d"), found.get("opened") or [], to_int(car.get("year"))
+    asked = to_int(car.get("price")) or 0
+    floor, cheap = max(1000, int(0.2 * asked)), max(5000, int(0.35 * asked))   # a whole car does not cost a fraction of this one
+    kept, left = [], 0
+    for comp in found.get("comps", []):
+        site = ad_site(comp["url"])
+        if comp["price"] < floor or (comp["price"] < cheap and _NOT_A_CAR.search(comp["title"])):
+            left += 1                                        # a part, a model or a wanted ad: priced like one, or named like one and cheap
+            continue
+        then = re.search(r"\b(19|20)\d\d\b", comp["title"])
+        page = _ad_on_page(comp, pages) if site and comp["status"] == "asking" and link_kind(comp["url"]) == "car" else None
+        # an ad counts only from a page read as it is now: a reader that handed back an older copy proves nothing here
+        fresh = page is not None and (found.get("live") or page["at"][:10] == dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"))
+        if not fresh or (year and then and abs(int(then.group()) - year) > 1):
+            left += 1
+            continue
+        where = AD_SITES[site]
+        comp["available"], comp["link_ok"] = comp.get("available") or "yes", True
+        comp["source"] = comp["source"] or where
+        if "seen on" not in comp["note"].lower():
+            comp["note"] = f"{comp['note']} Seen on {where}.".strip()
+        comp["seen"], comp["seen_on"], comp["seen_why"] = "live", today, f"on the {where} results page, read live"
+        kept.append(comp)
+    kept = merge_comps([], kept)
+    if left and progress:
+        progress.say(f"Craigslist and eBay Motors: {left} ad{'s' if left != 1 else ''} left out (not a car like this one, or not on a page that was opened with that price)")
+    read = sorted({AD_SITES[ad_site(page["url"])] for page in pages if ad_site(page["url"])})
+    if read:
+        line = f"{' and '.join(read)} read live: {len(kept)} ad{'s' if len(kept) != 1 else ''} for cars like this one."
+    else:
+        line = "Craigslist and eBay Motors could not be opened this time."
+    return kept, line
+
+
 def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_rounds: int = 6,
-                      today: str | None = None, known=None, progress: Progress | None = None) -> dict:
+                      today: str | None = None, known=None, progress: Progress | None = None, zip_code: str = "") -> dict:
     """Search the web for cars like this one that are for sale now: live auctions, classifieds and dealers; the
     big listing sites, whose results pages are opened and read as they are now; and Facebook Marketplace ads.
-    The three searches run at the same time."""
+    Craigslist around the buyer's ZIP code, when one is given, and eBay Motors are read live as well. The
+    searches run at the same time."""
     today = today or dt.date.today().strftime("%B %d, %Y")
     problem = "The search for cars for sale did not finish."
     max_searches = max(3, min(8, int(max_searches) * 5 // 12))
@@ -1419,10 +1528,12 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
 
     # the listing sites get a search of their own, so the open search is kept off them and spends itself elsewhere
     apart = tuple(site for site in LISTING_SITES if site not in _NO_LISTING_SITE)
+    # Craigslist and eBay Motors are read live by their own pass when pages can be opened: the open search leaves them alone too
+    ads_apart = tuple(AD_SITES) if (tuple(AD_SITES) not in _UNSEARCHABLE and not _FETCH_OFF) else ()
 
     def everywhere() -> dict:
-        return _again(lambda: _research(client, model, _for_sale_prompt(car, today, max_searches, bool(apart)) + _known_note(known),
-                                        max_searches, max_rounds, problem, car=car, never=MIRROR_SITES + apart, progress=progress,
+        return _again(lambda: _research(client, model, _for_sale_prompt(car, today, max_searches, bool(apart), bool(ads_apart)) + _known_note(known),
+                                        max_searches, max_rounds, problem, car=car, never=MIRROR_SITES + apart + ads_apart, progress=progress,
                                         label="For sale now"),
                       progress, "For sale now")
 
@@ -1430,9 +1541,20 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
         return _research(client, model, _marketplace_prompt(car, today, 2), 2, 3, problem, car=car, only=MARKETPLACE_ADS,
                          progress=progress, label="Facebook Marketplace")
 
+    craigslist = craigslist_search(zip_code, car)
+
+    def classifieds() -> dict:
+        """Craigslist around the buyer and eBay Motors: each site's own results page, opened as it is now."""
+        return _again(lambda: _research(client, model, _classifieds_prompt(car, today, craigslist, clean_zip(zip_code)), 1, 4, problem,
+                                        car=car, only=list(AD_SITES), progress=progress, label="Craigslist and eBay Motors",
+                                        opens=2 if craigslist else 1, fresh=True, page_tokens=LISTING_PAGE_TOKENS),
+                      progress, "Craigslist and eBay Motors")
+
     jobs = [("For sale now", everywhere)]
     if apart:
         jobs.append(("Listing sites", listings))
+    if ads_apart:                                          # no page reader, no live read: the open search and the page check cover them
+        jobs.append(("Craigslist and eBay Motors", classifieds))
     if tuple(MARKETPLACE_ADS) not in _UNSEARCHABLE:        # Marketplace ads, each at its own address
         jobs.append(("Facebook Marketplace", marketplace))
     done = dict(_run_side_by_side(jobs, progress))
@@ -1442,6 +1564,15 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
             progress.say(f"Listing sites: could not be searched this time ({sites_found}), so they were left out")
         sites_found = None
     shown, sites_line = _from_listing_sites(sites_found, car, progress)
+    ads_found = done.get("Craigslist and eBay Motors")
+    if isinstance(ads_found, LLMError):
+        if ads_found.kind == "request":
+            _UNSEARCHABLE.add(tuple(AD_SITES))               # the search tool cannot be limited to them: not tried again
+        if progress:
+            why = "the search tool cannot be limited to them" if ads_found.kind == "request" else str(ads_found)[:120]
+            progress.say(f"Craigslist and eBay Motors: could not be read this time ({why}), so they were left out")
+        ads_found = None
+    ads, ads_line = _from_classifieds(ads_found, car, progress)
     if isinstance(lists, LLMError):
         if lists.kind == "request":
             _UNSEARCHABLE.add(tuple(MARKETPLACE_ADS))
@@ -1452,7 +1583,7 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
     listed = [comp for comp in (lists or {}).get("comps", [])
               if comp["status"] == "asking" and "/marketplace/item/" in comp["url"] and comp.get("link_ok")]
     if isinstance(result, LLMError):
-        if not listed and not shown:
+        if not listed and not shown and not ads:
             raise result
         result = {"comps": [], "searched": 0, "failed": [], "used": {},
                   "summary": f"The main search for cars for sale did not finish ({result}). Use Search for more to run it again."}
@@ -1464,10 +1595,13 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
         comp["source"], comp["available"] = "Facebook Marketplace", comp.get("available") or "yes"
     if lists is not None:
         result["summary"] = f"{result['summary']} Facebook Marketplace ads, each with its own link: {len(listed)}.".strip()
-    if sites_line:
-        result["summary"] = f"{result['summary']} {sites_line}".strip()
-    result["comps"] = merge_comps(merge_comps(comps, shown), listed)
-    result["used"] = add_used(result.get("used"), (lists or {}).get("used"), (sites_found or {}).get("used"))
+    for line in (sites_line, ads_line):
+        if line:
+            result["summary"] = f"{result['summary']} {line}".strip()
+    # an ad read live on Craigslist or eBay outranks a copy of it the open search brought back
+    comps = [comp for comp in comps if not ad_site(comp["url"]) or normalize_url(comp["url"]) not in {normalize_url(ad["url"]) for ad in ads}]
+    result["comps"] = merge_comps(merge_comps(merge_comps(comps, shown), ads), listed)
+    result["used"] = add_used(result.get("used"), (lists or {}).get("used"), (sites_found or {}).get("used"), (ads_found or {}).get("used"))
     result["listing_sites"] = sorted({listing_site(page["url"]) for page in (sites_found or {}).get("opened", []) if listing_site(page["url"])})
     return result
 
@@ -1489,8 +1623,24 @@ OFFER_TOOL = {
                         "description": "3 to 5 short factual statements the buyer can show the seller, each tied to a specific comp."},
             "pushback": {"type": "array", "items": {"type": "string"},
                          "description": "2 to 4 lines: what the seller is likely to say, then the buyer's reply."},
+            "adjustments": {
+                "type": "array",
+                "description": "How this car's own details move the price against the comps. One entry each for miles, transmission, "
+                               "colour, options and history, in that order.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "factor": {"type": "string", "enum": ["miles", "transmission", "colour", "options", "history"]},
+                        "effect": {"type": "string", "description": "A signed dollar figure rounded to $500 ('+$6,000', '-$2,500'), "
+                                   "'no change', or 'not priced' when the comps give nothing to price it with."},
+                        "why": {"type": "string", "description": "One short sentence with the facts behind it: this car's value "
+                                "for the factor, and the comps it was weighed against."},
+                    },
+                    "required": ["factor", "effect", "why"],
+                },
+            },
         },
-        "required": ["fair_low", "fair_high", "open", "target", "walk_away", "reasons", "pushback"],
+        "required": ["fair_low", "fair_high", "open", "target", "walk_away", "reasons", "pushback", "adjustments"],
     },
 }
 
@@ -1501,7 +1651,21 @@ def suggest_offer(client, model: str, car: dict, comps: list[dict]) -> dict:
         f"{_car_block(car)}\n\nComps:\n{_comps_block(comps)}\n\n"
         "Call record_offer.\n"
         "Method: weight completed sales most, high bids as a floor signal, asking prices least. "
-        "Adjust for the subject car's miles against each comp's miles. A dealer or certified car "
+        "Recent sales count for more than old ones: a sale more than about two years old shows where the market "
+        "was, not where it is.\n"
+        "Miles matter most. Lean on the comps nearest the subject car's miles and adjust the rest for the gap. "
+        "On a limited-production or collector model a very low-mile car (a few thousand miles or fewer) carries a "
+        "steep premium that sales of driven cars do not show, and it fades fast once the car is used: price a "
+        "low-mile subject car from low-mile sales when there are any, and say plainly when there are none close. "
+        "If the subject car's miles are not stated, say the numbers assume average miles.\n"
+        "Transmission matters on enthusiast cars, where a manual and an automatic of the same model sell for "
+        "different money. Each comp says which it is when that is known. Weigh the comps with the subject car's "
+        "transmission; when most or all of them are the other kind, say so in the transmission adjustment, treat "
+        "your numbers as a rough guide, and make one pushback line a reminder to find sales of the right kind.\n"
+        "Colour matters on some cars. When the comps or their notes show this car's paint or interior selling for "
+        "more or less (a rare, special-order or signature colour; a colour that sits unsold), adjust for it. When "
+        "nothing in the comps shows a difference, do not invent one: record colour as 'not priced'.\n"
+        "A dealer or certified car "
         "carries a premium over an auction sale. With a private seller, open no more than about "
         "10% under the asking price; a much lower opener tends to end the conversation.\n"
         "Options matter. Compare the subject car's options with each comp's where they are stated: a comp "
@@ -1518,6 +1682,9 @@ def suggest_offer(client, model: str, car: dict, comps: list[dict]) -> dict:
         "say so in a reason or a pushback line: it is leverage.\n"
         "Round to the nearest $500. Keep open < target < walk_away, and keep walk_away at or below "
         "the asking price unless the comps clearly support more.\n"
+        "Fill in adjustments: for miles, transmission, colour, options and history, how far this car's own value for that "
+        "factor moved your numbers against the comps, and why in one sentence. These let the buyer see what "
+        "changes when a detail of the car is corrected, so be specific and never pad: 'not priced' is a good answer.\n"
         "Write reasons as plain facts with the comp's price, miles and date. No em dashes."
     )
     if not car.get("price"):
@@ -1530,6 +1697,13 @@ def suggest_offer(client, model: str, car: dict, comps: list[dict]) -> dict:
                       problem="Claude did not return an offer plan. Try again.")
     for key in ("reasons", "pushback"):
         data[key] = [_no_dashes(str(item)) for item in (data.get(key) or [])]
+    moves = []
+    for item in data.get("adjustments") or []:
+        if isinstance(item, dict) and str(item.get("factor") or "") in ("miles", "transmission", "colour", "options", "history"):
+            moves.append({"factor": str(item["factor"]), "effect": _no_dashes(str(item.get("effect") or "")).strip()[:40],
+                          "why": _no_dashes(str(item.get("why") or "")).strip()[:400]})
+    data["adjustments"] = moves
+    data["for"] = offer_basis(car)                 # what the car was when this was worked out
     return data
 
 
@@ -1542,13 +1716,23 @@ def _no_dashes(text: str) -> str:
 def draft_message(client, model: str, car: dict, comps: list[dict], offer_price: int,
                   buyer: str = "", channel: str = "text") -> str:
     seller = car.get("seller") or ""
+    best = cite_sales(car, comps)
+    rest = [comp for comp in comps if not any(comp is one for one in best)]
     prompt = (
         f"Write a short {channel} message from a buyer to the seller of this car, making an offer of "
-        f"{money(offer_price)}.\n\n{_car_block(car)}\n\nComps the buyer wants to cite:\n{_comps_block(comps)}\n\n"
+        f"{money(offer_price)}.\n\n{_car_block(car)}\n\n"
+        + (f"The sales nearest this car in miles and most recent, to cite first:\n{_comps_block(best)}\n\n" if best else "")
+        + (f"The buyer's other comps, for context:\n{_comps_block(rest)}\n\n" if rest else "") +
         "Rules:\n"
         "- Plain, friendly and direct. First person. Under 170 words.\n"
+        "- State the car's miles exactly as given above. If no miles are given, do not mention miles.\n"
         "- Cite up to three completed sales with price, miles, date and the link. Say they are sales, "
         "not asking prices. Cite an asking price only if there are fewer than two sales, and label it.\n"
+        "- Cite only sales that support this offer for this car: near it in miles, and recent. Leave out a sale "
+        "that is years old or far from this car's miles when a closer one exists, and never cite a sale well "
+        "above the offer without saying why it does not apply (far fewer miles, sold in a hotter market). If "
+        "even the nearest sales are far from this car's miles, say so in a few words.\n"
+        "- Write a date plainly ('Nov 2023'), without words like 'Ended'.\n"
         "- Say the buyer can move quickly and wants an inspection before closing.\n"
         "- For a dealer, ask for the out-the-door number with all fees.\n"
         "- Never use em dashes. Use commas, periods or parentheses.\n"
@@ -1571,7 +1755,10 @@ def template_message(car: dict, comps: list[dict], offer_price: int, buyer: str 
     seller = str(car.get("seller") or "").strip()
     is_dealer = (car.get("seller_type") or "") == "dealer"
     greeting = f"Hi {seller.split()[0]}," if seller and not is_dealer else "Hi,"
-    sold = [c for c in comps if c["status"] == "sold"][:3]
+    near = cite_sales(car, comps, 6)                       # nearest in miles and most recent
+    sold = [comp for comp in near if comp["price"] <= offer_price * 1.15][:3]     # a sale far above the offer argues the seller's case
+    if len(sold) < 2:
+        sold = near[:3]
     lines = [
         greeting, "",
         f"I'm interested in the {car_title(car)}"
@@ -1586,7 +1773,7 @@ def template_message(car: dict, comps: list[dict], offer_price: int, buyer: str 
                 bits.append(f"{comp['miles']:,} miles")
             line = f"- {', '.join(bits)}, sold for {money(comp['price'])}"
             if comp.get("date"):
-                line += f" ({comp['date']})"
+                line += f" ({plain_date(comp['date'])})"
             if comp.get("url"):
                 line += f": {comp['url']}"
             lines.append(line)

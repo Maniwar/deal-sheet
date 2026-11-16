@@ -5,3 +5,4 @@ pypdfium2>=5
 pandas>=2
 pillow>=10
 requests>=2.31
+zipcodes>=3

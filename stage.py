@@ -162,7 +162,35 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
     else:
         line = ""
     options = split_options(car.get("options"))
+    # what the offer was worked out for, and what has changed about the car since
+    basis, was = "", offer.get("for") if isinstance(offer.get("for"), dict) else {}
+    if was and (offer.get("open") or offer.get("target")):
+        miles = calc.to_int(was.get("miles"))
+        colours = " over ".join(part for part in (str(was.get("exterior") or ""), str(was.get("interior") or "")) if part)
+        count = calc.to_int(was.get("options")) or 0
+        basis = ", ".join([f"{miles:,} miles" if miles is not None else "miles not stated", colours or "colour not stated",
+                           f"{count} option{'s' if count != 1 else ''} listed" if count else "no options listed"])
+    moves = [{"factor": str(item.get("factor") or ""), "effect": str(item.get("effect") or ""), "why": str(item.get("why") or "")}
+             for item in offer.get("adjustments") or [] if isinstance(item, dict) and item.get("factor")]
+    # other listings of this model, priced from the same sales, beside this car
+    versions = []
+    for item in offer.get("versions") or []:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        fair, facts = calc.to_int(item.get("target")) or calc.to_int(item.get("open")), item.get("facts") if isinstance(item.get("facts"), dict) else {}
+        asked, gap = calc.to_int(facts.get("price")), ""
+        if fair and asked:
+            diff = asked - fair
+            gap = (f"Asking {money(asked)}: {money(diff)} over a fair deal" if diff > 250 else
+                   f"Asking {money(asked)}: {money(-diff)} under a fair deal" if diff < -250 else f"Asking {money(asked)}: about fair")
+        versions.append({"id": str(item["id"]), "label": str(item.get("label") or ""), "fair": money(fair) if fair else "",
+                         "open": money(item["open"]) if item.get("open") else "", "walk": money(item["walk_away"]) if item.get("walk_away") else "",
+                         "gap": gap, "at": str(item.get("at") or ""), "basis": str(item.get("basis") or ""),
+                         "moves": [{"factor": str(move.get("factor") or ""), "effect": str(move.get("effect") or ""), "why": str(move.get("why") or "")}
+                                   for move in item.get("adjustments") or [] if isinstance(move, dict)]})
     case = {
+        "versions": versions, "mine": {"label": calc.version_label(car, {}), "fair": money(target) if target else ""},
+        "basis": basis, "stale": calc.basis_moved(car, was) if basis else [], "moves": moves,
         "headline": headline, "sub": sub, "line": line, "reasons": reasons,
         "pushback": [split_pushback(str(item)) for item in offer.get("pushback") or []],
         "options": options, "msrp": money(car["msrp"]) if car.get("msrp") else "",
@@ -237,7 +265,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "sample": bool(flags.get("sample")), "hasCar": has_car,
         "edit": {field: ("" if car.get(field) in (None, "") else str(car.get(field))) for field in
                  ("year", "make", "model", "trim", "body", "transmission", "drivetrain", "miles", "price", "vin",
-                  "exterior", "interior", "seller", "location", "history")} if has_car else {},
+                  "exterior", "interior", "seller", "location", "history", "options")} if has_car else {},
         "title": calc.car_title(car) if has_car else "", "chips": chips,
         "seller": " · ".join(bit for bit in seller_bits if bit), "url": car.get("url") or "",
         "vin": calc.clean_vin(car.get("vin")) or str(car.get("vin") or "").strip(),
@@ -650,6 +678,27 @@ button.opt{cursor:pointer}
 /* short laptop windows: smaller headline so the whole screen still fits */
 @media (min-width:900px) and (max-height:780px){.title{font-size:40px}.verdict .num{font-size:50px}.head,.verdict{padding-top:6px}.stage{grid-template-rows:auto auto minmax(170px,1fr) auto auto auto}}
 @media (prefers-reduced-motion:reduce){.dot,.sheet,.gl{transition:none}}
+
+/* what the offer was worked out for, and what each detail of the car moved */
+.basis{margin-top:12px;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.1);font:400 13px/1.45 var(--sans);color:var(--ink)}
+.basis-k{font:500 10.5px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin-right:4px}
+.moves{margin-top:4px}
+.move{display:grid;grid-template-columns:70px minmax(0,1fr);gap:2px 10px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.08)}
+.mv-k{font:500 12.5px var(--sans);color:var(--mute)}
+.mv-e{font:500 13px var(--mono);color:var(--ink)}.mv-e.up{color:var(--warn)}.mv-e.down{color:var(--good,#5fd39a)}
+.mv-w{grid-column:2;font:400 12.5px/1.45 var(--sans);color:var(--mute)}
+.carfacts textarea.linkbox{min-height:84px;resize:vertical;font:400 14px/1.4 var(--sans)}
+
+/* other listings of the same model, priced beside this car */
+.vform{margin-top:10px}.vform select.linkbox{appearance:none;-webkit-appearance:none;height:44px}
+.vform textarea.linkbox{min-height:66px;resize:vertical;font:400 14px/1.4 var(--sans)}
+.versions{margin-top:14px;border-top:1px solid rgba(255,255,255,.1)}
+.ver{padding:11px 0;border-bottom:1px solid rgba(255,255,255,.08)}
+.ver-l{font:400 13px/1.4 var(--sans);color:var(--mute)}.ver-l b{font-weight:600;color:var(--ink);margin-right:4px}
+.ver-p{margin-top:2px;font:600 15px/1.35 var(--sans);color:var(--ink)}.ver-r{font:400 12px var(--sans);color:var(--dim);margin-left:4px}
+.ver-g{margin-top:2px;font:500 12.5px/1.4 var(--sans);color:var(--warn)}
+.ver-m{margin-top:3px;font:400 12px/1.4 var(--mono);color:var(--dim)}
+.ver-b{margin-top:6px;display:flex;gap:16px}
 """
 
 JS = r"""
@@ -717,7 +766,7 @@ function create(root) {
     if (!/^[0-9a-f]{16}$/.test(id)) { id = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join(""); try { localStorage.setItem("dealsheet.client", id); } catch (e) {} }
     return id;
   })();
-  const post = (name, value) => { if (["build", "more", "verify", "prefs", "reoffer"].includes(name) && value && typeof value === "object" && !Array.isArray(value)) value = { ...value, cid: CID }; S.outbox.push([name, value]); pump(); };
+  const post = (name, value) => { if (["build", "more", "verify", "prefs", "reoffer", "version"].includes(name) && value && typeof value === "object" && !Array.isArray(value)) value = { ...value, cid: CID }; S.outbox.push([name, value]); pump(); };
   const pump = () => { if (S.waiting || !S.outbox.length || !S.send) return; const [name, value] = S.outbox.shift(); S.waiting = true; clearTimeout(S.waitTimer); S.waitTimer = setTimeout(() => { S.waiting = false; pump(); }, 4000); S.send(name, value); };
 
   let toastTimer = 0;
@@ -752,10 +801,11 @@ function create(root) {
     if (b.dataset.add) { focusBar(); return; }
     if (!b.classList.contains("on")) { el.garage.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c === b)); S.switching = b.dataset.id; post("switch", b.dataset.id); }
   };
-  $(".gear").onclick = () => {
+  const openSettings = () => {
     const btn = document.querySelector('[data-testid="stExpandSidebarButton"]') || document.querySelector('[data-testid="stSidebarCollapsedControl"] button') || document.querySelector('[data-testid="stSidebarCollapsedControl"]');
     if (btn) btn.click();
   };
+  $(".gear").onclick = openSettings;
 
   /* the listing photo opens large; with no photo, the tile adds one; the missing-options chip opens the case */
   const photoPick = document.createElement("input"); photoPick.type = "file"; photoPick.accept = "image/*"; photoPick.hidden = true; root.appendChild(photoPick);
@@ -1010,7 +1060,32 @@ function create(root) {
       h += `<div class="lead-line">${esc(c.headline || "")}</div>${c.sub ? `<div class="lead-sub">${esc(c.sub)}</div>` : ""}`;
       /* the offer follows the car's miles, price and history on its own; this runs it by hand, after comps change */
       if ((d.comps || []).some((k) => k.use)) h += `<div><button type="button" class="btn ghost reoffer"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "offer" ? "Working it out" : (d.offer.open || d.offer.target) ? "Work out the offer again" : "Work out an offer"}</button></div>` +
-        liveLog(S.moreBusy === "offer") + '<div class="tiny">It runs by itself when you change the miles, the asking price or the history. Tap it after you change which sales are counted or find more.</div>';
+        liveLog(S.moreBusy === "offer") + '<div class="tiny">It runs by itself when you change the miles, the colour, the options, the asking price or the history in Car details. Tap it after you change which sales are counted or find more.</div>';
+      /* what the numbers were worked out for, so a wrong detail is seen and fixed */
+      if (c.basis) h += `<div class="basis"><span class="basis-k">Worked out for</span> ${esc(c.basis)}. <button type="button" class="textbtn tocar">Change</button></div>` +
+        ((c.stale || []).length ? `<div class="c-flag">The car's ${esc(c.stale.join(" and "))} ${c.stale.length > 1 ? "have" : "has"} changed since. Tap Work out the offer again.</div>` : "");
+      if ((c.moves || []).length) h += '<h3>What this car\'s details change</h3><div class="moves">' + c.moves.map((m) =>
+        `<div class="move"><span class="mv-k">${esc(m.factor.charAt(0).toUpperCase() + m.factor.slice(1))}</span><span class="mv-e${/^\+/.test(m.effect) ? " up" : /^[-−]/.test(m.effect) ? " down" : ""}">${esc(m.effect)}</span><span class="mv-w">${esc(m.why)}</span></div>`).join("") + "</div>";
+      /* another listing of the same model: change the details, price it from the same sales */
+      if ((d.comps || []).some((k) => k.use) && (d.offer.open || d.offer.target)) {
+        const e = d.edit || {}, v = S.vform || (S.vform = { miles: "", price: "", gear: "", exterior: "", options: e.options || "" });
+        const busy = S.moreBusy === "version";
+        h += '<h3>Price another listing</h3><div class="tiny">Looking at another one of these? Put in what is different about it and it is priced from the sales you already have. A different gearbox is searched for first, since those are different sales. Leave a box empty to keep this car\'s value.</div>' +
+          `<form class="carform vform"><label class="fld"><span>Miles</span><input class="linkbox" name="miles" inputmode="numeric" autocomplete="off" placeholder="${esc(e.miles || "")}" value="${esc(v.miles)}"></label>` +
+          `<label class="fld"><span>Its asking price</span><input class="linkbox" name="price" inputmode="numeric" autocomplete="off" placeholder="optional" value="${esc(v.price)}"></label>` +
+          `<label class="fld"><span>Gearbox</span><select class="linkbox" name="gear"><option value=""${v.gear ? "" : " selected"}>Same as this car</option><option value="Manual"${v.gear === "Manual" ? " selected" : ""}>Manual</option><option value="Automatic"${v.gear === "Automatic" ? " selected" : ""}>Automatic</option></select></label>` +
+          `<label class="fld"><span>Colour</span><input class="linkbox" name="exterior" autocomplete="off" placeholder="${esc(e.exterior || "")}" value="${esc(v.exterior)}"></label>` +
+          `<label class="fld wide"><span>Its options, one to a line</span><textarea class="linkbox" name="options" rows="3" autocomplete="off">${esc(v.options)}</textarea></label>` +
+          `<button type="submit" class="btn"${S.moreBusy ? " disabled" : ""}>${busy ? "Pricing it" : "Price it"}</button></form>` + liveLog(busy);
+        const rows = c.versions || [];
+        if (rows.length) h += '<div class="versions">' +
+          `<div class="ver mine"><div class="ver-l"><b>This car</b> ${esc(c.mine.label)}</div><div class="ver-p">${c.mine.fair ? "Fair deal " + esc(c.mine.fair) : ""}</div></div>` +
+          rows.slice().reverse().map((r) => `<div class="ver"><div class="ver-l">${esc(r.label)}</div><div class="ver-p">${r.fair ? "Fair deal " + esc(r.fair) : "No price"}${r.open && r.walk ? ` <span class="ver-r">open ${esc(r.open)}, most ${esc(r.walk)}</span>` : ""}</div>` +
+            (r.gap ? `<div class="ver-g">${esc(r.gap)}</div>` : "") +
+            (r.basis ? `<div class="ver-m">${esc(r.basis)}</div>` : "") +
+            ((r.moves || []).length ? `<div class="ver-m">${r.moves.filter((m) => !/^(no change|not priced)$/i.test(m.effect)).map((m) => `${esc(m.factor.charAt(0).toUpperCase() + m.factor.slice(1))} ${esc(m.effect)}`).join(" · ") || "Nothing about it moves the price against the sales"}</div>` : "") +
+            `<div class="ver-b"><button type="button" class="textbtn veruse" data-id="${esc(r.id)}">Make this the car</button><button type="button" class="textbtn verdrop" data-id="${esc(r.id)}">Remove</button></div></div>`).join("") + "</div>";
+      }
       if ((c.reasons || []).length) h += "<h3>The evidence</h3>" + c.reasons.map((r, i) => `<div class="ev"><span class="n">${i + 1}</span><span class="t">${esc(r.text)}</span>${(r.links || []).filter((l) => safeUrl(l.url)).map((l) => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} ${ARROW}</a>`).join("")}</div>`).join("");
       h += "<h3>Options</h3>";
       const have = (c.options || []).length > 0;
@@ -1051,8 +1126,9 @@ function create(root) {
           return n ? `<div class="tiny endednote">${n} listing${n === 1 ? " that has" : "s that have"} sold or gone ${n === 1 ? "is" : "are"} under the Sold tab. <button type="button" class="textbtn toended">Show ${n === 1 ? "it" : "them"}</button></div>` : ""; })();
       const tools = (nSale ? `<button type="button" class="btn ghost verify"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "verify" ? "Opening each page" : "Check they are still for sale"}</button> ` : "") +
         `<button type="button" class="btn ghost more" data-kind="sale"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sale" ? "Searching" : "Search for more cars for sale"}</button>`;
-      h = (nSale ? '<div class="lead-sub">Other cars you could buy today, from live auctions, classifieds, dealers and the big listing sites (Cars.com, CarGurus, Autotrader, Edmunds). Asking prices sit above what cars sell for, so use these as alternatives and leverage, not as the price.</div>'
-        : '<div class="lead-sub">No cars for sale found yet. The search covers live auctions, enthusiast classifieds and dealers.</div>') +
+      h = (nSale ? '<div class="lead-sub">Other cars you could buy today, from live auctions, classifieds, dealers and the big listing sites (Cars.com, CarGurus, Autotrader, Edmunds, TrueCar), eBay Motors and Craigslist. Asking prices sit above what cars sell for, so use these as alternatives and leverage, not as the price.</div>'
+        : '<div class="lead-sub">No cars for sale found yet. The search covers live auctions, classifieds, dealers, the big listing sites, eBay Motors and Craigslist.</div>') +
+        ((d.prefs && d.prefs.zip) ? "" : '<div class="tiny">Craigslist is searched one area at a time. Add your ZIP code in Settings and each search also reads Craigslist around you. <button type="button" class="textbtn tozip">Open Settings</button></div>') +
         keyAsk + `<div>${tools}</div>` + liveLog(S.moreBusy === "sale" || S.moreBusy === "verify") + (nSale ? sorter : "") + rows + byHand("sale");
     } else if (S.tab === "message") {
       const chan = S.msgChannel || "text";
@@ -1064,10 +1140,11 @@ function create(root) {
         : `<div class="lead-line">Send the seller your offer</div><div class="lead-sub">A short message with your offer and the sales that back it up. You can edit it here before you copy it.</div>${keyAsk}${kind}${write}${liveLog(S.msgBusy === "claude")}`;
     } else if (S.tab === "car") {
       const e = d.edit || {};
-      const fields = [["year", "Year", 1], ["make", "Make"], ["model", "Model"], ["trim", "Trim"], ["body", "Body style"], ["transmission", "Transmission"], ["drivetrain", "Drivetrain"], ["miles", "Miles", 1], ["price", "Asking price", 1], ["vin", "VIN"], ["exterior", "Exterior color"], ["interior", "Interior color"], ["seller", "Seller"], ["location", "Location"], ["history", "Accident and title history"]];
+      const fields = [["miles", "Miles", 1], ["price", "Asking price", 1], ["exterior", "Exterior color"], ["interior", "Interior color"], ["year", "Year", 1], ["make", "Make"], ["model", "Model"], ["trim", "Trim"], ["body", "Body style"], ["transmission", "Transmission"], ["drivetrain", "Drivetrain"], ["vin", "VIN"], ["seller", "Seller"], ["location", "Location"], ["history", "Accident and title history"]];
       h = d.hasCar
-        ? `<div class="lead-line">Car details</div><div class="lead-sub">Fix anything the listing got wrong. Comps are matched to the year, model, trim and body style.</div><form class="carform carfacts">` +
+        ? `<div class="lead-line">Car details</div><div class="lead-sub">Fix anything the listing got wrong. Change the miles, the colours, the options, the asking price or the history and the offer and the message are worked out again for the car as it is. Comps are matched to the year, model, trim and body style.</div><form class="carform carfacts">` +
           fields.map(([k, label, num]) => `<label class="fld${k === "history" || k === "vin" ? " wide" : ""}"><span>${label}</span><input class="linkbox" name="${k}" value="${esc(e[k] || "")}" autocomplete="off"${num ? ' inputmode="numeric"' : ""}${k === "vin" ? ' autocapitalize="characters" spellcheck="false"' : ""}></label>`).join("") +
+          `<label class="fld wide"><span>Options, one to a line</span><textarea class="linkbox" name="options" rows="4" autocomplete="off">${esc(e.options || "")}</textarea></label>` +
           `<button type="submit" class="btn">Save</button></form>` +
           `<div class="dropzone"><button type="button" class="btn ghost dropcar">${d.sample ? "Remove the sample car" : "Remove this car from the garage"}</button></div>`
         : '<div class="lead-sub">Add a car first: paste a listing link or a screenshot in the bar on the main screen, or just name the car.</div>';
@@ -1103,7 +1180,7 @@ function create(root) {
     if (facts) facts.onsubmit = (e) => {
       e.preventDefault();
       const was = S.d.edit || {}, out = {};
-      for (const box of facts.querySelectorAll("input")) { const v = box.value.trim(); if (v !== (was[box.name] || "")) out[box.name] = v; }
+      for (const box of facts.querySelectorAll("input, textarea")) { const v = box.value.trim(); if (v !== (was[box.name] || "").trim()) out[box.name] = v; }
       if (!Object.keys(out).length) { toast("Nothing was changed."); return; }
       const go = facts.querySelector("button"); go.disabled = true; go.textContent = "Saving";
       post("car", { ...out, at: Date.now() });
@@ -1112,6 +1189,28 @@ function create(root) {
     if (leftout) leftout.ontoggle = () => { S.outOpen = leftout.open; };
     const endedfold = el.sheetBody.querySelector(".endedfold");
     if (endedfold) endedfold.ontoggle = () => { S.endOpen = endedfold.open; };
+    const vform = el.sheetBody.querySelector(".vform");
+    if (vform) {
+      vform.oninput = () => { const v = S.vform || (S.vform = {}); for (const box of vform.querySelectorAll("input, select, textarea")) v[box.name] = box.value; };
+      vform.onsubmit = (e) => {
+        e.preventDefault();
+        const v = S.vform || {}, was = S.d.edit || {}, facts = {};
+        if ((v.miles || "").trim()) facts.miles = v.miles.trim();
+        if ((v.price || "").trim()) facts.price = v.price.trim();
+        if (v.gear) facts.transmission = v.gear;
+        if ((v.exterior || "").trim()) facts.exterior = v.exterior.trim();
+        if ((v.options || "").trim() !== (was.options || "").trim()) facts.options = (v.options || "").trim();
+        if (!Object.keys(facts).length) { toast("Change at least one thing about it first: its miles, gearbox, colour or options."); return; }
+        if (!S.d.connected) { needKey(".vform button[type=submit]"); return; }
+        S.moreBusy = "version"; S.busyAt = Date.now(); S.log = []; keep(); post("version", { kind: "price", facts, at: Date.now() }); paintRefresh();
+      };
+    }
+    el.sheetBody.querySelectorAll(".verdrop").forEach((b) => { b.onclick = () => post("version", { kind: "drop", id: b.dataset.id }); });
+    el.sheetBody.querySelectorAll(".veruse").forEach((b) => { b.onclick = () => { S.vform = null; post("version", { kind: "use", id: b.dataset.id, at: Date.now() }); }; });
+    const tozip = el.sheetBody.querySelector(".tozip");
+    if (tozip) tozip.onclick = () => { closeSheet(); openSettings(); };
+    const tocar = el.sheetBody.querySelector(".tocar");
+    if (tocar) tocar.onclick = () => { S.tab = "car"; renderSheet(); const box = el.sheetBody.querySelector('.carfacts [name="miles"]'); if (box) box.focus({ preventScroll: true }); };
     const toended = el.sheetBody.querySelector(".toended");
     if (toended) toended.onclick = () => { S.tab = "comps"; S.endOpen = true; renderSheet(); const f = el.sheetBody.querySelector(".endedfold"); if (f) el.sheetBody.scrollTop = Math.max(0, f.offsetTop - 70); };
     /* count a sale in the typical price, or leave it out */
