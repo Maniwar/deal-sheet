@@ -8,6 +8,12 @@ API key is needed:
 | `fake_api.py` | The Anthropic API: searches, opened pages, the offer and the message. Keys ending in `oldfetch`, `nofetch`, `blockfetch`, `nocg`, `noads` and `lists1` play a key with an older page reader, none, one every site turns away, a search tool that cannot be limited to a site, and a second run with changed prices. |
 | `site.py` | Car listing pages: live, sold, redirected, blocked by robots.txt, another car's VIN, and so on. |
 | `fake_vin.py`, `fake_skfb.py` | The VIN decoder and the 3D model search. |
+| `fake_db.py` | The garage store (the two functions of `tools/garage_store.sql`), kept in memory. Only the `shared` and `cutshort_shared` tests start the app with it. |
+
+`shared.js` plays two devices with one key (the car appears on the second with no search, the newer copy
+wins, a removed car stays removed, another key sees nothing, the store goes down and comes back).
+`cutshort.js` starts the app so that it waits before drawing a car it has just loaded, and taps the page
+meanwhile: the car must survive a run that is cut short.
 
 The tests (`*.js`) each print what they saw and end with an `errors:` line. `judge_test.py` and
 `judge_real.py` are unit tests of how a listing page's wording is read (for sale, sold, gone).

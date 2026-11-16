@@ -29,6 +29,7 @@ import sheet
 import showcase
 import stage
 import styles
+import sync
 
 
 def refresh_modules() -> None:
@@ -187,6 +188,81 @@ def export_deal(deal: dict) -> dict:
 
 # ---------------------------------------------------------------- the garage: the cars in this session
 
+PLAIN_KEYS = ("car", "comps", "offer", "summary", "message")
+
+
+def plain(deal: dict) -> dict:
+    """A car as it is kept, in the browser and in the garage store: its facts, without the photos (those stay
+    with the browser that loaded them)."""
+    return {key: deal.get(key) for key in PLAIN_KEYS}
+
+
+def sync_conf() -> tuple[str, str]:
+    """Where the garage store is and the key for it, or ('', '') when this copy of the app has none."""
+    return sync.settings(secret("DEALSHEET_DB_URL"), secret("DEALSHEET_DB_KEY"))
+
+
+def sync_garage() -> str:
+    """The id of the shared garage for the API key in use, or '' when there is no store or no key yet."""
+    ss = st.session_state
+    return sync.garage_id(ss.get("api_key") or "") if sync_conf()[0] else ""
+
+
+def sync_note() -> str:
+    """One line for Settings on how the shared garage stands."""
+    if not sync_garage():
+        return "Connect your key and the cars you keep on your other devices appear here too."
+    state = sync.status(sync_garage())
+    if state["error"]:
+        return (f"Not saving just now: {state['error']}. Your cars are safe in this browser and are sent again "
+                "when it is back.")
+    ago = int(time.time() - state["saved"]) if state["saved"] else -1
+    when = (" Saving now." if state["waiting"] else "" if ago < 0 else " Last saved just now." if ago < 90
+            else f" Last saved {ago // 60} min ago." if ago < 5400 else f" Last saved {ago // 3600} h ago.")
+    return "On. Every device that uses this API key shows the same cars. Photos stay with the browser that loaded them." + when
+
+
+def sync_pull() -> None:
+    """Bring this device's garage and the shared one together, once for each garage a session uses.
+
+    Cars the store holds and this device does not are added; a car the store holds a newer copy of replaces
+    the one here; a car removed on another device after this copy last changed is taken out. Anything newer
+    here is left for the end of the run, which saves it up. A store that cannot be reached changes nothing:
+    the browser's copy carries on, and the problem is shown in Settings.
+    """
+    ss = st.session_state
+    garage_id = sync_garage()
+    if not garage_id or ss["sync_pulled"] == garage_id:
+        return
+    if ss["sync_pulled"]:                             # another key, so another garage: what is here is saved into it afresh
+        ss["car_sent"], ss["car_gone"] = {}, {}
+    ss["sync_pulled"] = garage_id
+    try:
+        rows = sync.load(sync_conf(), garage_id)
+    except sync.SyncError as exc:
+        sync.note_problem(garage_id, str(exc))
+        ss["notices"] = (ss.get("notices") or []) + [
+            "The shared garage could not be reached, so this device shows only the cars it holds itself. "
+            "Settings has a button to try again."]
+        return
+    local = {car_id: {"at": ss["car_at"].get(car_id, 0)} for car_id, deal in ss["garage"].items()
+             if not deal.get("sample") and not is_blank(deal)}
+    plan = sync.merge(local, rows)
+    ss["car_gone"].update(plan["gone"])
+    for car_id, deal in plan["add"]:
+        queue({"add": {**EMPTY_DEAL, **{key: deal.get(key) for key in PLAIN_KEYS if deal.get(key) is not None},
+                       "sample": False, "_id": car_id, "at": deal["at"]}, "from_file": True, "synced": True})
+    for car_id, deal in plan["put"]:
+        queue({"put": {"id": car_id, "deal": {key: deal.get(key) for key in PLAIN_KEYS}, "at": deal["at"]}})
+    for car_id in plan["drop"]:
+        queue({"forget": car_id})
+    for row in rows:                                  # the same copy here and there: nothing to send
+        if not row["deleted"] and row["car_id"] in local and abs(row["at"] - local[row["car_id"]]["at"]) < 0.001:
+            ss["car_same"].add(row["car_id"])
+    if plan["add"] or plan["put"] or plan["drop"]:
+        ss["build_seq"] += 1
+
+
 def queue(action: dict) -> None:
     """Ask for a garage change. It is applied at the end of the run, after this car's edits are saved."""
     st.session_state.setdefault("_garage_actions", []).append(action)
@@ -207,6 +283,8 @@ def run_garage_actions(actions: list[dict]) -> None:
         garage.pop(car_id, None)
         if car_id in order:
             order.remove(car_id)
+        for kept in ("car_at", "car_hash", "car_sent"):
+            ss[kept].pop(car_id, None)
 
     def same_car(deal: dict) -> str:
         """The id of a garage car with the same details and comps, if there is one."""
@@ -217,29 +295,57 @@ def run_garage_actions(actions: list[dict]) -> None:
         wanted = mark(deal)
         return next((c for c in order if mark(garage[c]) == wanted), "")
 
-    def add(deal: dict, from_file: bool = False) -> None:
+    def add(deal: dict, from_file: bool = False, synced: bool = False) -> None:
         if not deal.get("sample") and ss.get("hide_sample"):     # the sample was removed once: it stays out of the way
             for car_id in [c for c in order if garage[c].get("sample")]:
                 drop(car_id)
+        kept_id = str(deal.pop("_id", "") or "")           # a car brought back from the browser or the store keeps its id
+        at = float(deal.pop("at", 0) or 0)                 # ... and the time it last changed
+        if not re.fullmatch(r"[0-9a-f]{6,16}", kept_id):
+            kept_id = ""
+        if from_file and kept_id:
+            if ss["car_gone"].get(kept_id, -1.0) >= at:    # removed on another device after this copy last changed
+                return
+            if kept_id in garage:                          # the browser and the store both hold it: the newer copy stays
+                if at > ss["car_at"].get(kept_id, 0):
+                    garage[kept_id] = {**garage[kept_id], **deal}
+                    ss["car_at"][kept_id] = at
+                    ss["car_hash"].pop(kept_id, None)
+                ss["active"] = kept_id
+                return
         if from_file and same_car(deal):              # already here: show it instead of adding a copy
             ss["active"] = same_car(deal)
             return
-        kept_id = str(deal.pop("_id", "") or "")           # a car brought back from the browser keeps its id
-        car_id = kept_id if re.fullmatch(r"[0-9a-f]{6,16}", kept_id) and kept_id not in garage else uuid.uuid4().hex[:8]
+        car_id = kept_id if kept_id and kept_id not in garage else uuid.uuid4().hex[:8]
         steps = deal.pop("log", None)                      # every step of the search that built it, to read back later
         if steps:
             ss.setdefault("logs", {})[car_id] = list(steps)[-200:]
         garage[car_id] = deal
         order.append(car_id)
         ss["active"] = car_id
+        ss["car_at"][car_id] = at if from_file else time.time()      # one made here changed just now
+        if synced:                                    # straight from the store: nothing to send back
+            ss["car_hash"][car_id] = ss["car_sent"][car_id] = sync.digest(plain(deal))
         if not deal.get("sample"):
             ss["fresh"] = False                       # there is now something worth keeping on the device
 
     opened: list[str] = []
     for action in actions:
         if "add" in action:
-            add(action["add"], bool(action.get("from_file")))
-            opened.append(ss["active"])
+            before = ss["active"]
+            add(action["add"], bool(action.get("from_file")), bool(action.get("synced")))
+            if action.get("synced"):
+                ss["active"] = before if before in garage and not is_blank(garage[before]) and not garage[before].get("sample") else ss["active"]
+            else:
+                opened.append(ss["active"])
+        elif "put" in action:                         # a newer copy of a car, from the garage store
+            new = action["put"]
+            if new["id"] in garage:
+                garage[new["id"]] = {**garage[new["id"]], **new["deal"]}
+                ss["car_at"][new["id"]] = float(new["at"])
+                ss["car_hash"][new["id"]] = ss["car_sent"][new["id"]] = sync.digest(plain(garage[new["id"]]))
+        elif "forget" in action:                      # removed on another device: gone here too, with nothing to send
+            drop(action["forget"])
         elif "show_opened" in action:                 # after restoring: go back to the car that was on screen
             index = calc.to_int(action["show_opened"]) or 0
             if opened:
@@ -253,7 +359,12 @@ def run_garage_actions(actions: list[dict]) -> None:
         elif action.get("switch") in garage:
             ss["active"] = action["switch"]
         elif "remove" in action:
-            drop(action["remove"])
+            gone, entry = action["remove"], garage.get(action["remove"]) or {}
+            real = bool(entry) and not entry.get("sample") and not is_blank(entry)
+            drop(gone)
+            if real and sync_garage():                # leave a marker, so another device's older copy does not bring it back
+                ss["car_gone"][gone] = time.time()
+                sync.save_later(sync_conf(), sync_garage(), gone, None, True, ss["car_gone"][gone])
     if ss.get("hide_sample") and len(order) > 1:           # removed once, so it does not come back beside real cars
         for car_id in [c for c in order if garage[c].get("sample")]:
             drop(car_id)
@@ -712,6 +823,13 @@ def init_state() -> None:
     ss["notices"] = []
     ss["build_seq"] = 0          # goes up after every build, so the screen knows the answer has arrived
     ss["fresh"] = True           # a new session: the browser may hold a garage to bring back
+    ss["car_at"] = {}            # car id -> when it last changed (seconds since 1970; 0 when not known)
+    ss["car_hash"] = {}          # car id -> fingerprint of its facts when last looked at, to notice a change
+    ss["car_sent"] = {}          # car id -> fingerprint of what the garage store was last sent
+    ss["car_gone"] = {}          # car id -> when it was removed, here or on another device
+    ss["car_same"] = set()       # cars the store already holds exactly as they are here
+    ss["sync_pulled"] = ""       # the shared garage this session has been brought together with
+    ss["sync_retry"] = 0.0       # when a failed save was last tried again
     ss["prefs_asked"] = False    # ... and settings
     ss["key_forgotten"] = False
     sample = load_sample()
@@ -857,6 +975,35 @@ PREF_NUMBERS = {"tax_rate": (float, 0.0, 15.0), "fees": (float, 0.0, 1e7), "apr"
 PREF_SWITCHES = ("want_photos", "detailed_car", "hide_sample")
 PREFS_VERSION = 2                    # 2: Haiku became the default model
 OLD_DEFAULT_MODEL = "Sonnet 5.5 (balanced)"
+
+# The fields on the page that the app also fills in itself: the car, the offer, the message and the settings.
+HELD_FIELDS = tuple(f"car_{field}" for field in CAR_FIELDS) + (
+    "offer_open", "offer_target", "offer_walk", "offer_shown", "reasons_text", "pushback_text", "message_text",
+    "buyer", "buyer_zip", "model_label", "qr_label", "want_photos", "detailed_car", *PREF_NUMBERS)
+
+
+def fields_now() -> dict:
+    ss = st.session_state
+    return {key: ss.get(key) for key in HELD_FIELDS}
+
+
+def restore_held_fields() -> dict:
+    """Put back what an unfinished run had filled in, and return the fields as this run starts with them.
+
+    A run can be cut short by the next tap or message from the page before it has drawn the fields. The browser
+    then sends back what it still shows, and that replaces what the unfinished run had filled in: a car just
+    loaded would be lost, and the car that was on screen before it would be saved under its name. So whatever a
+    run fills in is held until a run has drawn the fields.
+    """
+    ss = st.session_state
+    for key, value in ss.setdefault("_held", {}).items():
+        ss[key] = value
+    return fields_now()
+
+
+def hold_filled_fields(before: dict) -> None:
+    """Hold every field this run has filled in so far (see restore_held_fields)."""
+    st.session_state["_held"].update({key: value for key, value in fields_now().items() if value != before.get(key)})
 
 
 def current_prefs() -> dict:
@@ -1608,6 +1755,7 @@ def handle_stage_requests(progress_slot) -> None:
         else:
             ss["key_error"] = note
         ss.pop("_key_try", None)
+    sync_pull()                                       # the cars kept for this key on other devices, once the key is known
     request = ss.get("_restore")
     if request:
         cars = [c for c in (request.get("cars") or []) if isinstance(c, dict) and isinstance(c.get("car"), dict)
@@ -1650,11 +1798,15 @@ def handle_stage_requests(progress_slot) -> None:
             start_job(jobs.Job("build", build, asked=text or "From your screenshot"))
 
 init_state()
+fields_before = restore_held_fields()
 progress_slot = st.empty()
 handle_stage_requests(progress_slot)
 if my_job() is not None and not my_job().done:
     draw_job(progress_slot, my_job())
 apply_pending()
+hold_filled_fields(fields_before)
+if os.environ.get("DEALSHEET_DRAW_WAIT") and fields_now() != fields_before:
+    time.sleep(float(os.environ["DEALSHEET_DRAW_WAIT"]))     # for the tests: room for the page to cut this run short
 ss = st.session_state
 
 # ----- sidebar: settings -----
@@ -1680,6 +1832,15 @@ with st.sidebar:
     elif calc.zip_place(ss.get("buyer_zip")):
         st.caption("Craigslist is read within 250 miles of {}, {}.".format(*calc.zip_place(ss["buyer_zip"])))
 
+    sync_slot = None
+    if sync_conf()[0]:                                # this copy of the app has a garage store
+        st.markdown("### Shared garage")
+        sync_slot = st.empty()                    # filled at the end of the run, once this run's saves are on their way
+        if sync_garage():
+            if st.button("Get the latest from my other devices", width="stretch",
+                         help="Cars are brought together when the app opens. Use this when another device changed something while this one was open."):
+                ss["sync_pulled"] = ""
+                st.rerun()
     st.markdown("### Money")
     st.number_input("Sales tax %", min_value=0.0, max_value=15.0, step=0.25, key="tax_rate")
     st.number_input("Dealer fees $", min_value=0.0, step=50.0, key="fees")
@@ -2033,6 +2194,7 @@ with tab_sheet:
             st.rerun()
         st.text_area("Message", key="message_text", height=280, label_visibility="collapsed",
                      placeholder="Your offer message appears here. Edit it before you send it.")
+ss["_held"] = {}                                 # every field is drawn: the browser now shows what was filled in
 
 # ----- the garage: remember this car -----
 own_photo = uploaded_photo or ss["auto_photo"]
@@ -2042,11 +2204,6 @@ ss["garage"][ss["active"]] = {
     "photos": {comp["img"]: ss["comp_photos"][comp["img"]] for comp in comps if comp.get("img") in ss["comp_photos"]},
 }
 this_car = export_deal(ss["garage"][ss["active"]])
-
-
-def plain(deal: dict) -> dict:
-    """A car as the browser keeps it: its facts, without the photos (those travel separately)."""
-    return {key: deal.get(key) for key in ("car", "comps", "offer", "summary", "message")}
 
 
 def short_name(deal_car: dict) -> str:
@@ -2060,7 +2217,31 @@ for car_id in ss["garage_order"]:
     garage_chips.append({"id": car_id, "active": car_id == ss["active"],
                          "label": ("Sample: " if entry.get("sample") else "") + short_name(entry.get("car") or {})})
     if not entry.get("sample") and not is_blank(entry):      # a blank car is not worth keeping on the device
-        kept.append({"id": car_id, "deal": plain(entry)})
+        facts = plain(entry)
+        mark = sync.digest(facts)
+        if car_id in ss["car_hash"] and ss["car_hash"][car_id] != mark:
+            ss["car_at"][car_id] = time.time()               # something about it changed here, just now
+        ss["car_hash"][car_id] = mark
+        kept.append({"id": car_id, "deal": {**facts, "at": ss["car_at"].get(car_id) or 0}})
+
+# ----- the shared garage: send up whatever is newer here -----
+shared = sync_garage()
+if shared and ss["sync_pulled"] == shared and not ss.get("_garage_actions"):
+    state = sync.status(shared)
+    if state["error"] and not state["waiting"] and time.time() - ss["sync_retry"] > float(os.environ.get("DEALSHEET_SYNC_RETRY", "60")):
+        ss["car_sent"], ss["sync_retry"] = {}, time.time()   # the last save failed: send everything again, at most once a minute
+    for item in kept:
+        car_id, mark = item["id"], ss["car_hash"][item["id"]]
+        if car_id in ss["car_same"]:                         # the store holds this very copy already
+            ss["car_same"].discard(car_id)
+            ss["car_sent"].setdefault(car_id, mark)
+        if ss["car_sent"].get(car_id) != mark:
+            ss["car_at"][car_id] = ss["car_at"].get(car_id) or time.time()    # an older copy with no time on it counts from now
+            item["deal"]["at"] = ss["car_at"][car_id]
+            sync.save_later(sync_conf(), shared, car_id, plain(item["deal"]), False, ss["car_at"][car_id])
+            ss["car_sent"][car_id] = mark
+if sync_slot is not None:
+    sync_slot.caption(sync_note())
 has_real_car = any((ss["garage"][c].get("car") or {}).get("make") or (ss["garage"][c].get("car") or {}).get("model")
                    for c in ss["garage_order"] if not ss["garage"][c].get("sample"))
 if has_real_car:

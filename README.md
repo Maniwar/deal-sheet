@@ -112,7 +112,8 @@ what that car has been selling for and gives you a typical sale price, the comps
   opens the full list of searches that were run.
 - **Garage.** Each car you add is a chip at the top. Tap one to switch. The sample car stays until
   you remove it; **Remove this car** is at the bottom of Car details. Cars are saved in this
-  browser on this device, so a phone and a computer each have their own garage.
+  browser on this device. With the shared garage set up (see "One garage on every device"), a
+  phone and a computer that use the same key show the same cars.
 - **Edit and print**, below the main screen: correct any detail of the car, the comps or the offer
   by hand, and make the PDF. The PDF prints every link in full beside a large QR code. The seller
   copy leaves out your target, walk-away price and notes.
@@ -232,6 +233,10 @@ of the screen; a link beside it opens the Claude Console keys page
 - **A blank car is only a place to start.** When the garage is empty the app shows one blank
   car. It is never saved to the device or brought back, it goes as soon as it is not the car on
   screen and a real car exists, and it has a cross of its own whenever there is another car.
+- **A car being loaded is never lost to the next tap.** A run that is cut short by another tap,
+  before it has drawn the car it was loading, keeps what it had filled in and draws it on the
+  next run. Before this, the fields still showing in the browser could replace the car being
+  loaded, and the car that had been on screen was then saved under its name.
 - **Saving to the device is careful.** The garage is saved only from a settled page, never from
   the pass that is about to add, switch or remove cars. Saves run one at a time, in order. A car
   is deleted from the device only if this page had it and no longer does, so a second tab of the
@@ -243,9 +248,35 @@ Everything except the Claude features works without a key.
 
 Your cars (with their comps, offers and photos) and your settings (tax, fees, loan terms, your first
 name, the model and the search limit) are saved in the browser you used, and come back when you
-reopen the app there. Removing a car removes its saved copy. Nothing is stored on a server.
-To move your cars to another device or keep a backup, save the garage to a file from the settings
-panel and open that file on the other device.
+reopen the app there. Removing a car removes its saved copy. Unless the shared garage below is set
+up, nothing is stored on a server. To move your cars to another device by hand or keep a backup,
+save the garage to a file from the settings panel and open that file on the other device.
+
+## One garage on every device
+
+Optional. Give the app a small database and every device that uses the same API key shows the same
+cars, with no searches run again.
+
+- **What is kept there.** Each car's details, comps, offer, summary and message. Never the API
+  key, and no photos: a photo stays with the browser that loaded it, and the other devices load
+  their own from the listing.
+- **Whose garage.** A garage is named by a one-way hash of your API key, so only a device holding
+  that key can name it, and the key itself cannot be worked back from the name. Change the key
+  and the devices start a new shared garage from the cars they hold.
+- **When devices are brought together.** When the app opens, and when you tap **Get the latest
+  from my other devices** in Settings. A change made here is saved as it happens. A device left
+  open does not watch for changes made elsewhere: use the button, or reload.
+- **Which copy wins.** The one changed last. A car removed on one device is removed on the
+  others the next time they are brought together, unless it was changed there after the removal.
+  Cars added separately on two devices before they are brought together are both kept.
+- **If the database cannot be reached** the app carries on from the browser's copy, Settings says
+  so, and what was missed is sent on a later tap once it is back.
+
+To set it up: run `tools/garage_store.sql` once in a Supabase project (SQL editor), then add the
+project's address and its publishable key to the app's secrets as `DEALSHEET_DB_URL` and
+`DEALSHEET_DB_KEY`. The table cannot be read or written directly; the only way in is two functions
+that need a garage's name, and they limit a car's size, the cars in a garage and the size of the
+table. Without those two secrets the app works as before, one garage per browser.
 
 ## Links, screenshots and names
 
@@ -293,6 +324,7 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
 2. Create an app on Streamlit Community Cloud that points at `app.py`.
 3. No secrets are required. Visitors paste their own key.
 4. Optional: set `APP_PASSWORD` in the app's Secrets box to put a password in front of the app.
+5. Optional: set `DEALSHEET_DB_URL` and `DEALSHEET_DB_KEY` for one garage on every device (above).
 
 ## What to expect from the web research
 
@@ -441,10 +473,11 @@ To bundle another model with the app, put a `.glb` in `static/models/`, add it t
 | `llm.py` | Claude calls: read a listing, research comps, suggest an offer, draft a message |
 | `sheet.py` | Builds the PDF and its QR codes |
 | `calc.py` | Money math, comp helpers and the direct-link check |
+| `sync.py` | The shared garage: loads and saves cars in the garage store, and decides which copy of a car stays |
 | `styles.py` | The stylesheet for the Streamlit widgets |
 | `sample_deal.json` | The sample car (2020 911 Carrera S, researched Nov 14, 2026) |
 | `static/` | Fonts, three.js with its glTF loader, and the 3D model in `static/models/` |
-| `tools/` | The script that prepared the 3D model from the original file |
+| `tools/` | The script that prepared the 3D model from the original file, and `garage_store.sql`, which sets up the shared garage's table |
 | `tools/stage/` | The main screen's own source: its Python head, HTML, CSS and JavaScript. `python tools/stage/build.py` checks the JavaScript and writes `stage.py` from them. Edit these, never `stage.py` |
 | `tests/` | Browser tests that run the app against stand-ins for the API and for car sites, with no key and nothing real called. `tests/e2e/run.sh` runs them; `tests/README.md` says what they can and cannot show |
 | `assets/fonts/` | The same fonts as TTF for the PDF |
