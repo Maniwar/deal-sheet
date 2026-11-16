@@ -125,6 +125,9 @@ def _tool_input(response, tool_name: str):
     return None
 
 
+# an address of one car's own page, as the sites this app reads write them
+_CAR_LINK = re.compile(r"/veh/[\w-]+|/lots/[\w-]+|/auctions/[\w-]+/[\w-]+|/vin/[A-HJ-NPR-Z0-9]{17}|/vehicledetail/[\w-]+|/details/\d+|/itm/\d+|"
+                       r"/used-cars-for-sale/listing/[A-HJ-NPR-Z0-9]{17}|/[a-z]{3}/d/[\w-]+/\d+|/view/d/[\w-]+/\w+|/cars-for-sale/vehicle/\d+", re.I)
 _URL_IN_TEXT = re.compile(r"https?://[^\s<>\"'()\[\]]+")
 _PATH_IN_TEXT = re.compile(r"(?<![\w/.:])(/(?:veh|s|a|l|m)/[^\s<>\"'()\[\]]+)")
 
@@ -332,9 +335,11 @@ def _watch(event, kinds: dict, parts: dict, progress: Progress, label: str, stre
                 source = inner.get("source") if isinstance(inner, dict) else getattr(inner, "source", None)
                 data = source.get("data") if isinstance(source, dict) else getattr(source, "data", "")
                 page = str(body.get("url") if isinstance(body, dict) else getattr(body, "url", "") or "")
-                cars = sum("/veh/" in url or "/lots/" in url or "/auctions/" in url for url in _urls_in(data if isinstance(data, str) else "", page))
-                progress.say(f"{label}: read that page, {cars} link{'s' if cars != 1 else ''} to cars' own pages on it" if cars
-                             else f"{label}: read that page, but it came back without links to the cars' own pages")
+                text = data if isinstance(data, str) else ""
+                cars = len(set(_CAR_LINK.findall(text)))     # links to single cars, written in full or from the site's root
+                size = f"{max(1, len(text) // 1000)}k characters"
+                progress.say(f"{label}: read {host_of(page) or 'that page'} ({size}), {cars} link{'s' if cars != 1 else ''} to cars' own pages on it" if cars
+                             else f"{label}: read {host_of(page) or 'that page'} ({size}), with no links to cars' own pages on it")
         elif kinds[index] == "server_tool_use":
             parts[("name", index)] = getattr(block, "name", "") or ""
         elif kinds[index] == "tool_use":

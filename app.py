@@ -1123,11 +1123,14 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
         have, count = check_listings(have, the_car, progress.say, only_new=True, reader=(client, model))   # one that only now has a page of its own
         note = checked_note(add_counts(early, count))            # the new ones were opened by the search itself
         sold = sum(comp["status"] != "asking" for comp in fresh)
+        live = sum(comp["status"] == "asking" and calc.comp_group(comp) == "live" for comp in fresh)
+        ended = len(fresh) - sold - live                         # for-sale listings that had already ended when found
         bits = [f"{better} car{'s' if better != 1 else ''} now with a direct link and VIN" if better else "",
                 f"{relisted['repriced']} listed car{'s' if relisted['repriced'] != 1 else ''} with a new price" if relisted.get("repriced") else "",
                 f"{cleared} unverifiable listing{'s' if cleared != 1 else ''} cleared" if cleared else "",
                 f"{sold} more sale{'s' if sold != 1 else ''} and no-sales" if sold else "",
-                f"{len(fresh) - sold} more for sale" if len(fresh) - sold else "",
+                f"{live} more for sale" if live else "",
+                f"{ended} listing{'s' if ended != 1 else ''} that {'have' if ended != 1 else 'has'} ended" if ended else "",
                 f"{back} sale{'s' if back != 1 else ''} counted again that had been set aside over a trim detail" if back else ""]
         found_text = ", ".join(bit for bit in bits if bit)
         return {"pending": {"add_comps": fresh, "keep": have, "summary": found["summary"]},
@@ -1141,10 +1144,16 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
     cost = llm.used_note(found.get("used"))
     if cost:
         progress.say(cost)
-    thing = "car for sale" if wants_sale else "sale"
+    if wants_sale:                                               # a listing that has already ended is not a car for sale
+        live = sum(calc.comp_group(comp) == "live" for comp in fresh)
+        ended = len(fresh) - live
+        bits = [f"{live} more car{'s' if live != 1 else ''} for sale" if live else "",
+                f"{ended} listing{'s' if ended != 1 else ''} that {'have' if ended != 1 else 'has'} ended" if ended else ""]
+        found_text = "Found " + " and ".join(bit for bit in bits if bit) + "."
+    else:
+        found_text = f"Found {len(fresh)} more sale{'s' if len(fresh) != 1 else ''}."
     return {"pending": {"add_comps": fresh, "keep": have},
-            "notices": [(f"Found {len(fresh)} more {thing}{'s' if len(fresh) != 1 and not wants_sale else ''}. {note}".strip()
-                         if fresh else "The search found nothing new this time.") + (f" {cost}" if cost else "")]}
+            "notices": [(f"{found_text} {note}".strip() if fresh else "The search found nothing new this time.") + (f" {cost}" if cost else "")]}
 
 
 def offer_work(job, car: dict, comps: list[dict], client, model: str, had_message: bool, buyer: str = "") -> dict:

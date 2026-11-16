@@ -1068,7 +1068,9 @@ function create(root) {
         `<div class="move"><span class="mv-k">${esc(m.factor.charAt(0).toUpperCase() + m.factor.slice(1))}</span><span class="mv-e${/^\+/.test(m.effect) ? " up" : /^[-−]/.test(m.effect) ? " down" : ""}">${esc(m.effect)}</span><span class="mv-w">${esc(m.why)}</span></div>`).join("") + "</div>";
       /* another listing of the same model: change the details, price it from the same sales */
       if ((d.comps || []).some((k) => k.use) && (d.offer.open || d.offer.target)) {
-        const e = d.edit || {}, v = S.vform || (S.vform = { miles: "", price: "", gear: "", exterior: "", options: e.options || "" });
+        const e = d.edit || {}, shown = ((d.garage || []).find((g) => g.active) || {}).id || "";
+        if (S.vformCar !== shown) { S.vform = null; S.vformCar = shown; }      /* what was typed for one car is not carried to another */
+        const v = S.vform || (S.vform = { miles: "", price: "", gear: "", exterior: "", options: e.options || "" });
         const busy = S.moreBusy === "version";
         h += '<h3>Price another listing</h3><div class="tiny">Looking at another one of these? Put in what is different about it and it is priced from the sales you already have. A different gearbox is searched for first, since those are different sales. Leave a box empty to keep this car\'s value.</div>' +
           `<form class="carform vform"><label class="fld"><span>Miles</span><input class="linkbox" name="miles" inputmode="numeric" autocomplete="off" placeholder="${esc(e.miles || "")}" value="${esc(v.miles)}"></label>` +
