@@ -154,6 +154,13 @@ of the screen; a link beside it opens the Claude Console keys page
   top. Tap it, then tap **Remove?** to take the car out of the garage (Car details has the same
   button). It is removed from this device too, so it does not come back. A search still running
   for a removed car is left to finish and its results are dropped.
+- **A blank car is only a place to start.** When the garage is empty the app shows one blank
+  car. It is never saved to the device or brought back, it goes as soon as it is not the car on
+  screen and a real car exists, and it has a cross of its own whenever there is another car.
+- **Saving to the device is careful.** The garage is saved only from a settled page, never from
+  the pass that is about to add, switch or remove cars. Saves run one at a time, in order. A car
+  is deleted from the device only if this page had it and no longer does, so a second tab of the
+  app cannot delete the first tab's cars.
 
 Everything except the Claude features works without a key.
 

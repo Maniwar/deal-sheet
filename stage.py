@@ -703,7 +703,7 @@ const store = {
 /* ------------------------------------------------------------------ the screen */
 function create(root) {
   const $ = (q) => root.querySelector(q);
-  const S = { d: {}, offer: {}, busy: false, shot: "", tab: "", outbox: [], waiting: false, remember: true };
+  const S = { d: {}, offer: {}, busy: false, shot: "", tab: "", outbox: [], waiting: false, remember: true, known: new Set() };   /* known: the cars this page has shown */
   const el = { garage: $(".garage"), head: $(".head"), verdict: $(".verdict"), rail: $(".rail"), legend: $(".legend"), track: $(".track"), nums: $(".nums"),
     tabs: $(".tabs"), dock: $(".dockbar"), pop: $(".pop"), sheet: $(".sheet"), sheetTabs: $(".sheet-tabs"), sheetBody: $(".sheet-body"),
     scrim: $(".scrim"), light: $(".lightbox"), toast: $(".toast"), photo: $(".photo"), progress: $(".progress"), empty: $(".empty"), live: $(".liveview"), shadow: $(".liveshadow"), zone: $(".zone"), picker: $(".pick3d") };
@@ -728,7 +728,7 @@ function create(root) {
   function paintTop(d) {
     /* the car on screen carries a small cross: two taps take it out of the garage */
     const chips = (d.garage || []).map((c) => `<button type="button" class="chip${c.active ? " on" : ""}" data-id="${esc(c.id)}">${esc(c.label)}</button>` +
-      (c.active && d.hasCar ? `<button type="button" class="chipx" data-drop="${esc(c.id)}" aria-label="Remove ${esc(c.label)} from the garage">×</button>` : "")).join("");
+      (c.active && (d.hasCar || (d.garage || []).length > 1) ? `<button type="button" class="chipx" data-drop="${esc(c.id)}" aria-label="Remove ${esc(c.label)} from the garage">×</button>` : "")).join("");
     el.garage.innerHTML = chips + '<button type="button" class="chip add" data-add="1">+ Add a car</button>';
     /* keep the car on screen, and the cross that removes it, in view: the row scrolls sideways */
     const on = el.garage.querySelector(".chip.on"), cross = el.garage.querySelector(".chipx") || on;
@@ -1807,7 +1807,7 @@ function create(root) {
             const index = await store.get("index");
             if (!index || !(index.order || []).length) return;
             const cars = [];
-            for (const id of index.order) { const car = await store.get("car:" + id); if (car && car.deal) cars.push({ ...car.deal, _id: id, car_photo: car.photo || "", photos: car.photos || {} }); }
+            for (const id of index.order) { S.known.add(id); const car = await store.get("car:" + id); if (car && car.deal) cars.push({ ...car.deal, _id: id, car_photo: car.photo || "", photos: car.photos || {} }); }
             if (cars.length) post("restore", { cars, active: Math.max(0, index.order.indexOf(index.active)) });
           } catch (e) { /* storage is unavailable: nothing to restore */ }
         })();
@@ -1815,24 +1815,29 @@ function create(root) {
       return;
     }
     S.triedRestore = true;
-    const p = d.persist; if (!p) return;
-    (async () => {
-      try {
-        const order = p.cars.map((c) => c.id);
-        for (const c of p.cars) {
-          const old = (await store.get("car:" + c.id)) || {};
-          const rec = { deal: c.deal, photo: old.photo || "", photos: old.photos || {} };
-          if (c.id === p.active) {
-            rec.photo = d.photoOwn ? d.photo : "";
-            const mine = {}; (d.comps || []).forEach((k) => { if (k.img && k.image) mine[k.img] = k.image; });
-            rec.photos = mine;
-          }
-          await store.set("car:" + c.id, rec);
-        }
-        await store.set("index", { order, active: p.active, saved: Date.now() });
-        for (const key of await store.keys()) { const [kind, id] = String(key).split(":"); if ((kind === "car" || kind === "model") && id && !order.includes(id) && id !== p.active) await store.del(key); }
-      } catch (e) { /* saving is best effort */ }
-    })();
+    const p = d.persist; if (!p || d.busy) return;           /* a pass that is about to add, switch or remove cars is not the garage yet */
+    /* One save at a time, in the order the pages arrived: two that overlap can delete what the other just wrote. */
+    S.saving = (S.saving || Promise.resolve()).then(() => saveGarage(p, d)).catch(() => { /* saving is best effort */ });
+  }
+  async function saveGarage(p, d) {
+    const order = p.cars.map((c) => c.id);
+    order.forEach((id) => S.known.add(id));
+    for (const c of p.cars) {
+      const old = (await store.get("car:" + c.id)) || {};
+      const rec = { deal: c.deal, photo: old.photo || "", photos: old.photos || {} };
+      if (c.id === p.active) {
+        rec.photo = d.photoOwn ? d.photo : "";
+        const mine = {}; (d.comps || []).forEach((k) => { if (k.img && k.image) mine[k.img] = k.image; });
+        rec.photos = mine;
+      }
+      await store.set("car:" + c.id, rec);
+    }
+    /* Cars this page has never shown belong to another tab of the app: they stay on the device and in the list.
+       Only a car this page had, and no longer has, is taken off the device. */
+    const was = (await store.get("index")) || {}, others = [];
+    for (const id of was.order || []) { if (!order.includes(id) && !S.known.has(id) && (await store.get("car:" + id))) others.push(id); }
+    await store.set("index", { order: [...order, ...others], active: p.active, saved: Date.now() });
+    for (const key of await store.keys()) { const [kind, id] = String(key).split(":"); if ((kind === "car" || kind === "model") && id && S.known.has(id) && !order.includes(id) && id !== p.active) await store.del(key); }
   }
 
   /* ---------- new data from Python ---------- */

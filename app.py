@@ -192,6 +192,13 @@ def queue(action: dict) -> None:
     st.session_state.setdefault("_garage_actions", []).append(action)
 
 
+def is_blank(deal: dict) -> bool:
+    """A car with nothing in it: no make, no model, no comps. It is only a place to start from."""
+    car = (deal or {}).get("car") or {}
+    return not (str(car.get("make") or "").strip() or str(car.get("model") or "").strip()
+                or (deal or {}).get("comps") or (deal or {}).get("sample"))
+
+
 def run_garage_actions(actions: list[dict]) -> None:
     ss = st.session_state
     garage, order = ss["garage"], ss["garage_order"]
@@ -254,6 +261,10 @@ def run_garage_actions(actions: list[dict]) -> None:
         add(dict(EMPTY_DEAL))
     if ss["active"] not in garage:
         ss["active"] = order[-1]
+    # A blank car is only a place to start from. One that is not on screen has no use beside real cars, so it goes.
+    if any(not is_blank(garage[c]) for c in order):
+        for car_id in [c for c in order if c != ss["active"] and is_blank(garage[c])]:
+            drop(car_id)
     ss["_pending"] = {"deal": garage[ss["active"]]}
     ss["upload_ver"] += 1
 
@@ -1275,7 +1286,8 @@ def handle_stage_requests(progress_slot) -> None:
         ss.pop("_key_try", None)
     request = ss.get("_restore")
     if request:
-        cars = [c for c in (request.get("cars") or []) if isinstance(c, dict) and isinstance(c.get("car"), dict)]
+        cars = [c for c in (request.get("cars") or []) if isinstance(c, dict) and isinstance(c.get("car"), dict)
+                and not is_blank(c)]                 # a blank car saved by an earlier version is not brought back
         for saved_deal in cars[:40]:
             queue({"add": {**EMPTY_DEAL, **saved_deal, "sample": False}, "from_file": True})
         if cars:
@@ -1715,7 +1727,7 @@ for car_id in ss["garage_order"]:
     entry = ss["garage"][car_id]
     garage_chips.append({"id": car_id, "active": car_id == ss["active"],
                          "label": ("Sample: " if entry.get("sample") else "") + short_name(entry.get("car") or {})})
-    if not entry.get("sample"):
+    if not entry.get("sample") and not is_blank(entry):      # a blank car is not worth keeping on the device
         kept.append({"id": car_id, "deal": plain(entry)})
 has_real_car = any((ss["garage"][c].get("car") or {}).get("make") or (ss["garage"][c].get("car") or {}).get("model")
                    for c in ss["garage_order"] if not ss["garage"][c].get("sample"))
@@ -1741,7 +1753,8 @@ with stage_box:
         data=json.dumps(stage.build_payload(
             car, comps, offer, settings, flags=flags, photo=photo_bytes, photo_own=bool(own_photo),
             comp_images=comp_images, comp_photos=ss["comp_photos"], garage=garage_chips,
-            persist=None if ss["fresh"] else {"cars": kept, "active": ss["active"]},
+            # nothing is saved to the device from a pass that is about to add, switch or remove cars: it is not the garage yet
+            persist=None if ss["fresh"] or ss.get("_garage_actions") else {"cars": kept, "active": ss["active"]},
             detailed=bool(ss["detailed_car"]))),
         key="stage",
         **{f"on_{name}_change": (lambda name=name: stage_event(name)) for name in stage_events},
