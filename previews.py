@@ -250,14 +250,22 @@ def read_page(url: str, max_width: int = 1100) -> dict:
         session.close()
 
 
-# Words a listing page uses once the car has sold or the ad has been taken down.
+# ---------------------------------------------------------------- is the car still for sale?
+#
+# The rules below were written against real listing pages (dealers, auction sites, classifieds and the sites
+# that copy dealers' listings), read both as HTML and as the plain text a page reader returns. Two things make
+# the answer reliable: a car is called for sale only on proof that this car is on the page, and gone only on
+# proof that it is not; and a site that merely copies listings is never taken as the seller's word.
+
 # Words that mean the car on this page can no longer be bought. Each is specific enough that a page for a car
 # still for sale does not say it in passing ("vehicle sold as-is" and "can't find the car you're looking for?" do not count).
 _GONE = re.compile(
     r"has been sold|\b(?:vehicle|car|listing|item|unit) (?:is|was) (?:already |now )?sold\b|\b(?:already|just|recently) sold\b|"
-    r"this (?:vehicle|car) has sold|\bvehicle sold\b(?! as\b)(?! with\b)(?! by\b)|\bsold for \$|\bsold on \d|"
+    r"this (?:vehicle|car) has sold|\bvehicle sold\b(?! as\b)(?! with\b)(?! by\b)|\bsold for (?:usd |us)?\s?\$|\bsold on \d|"
+    r"\bbid to (?:usd |us)?\s?\$|\bfinal bid\b|\bstatus\W{0,3}sold\b|"
     r"no longer (?:available|for sale|listed|active|on the market|in (?:our )?(?:inventory|stock))|"
     r"(?:is|are) not available anymore|isn[’']t available anymore|\b(?:vehicle|car|listing|item) is (?:currently )?unavailable|"
+    r"\b(?:currently|is|now) off[- ](?:the )?market\b|\boff[- ]market vehicle\b|\blast seen on\b|"
     r"listing (?:has |was )?(?:ended|expired)|\b(?:listing|vehicle|page|item|posting|ad) (?:was |has been |is )?(?:not found|removed|deleted)|"
     r"this (?:one|car|vehicle) is gone|\bad has expired|this ad is no longer|has been purchased|"
     r"\b(?:vehicle|car) (?:is|has been) reserved|\bsale (?:is )?pending|\bpending sale|auction (?:has )?ended|bidding (?:has )?ended|"
@@ -265,31 +273,55 @@ _GONE = re.compile(
     r"couldn[’']t find (?:that|the|this) (?:page|vehicle|car|listing)|\b(?:page|vehicle|listing|car) could not be found|"
     r"posting has (?:been deleted|expired|been flagged)", re.I)
 _GONE_DATA = ("schema.org/outofstock", "schema.org/soldout", "schema.org/discontinued")       # in the page's own vehicle data
-_GONE_TITLE = re.compile(r"\b(404|not found|sold|no longer available|expired|removed)\b", re.I)
+_GONE_TITLE = re.compile(r"\b(404|not found|sold|no longer available|expired|removed|off market)\b", re.I)
+_GONE_PATH = re.compile(r"/(?:sold|archive[ds]?|past-(?:inventory|sales|results)|sold-(?:inventory|vehicles|cars))(?:/|$)", re.I)
+# A page that turned the reader away instead of showing the listing.
+_WALL = re.compile(r"verify (?:that )?you are (?:a )?human|are you a (?:human|robot)|unusual traffic|access (?:to this page )?(?:has been )?denied|"
+                   r"checking your browser|pardon our interruption|enable javascript (?:and cookies )?to (?:continue|view)|"
+                   r"captcha|request (?:was )?blocked|bot detection", re.I)
 # A badge is a piece of text that stands on its own. Menus, links and filters are set aside first, because a
 # list of cars names both states.
 _CHROME = re.compile(r"<(a|option|button|label|nav|select)\b.*?</\1\s*>", re.I | re.S)
 _GONE_BADGES = {"sold", "sold!", "sold out", "just sold", "recently sold", "sale pending", "pending sale", "off market",
-                "listing ended", "this vehicle is sold"}
-_LIVE_BADGES = {"for sale", "available", "in stock", "live", "active"}
+                "off market vehicle", "listing ended", "auction ended", "this vehicle is sold", "this one is off market"}
+_LIVE_BADGES = {"for sale", "available", "in stock", "live", "active", "available now"}
 
-_VIN_LABEL = re.compile(r"\bVIN\b[^A-Za-z0-9]{0,24}([A-HJ-NPR-Z0-9]{17})\b", re.I)
+# Sites that republish sellers' listings. Their page for a car can outlive the car by days or weeks, so "still
+# listed" there is second-hand: worth showing, never proof.
+SECOND_HAND = ("classic.com", "capitalone.com", "carfax.com", "cargurus.com", "cars.com", "autotrader.com", "kbb.com",
+               "edmunds.com", "truecar.com", "carsforsale.com", "iseecars.com", "autolist.com", "carsdirect.com",
+               "autotempest.com", "westlakefinancial.com", "carpro.com", "carzing.com", "carsoup.com", "usnews.com",
+               "carbuzz.com", "motortrend.com", "dupontregistry.com", "jamesedition.com", "autoweb.com", "cargurus.ca")
+
+_VIN_LABEL = re.compile(r"\b(?:VIN|Chassis|Serial)\b(?:\s*(?:#|No\.?|Number))?[^A-Za-z0-9]{0,24}([A-HJ-NPR-Z0-9]{17})\b|"
+                        r"\bVIN([A-HJ-NPR-Z0-9]{17})\b", re.I)
+_VIN_DATA = re.compile(r'"(?:vin|vehicleIdentificationNumber)"\s*:\s*"([A-HJ-NPR-Z0-9]{17})"', re.I)
+
+
+def _labelled_vins(text: str) -> list[str]:
+    """Every VIN a page states beside a label (VIN, Chassis #, Serial No.), in order, check digit verified."""
+    found = []
+    for pair in _VIN_LABEL.findall(text or ""):
+        vin = (pair[0] or pair[1]).upper()
+        if calc.vin_checks_out(vin) and vin not in found:
+            found.append(vin)
+    return found
 
 
 def page_vin(text: str) -> str:
-    """The VIN a listing page states for its car: the one beside a 'VIN' label, and only if its check digit is right."""
-    for found in _VIN_LABEL.findall(text or ""):
-        vin = found.upper()
-        if calc.vin_checks_out(vin):
-            return vin
-    return ""
+    """The VIN a listing page states for its car: the first beside a label, and only if its check digit is right."""
+    found = _labelled_vins(text)
+    return found[0] if found else ""
 
 
 _OG_TITLE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']*)', re.I)
 _H1 = re.compile(r"<h1\b[^>]*>(.*?)</h1\s*>", re.I | re.S)
 _GEAR_JSON = re.compile(r'"vehicleTransmission"\s*:\s*"([^"]{2,60})"', re.I)
 _GEAR_LABEL = re.compile(r"\b(?:transmission|gearbox)(?: type| description)?\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9 \-/]{1,40})", re.I)
+_GEAR_BEFORE = re.compile(r"\b((?:\d{1,2}|four|five|six|seven|eight)[- ]speed [A-Za-z\- ]{0,24}?|manual|automatic|dual[- ]clutch)\s+(?:transmission|gearbox)\b", re.I)
 _ID_IN_PATH = re.compile(r"[A-HJ-NPR-Z0-9]{17}|\d{5,}", re.I)
+_IS_HTML = re.compile(r"<(?:html|head|body|div|span|script|meta|title|h1|p)\b", re.I)
+_MONEY = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+)\b")
 
 
 def _moved_away(asked: str, final: str) -> bool:
@@ -319,60 +351,131 @@ def page_gearbox(page: str, words: str) -> str:
         kind = calc.gearbox_kind(found)
         if kind:
             return kind
+    for found in _GEAR_BEFORE.findall(words or ""):            # '6-Speed Manual Transmission': the value comes first
+        kind = calc.gearbox_kind(found)
+        if kind:
+            return kind
     return ""
 
 
-def judge_page(page: str, asked: str, final: str = "", vin: str = "", price: int = 0, year: str = "") -> tuple[str, str, str]:
-    """(state, the VIN the page states, the gearbox the page states) from a for-sale page that was read.
+def site_name(url: str) -> str:
+    host = calc.host_of(url)
+    return {"classic.com": "Classic.com", "capitalone.com": "Capital One", "carfax.com": "CARFAX", "cargurus.com": "CarGurus",
+            "cars.com": "Cars.com", "autotrader.com": "Autotrader", "kbb.com": "Kelley Blue Book", "edmunds.com": "Edmunds",
+            "truecar.com": "TrueCar"}.get(host, host)
 
-    'live' needs proof that this car is on the page: its VIN, or, when the VIN is not known or the page states
-    none, its price on a page whose heading names one car of that model year. 'gone' needs proof too: a redirect
-    away from the car's page, words or a badge that say sold or removed, or another car's VIN where this one's
-    should be. Everything else is 'unknown', which the screen shows as not confirmed. A page built by scripts
-    gives nothing to read, so it is 'unknown', never 'live'.
+
+def judge_page(page: str, asked: str, final: str = "", vin: str = "", price: int = 0, year: str = "",
+               title: str = "") -> tuple[str, str, str, str, str]:
+    """Is the car still for sale, from a page that was read? Returns (state, VIN the page states, gearbox the
+    page states, why, code).
+
+    `page` is the page's HTML, or the plain text a page reader made of it (then `title` is its title).
+
+    State is 'live', 'listed', 'gone' or 'unknown', and `why` says what the answer rests on:
+    - 'live' needs proof that this car is on the seller's page: its VIN, or, when the page states no VIN, a
+      heading that names one car of its model year together with its price, an in-stock mark in the page's own
+      data, or an Available badge.
+    - 'listed' is the same proof on a site that only copies sellers' listings (see SECOND_HAND): it can be days
+      behind the seller, so it is never shown as confirmed.
+    - 'gone' needs proof too: the link leads away from the car's page, the address or the title says sold, the
+      page says sold, pending, off market or removed, it shows a Sold badge, or it shows another car's VIN.
+    - 'unknown' is everything else. `code` says why nothing could be said: 'empty' (a page built by scripts),
+      'refused' (the site turned the reader away) or 'noproof' (a page that loaded but did not show this car).
     """
     page = page or ""
-    words = re.sub(r"\s+", " ", html.unescape(_TAG.sub(" ", _HIDDEN.sub(" ", page))))[:80000]
+    is_html = bool(_IS_HTML.search(page[:20000]))
+    body = _HIDDEN.sub(" ", page) if is_html else page
+    words = re.sub(r"\s+", " ", html.unescape(_TAG.sub(" ", body) if is_html else body))[:120000]
     raw = page.lower()
-    heads = " ".join(html.unescape(_TAG.sub(" ", found)) for found in
-                     _TITLE.findall(page[:20000]) + _OG_TITLE.findall(page[:20000]) + _H1.findall(page)[:2])
-    labelled = {found.upper() for found in _VIN_LABEL.findall(words) if calc.vin_checks_out(found.upper())}
-    stated = page_vin(words) if len(labelled) <= 2 else ""            # many VINs is a list of cars, not one car's page
-    gearbox = page_gearbox(page, words) if len(labelled) <= 2 else ""
+    host = calc.host_of(final or asked)
+    if is_html:
+        titles = [html.unescape(_TAG.sub(" ", found)) for found in _TITLE.findall(page[:20000])]
+        heads = " ".join(titles + _OG_TITLE.findall(page[:20000]) + [html.unescape(_TAG.sub(" ", h)) for h in _H1.findall(page)[:2]])
+        pieces = _TAG.split(_CHROME.sub(" ", body))
+    else:
+        rows = [row.strip() for row in page.splitlines() if row.strip()]
+        titles = [title] if title else []
+        heads = " ".join(titles + [row.lstrip("# ").strip() for row in rows if row.startswith("#")][:2] + rows[:1])
+        pieces = rows
+    lines = [re.sub(r"\s+", " ", html.unescape(piece)).strip(" .:-*#_|>•·\t").lower() for piece in pieces]
+    lines = [line for line in lines if line]
+
+    labelled = _labelled_vins(words)
+    data_vins = {found.upper() for found in _VIN_DATA.findall(page)}
+    amounts = {int(found.replace(",", "")) for found in _MONEY.findall(words)}
+    amounts = {amount for amount in amounts if amount >= 5000}
+    in_stock = raw.count("schema.org/instock")
     vin = calc.clean_vin(vin)
-
-    bare = [re.sub(r"\s+", " ", html.unescape(piece)).strip(" .:-").lower()
-            for piece in _TAG.split(_CHROME.sub(" ", _HIDDEN.sub(" ", page)))]
-    badge = any(piece in _GONE_BADGES for piece in bare) and not any(piece in _LIVE_BADGES for piece in bare)
-    if (_moved_away(asked, final or asked) or _GONE.search(words) or badge or any(mark in raw for mark in _GONE_DATA)
-            or _GONE_TITLE.search(" ".join(html.unescape(found) for found in _TITLE.findall(page[:20000])))):
-        return "gone", "", ""
-    if vin and stated and stated != vin:
-        return "gone", "", ""                     # the address now shows a different car
-    if len(words) <= 300:
-        return "unknown", stated, gearbox         # nothing to read: a page built by scripts
-
     # The address asked for is often repeated inside the page, VIN and all, even when the car has gone.
     echo = raw
     for part in {urlparse(asked).path.lower(), urlparse(final or asked).path.lower(),
                  urlparse(asked).path.rstrip("/").rsplit("/", 1)[-1].lower()}:
         if len(part) > 6:
             echo = echo.replace(part, " ")
-    one_car = bool(year and year in heads) or bool(not year and calc._year_of(heads))
+    vin_here = bool(vin) and (vin.lower() in echo or vin in labelled)
+    # a list of cars, not one car's page: several VINs, or a column of prices, or many in-stock marks
+    listy = len(set(labelled) | data_vins) > 2 or in_stock > 3 or (len(amounts) > 8 and not vin_here)
+    stated = labelled[0] if labelled and not listy else ""
+    # Classic.com sets a row of other cars, each with its transmission, above the car's own details: nothing to trust there.
+    gearbox = page_gearbox(page, words) if not listy and host != "classic.com" else ""
+
+    # ---- proof that it has gone
+    title_text = " ".join(titles)
+    said = _GONE.search(words)
+    gone_badges = [line for line in lines if line in _GONE_BADGES]
+    live_badge = any(line in _LIVE_BADGES for line in lines)
+    why = ""
+    if final and _moved_away(asked, final):
+        why = "the link now leads to another page of the site"
+    elif _GONE_PATH.search(urlparse(final or asked).path):
+        why = "the page is in the seller's sold section"
+    elif _GONE_TITLE.search(title_text):
+        why = f"the page title says “{_GONE_TITLE.search(title_text).group(0).lower()}”"
+    elif said:
+        why = f"the page says “{re.sub(r'[^A-Za-z]+', ' ', said.group(0)).strip().lower()}”"
+    elif gone_badges and not live_badge:
+        why = f"the page is marked “{gone_badges[0]}”"
+    elif any(mark in raw for mark in _GONE_DATA):
+        why = "the page's own data says it is out of stock"
+    elif vin and stated and stated != vin and not vin_here:
+        why = "the page now shows another car"
+    if why:
+        return "gone", "", "", why, ""
+
+    # ---- nothing to read
+    if _WALL.search(words[:4000]) and not vin_here:
+        return "unknown", "", "", "the site turned the reader away", "refused"
+    if len(words) <= 300:
+        if vin_here and in_stock:
+            return ("listed" if host in SECOND_HAND else "live"), stated, gearbox, "the page's own data lists this car as in stock", ""
+        return "unknown", stated, gearbox, "the page gave nothing to read", "empty"
+
+    # ---- proof that this car is on it
+    one_car = not listy and (bool(year and year in heads) or bool(not year and calc._year_of(heads)))
     priced = False
     if price:
-        amount = f"{int(price):,}"
-        priced = bool(re.search(r"\$\s?" + re.escape(amount) + r"\b", words)
-                      or re.search(r'"price"\s*:\s*"?' + str(int(price)) + r"\b", raw))
-    if vin and (vin.lower() in echo or stated == vin):
-        shown = True
-    elif vin and not labelled:
-        shown = priced and one_car                # the page states no VIN at all, so its price and heading stand in
-    elif vin:
-        shown = False
-    else:
-        shown = bool(stated) or (one_car and (priced or "schema.org/instock" in raw))
-    return ("live" if shown else "unknown"), stated, gearbox
+        priced = int(price) in amounts or bool(re.search(r'"price"\s*:\s*"?' + str(int(price)) + r"\b", raw))
+    proof = ""
+    if vin_here:
+        proof = "its VIN is on the page"
+    elif vin and labelled:
+        proof = ""                                # the page states a VIN and it is not this car's
+    elif stated and not vin:
+        proof = f"the page shows one car, VIN {stated}"
+    elif one_car and priced:
+        proof = "the page names this car at its price"
+    elif one_car and in_stock:
+        proof = "the page names this car and its data says in stock"
+    elif one_car and live_badge and vin:
+        proof = "the page names this car and marks it available"
+    if not proof:
+        return "unknown", stated, gearbox, "the page did not show this car's VIN or price", "noproof"
+    if live_badge and "available" not in proof and host not in SECOND_HAND:
+        proof += ", marked available"
+    if host in SECOND_HAND:
+        return "listed", stated, gearbox, f"{site_name(final or asked)} still lists it ({proof})", ""
+    return "live", stated, gearbox, proof, ""
 
 
 def listing_look(url: str, vin: str = "", price: int = 0) -> tuple[str, str]:
@@ -382,7 +485,7 @@ def listing_look(url: str, vin: str = "", price: int = 0) -> tuple[str, str]:
 
 
 def listing_state(url: str) -> str:
-    """Whether a for-sale page still shows the car: 'live', 'gone' (sold or removed) or 'unknown'.
+    """Whether a for-sale page still shows the car: 'live', 'listed', 'gone' (sold or removed) or 'unknown'.
 
     'unknown' covers every case where the site would not let the app read the page. Nothing here
     tries to get past a refusal.
@@ -390,22 +493,30 @@ def listing_state(url: str) -> str:
     return _look(url)[0]
 
 
-def _look(url: str, vin: str = "", price: int = 0, year: str = "") -> tuple[str, str, str]:
+def _look(url: str, vin: str = "", price: int = 0, year: str = "") -> tuple[str, str, str, str, str]:
     """Open one for-sale page, where its site allows, and judge it with `judge_page`. A page that cannot be
-    opened or read is 'unknown'; one that is missing is 'gone'."""
+    opened or read is 'unknown', with the reason; one that is missing is 'gone'. A request that fails on the
+    way (a timeout, a dropped connection, a busy server) is tried once more before giving up."""
     session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,*/*;q=0.5"})
+    session.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,*/*;q=0.5", "Accept-Language": "en-US,en;q=0.8"})
     try:
-        if not is_safe_url(url) or not _allowed(url, session):
-            return "unknown", "", ""
+        if not is_safe_url(url):
+            return "unknown", "", "", "the link is not a public web address", "invalid"
+        if not _allowed(url, session):
+            return "unknown", "", "", "the site does not let apps read it", "robots"
         status, final, content_type, body = _get(url, PAGE_LIMIT, session)
+        if status == 0 or status >= 500:
+            time.sleep(0.6)
+            status, final, content_type, body = _get(url, PAGE_LIMIT, session)
         if status in (404, 410):
-            return "gone", "", ""
+            return "gone", "", "", "the page is no longer there", ""
+        if status in (401, 403, 406, 429, 451):
+            return "unknown", "", "", "the site turned the app away", "refused"
         if status != 200 or content_type.lower().startswith("image/"):
-            return "unknown", "", ""
+            return "unknown", "", "", "the page did not load", "unreachable"
         return judge_page(body.decode("utf-8", "replace"), url, final, vin, price, year)
     except Exception:
-        return "unknown", "", ""
+        return "unknown", "", "", "the page did not load", "unreachable"
     finally:
         session.close()
 
@@ -415,14 +526,16 @@ def listing_states(urls: list[str], budget: float = 16.0) -> dict[str, str]:
     return {url: look[0] for url, look in listing_looks(urls, budget).items()}
 
 
-def listing_checks(cars: list[dict], budget: float = 18.0) -> dict[str, tuple[str, str, str]]:
-    """Open each car's for-sale page, knowing which car should be on it. `cars` are dicts with url, vin and price.
+def listing_checks(cars: list[dict], budget: float = 20.0) -> dict[str, tuple[str, str, str, str, str]]:
+    """Open each car's for-sale page, knowing which car should be on it. `cars` are dicts with url, vin, price
+    and title.
 
-    Returns {url: (state, VIN on the page, gearbox on the page)}. A page that runs out of time is 'unknown'.
+    Returns {url: (state, VIN on the page, gearbox on the page, why, code)}, as `judge_page` gives them. A page
+    that runs out of time is 'unknown'.
     """
     wanted = {str(car.get("url") or ""): car for car in cars if car.get("url")}
-    unique = list(wanted)[:30]
-    found = {url: ("unknown", "", "") for url in unique}
+    unique = list(wanted)[:40]
+    found = {url: ("unknown", "", "", "the page did not load in time", "slow") for url in unique}
     if not unique:
         return found
     pool = ThreadPoolExecutor(max_workers=12)                # every page at once: each is a different site

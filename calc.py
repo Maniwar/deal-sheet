@@ -258,8 +258,11 @@ def clean_comp(row: dict) -> dict | None:
         "history": text("history"),
         # 'lead': set aside by the app because it cannot be opened and checked. 'mine': the buyer chose, so the app leaves it.
         "aside": text("aside") if text("aside") in ("lead", "mine") else "",
-        "seen": text("seen") if text("seen") in ("live", "gone", "unknown") and status == "asking" else "",
+        # what the last look at the for-sale page found: live (on the seller's page), listed (only on a site that
+        # copies listings), gone, or unknown; and in a few words what that rests on
+        "seen": text("seen") if text("seen") in ("live", "listed", "gone", "unknown") and status == "asking" else "",
         "seen_on": text("seen_on") if status == "asking" else "",
+        "seen_why": text("seen_why")[:160] if status == "asking" else "",
     }
 
 

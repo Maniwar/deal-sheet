@@ -55,17 +55,32 @@ what that car has been selling for and gives you a typical sale price, the comps
 - **Sold, and for sale now.** Completed sales and the cars you could buy today are separate lists,
   each with a **Search for more** button that looks for cars not already found. For-sale cars come
   from live auctions, enthusiast classifieds and dealers. The app opens each for-sale page, where
-  the site allows it; **Check they are still for sale** does that again. A card says **For sale**
-  only with proof that the car is on its page: its VIN, or, when no VIN is known or the page
-  states none, its price on a page whose heading names one car of that model year. A car moves to
-  "sold or gone" only with proof too: a missing page, a redirect away from the car's page (the
-  usual answer for a sold car is the inventory list), words or a badge that say sold, pending or
-  removed, or another car's VIN at that address. Everything else, including sites that do not let
-  apps look and pages built by scripts, is marked **Not confirmed**, never for sale. A listing
-  that has ended leaves the For sale now tab for a fold at the bottom of the Sold tab, labelled
-  with its last asking price and not counted, so For sale now holds only cars you can buy. A link the
-  app opened and found the car on is treated as confirmed. Both lists sort by price, miles or
-  date.
+  the site allows it; **Check they are still for sale** does that again. Every answer comes from
+  one set of rules, written against how real dealer, auction, classified and listing-copy sites
+  word their pages, and every card says what its answer rests on:
+  - **For sale** needs proof that this car is on the seller's page: its VIN (or chassis number),
+    or, when the page states none, a heading that names one car of its model year together with
+    its price, an in-stock mark in the page's own data, or an Available badge. A page that lists
+    several cars is not proof.
+  - **Listed elsewhere** is the same proof on a site that only copies sellers' listings
+    (Classic.com, Capital One, CarGurus, Cars.com, Autotrader, KBB, Edmunds and the like). Such a
+    page can outlive the car by days or weeks, so it is shown, never counted as confirmed.
+  - **Listing ended** needs proof too: a missing page, a link that now leads elsewhere on the site
+    (the usual answer for a sold car), an address or a title that says sold, words such as sold,
+    sale pending, off the market, final bid or no longer available, a Sold badge standing on its
+    own, out-of-stock in the page's data, or another car's VIN at that address.
+  - **Not confirmed** is everything else, with the reason: the site shuts apps out, it turned the
+    reader away, the page is built by scripts, or it loaded without this car's VIN or price.
+  Two readers apply those rules. The app opens every page itself, all at once. Pages it could not
+  read go to Claude's own page reader when a key is connected (one small request each, billed as
+  tokens only): it runs on Anthropic's side, keeps to each site's rules itself, and is asked for
+  a fresh copy, not a cached one. The reader only fetches; the verdict is the same rules run on
+  the text it brings back, and a copy more than six hours old cannot show a car is still for
+  sale. The check also re-opens listings it marked ended, and one that is provably back returns
+  to the list. A listing that has ended leaves the For sale now tab for a fold at the bottom of
+  the Sold tab, labelled with its last asking price and not counted, so For sale now holds only
+  cars you can buy. A link the app opened and found the car on is treated as confirmed. Both
+  lists sort by price, miles or date.
 - **Manual or automatic.** When your car states its transmission, the other kind is left out:
   the searches are told to skip it and to record what each source states, and when the app opens
   a for-sale page it reads the transmission from the page's own labelled field, which outranks

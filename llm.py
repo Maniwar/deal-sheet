@@ -155,6 +155,65 @@ def _search_urls(response) -> set[str]:
     return found
 
 
+FETCH_FRESH = "web_fetch_20260309"       # this form of the page reader can skip its cache, so the page is read now
+_READER: list[str] = []                  # which form this key and model accept, once one has worked
+_READ_ERRORS = {"url_not_allowed": "the site does not let Claude's reader in either", "url_not_accessible": "Claude's reader could not open it either",
+                "unsupported_content_type": "the page is not something a reader can read", "too_many_requests": "Claude's reader was busy",
+                "unavailable": "Claude's reader was unavailable", "content_too_large": "the page is too large to read"}
+
+
+def open_page(client, model: str, url: str) -> dict:
+    """Have Claude's own page reader open one web page and hand back what it read, unjudged.
+
+    The reader runs on Anthropic's side, so it reaches pages this app's own request cannot (a site that turns
+    unknown apps away), and it keeps to each site's rules itself. It is asked for a fresh copy, not a cached
+    one; when the key or model does not take that form of the tool, the plain form is used and `at` says how
+    old the copy is. Returns {"text", "title", "url", "at", "error", "used"}; `error` is why there is no text.
+    """
+    def tools(mode: str) -> list[dict]:
+        if mode == "fresh":
+            return [{"type": FETCH_FRESH, "name": "web_fetch", "max_uses": 1, "max_content_tokens": 9000,
+                     "use_cache": False, "allowed_callers": ["direct"]}]
+        return [{"type": WEB_FETCH_TYPE, "name": "web_fetch", "max_uses": 1, "max_content_tokens": 9000}]
+
+    out = {"text": "", "title": "", "url": url, "at": "", "error": "", "used": {}}
+    ask = [{"role": "user", "content": "Open this page with the web_fetch tool, once, then reply with the single word done. "
+                                        f"Do not describe the page.\n{url}"}]
+    response = None
+    modes = list(_READER) or ["fresh", "basic"]
+    for mode in modes:
+        try:
+            response = _create(client, label="Page reader", model=model, max_tokens=300, tools=tools(mode), messages=ask)
+        except LLMError as exc:
+            if exc.kind == "request" and mode != modes[-1]:
+                continue                           # this form of the reader is not accepted here: use the plain one
+            raise
+        if not _READER:
+            _READER.append(mode)
+        break
+    usage = _field(response, "usage")
+    out["used"] = {key: int(_field(usage, key) or 0) for key in
+                   ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")} if usage is not None else {}
+    for block in _field(response, "content", []) or []:
+        if _field(block, "type") != "web_fetch_tool_result":
+            continue
+        body = _field(block, "content")
+        if _field(body, "type") == "web_fetch_result":
+            document = _field(body, "content")
+            source = _field(document, "source")
+            data = _field(source, "data")
+            if _field(source, "type") == "text" and isinstance(data, str) and data.strip():
+                out.update(text=data, title=str(_field(document, "title") or ""), url=str(_field(body, "url") or url),
+                           at=str(_field(body, "retrieved_at") or ""))
+                return out
+            out["error"] = "the page is not something a reader can read"
+        else:
+            out["error"] = _READ_ERRORS.get(str(_field(body, "error_code") or ""), "Claude's reader could not open it either")
+    if not out["error"]:
+        out["error"] = "Claude's reader did not open it"
+    return out
+
+
 def _search_errors(response) -> list[str]:
     """The error code of each web search in this response that failed (the request itself still succeeds)."""
     codes = []

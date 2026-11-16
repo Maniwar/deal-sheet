@@ -197,8 +197,9 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         cards.append({
             "status": comp["status"], "group": group, "price": comp["price"],
             "label": ("Live auction" if group == "live" and str(comp.get("note") or "").lower().startswith("live auction")
-                      else "Not confirmed" if group == "live" and comp.get("seen") == "unknown" else names[group]),
-            "unsure": bool(group == "live" and comp.get("seen") == "unknown"),
+                      else "Not confirmed" if group == "live" and comp.get("seen") == "unknown"
+                      else "Listed elsewhere" if group == "live" and comp.get("seen") == "listed" else names[group]),
+            "unsure": bool(group == "live" and comp.get("seen") in ("unknown", "listed")),
             "priceText": money(comp["price"]), "title": comp["title"], "meta": " · ".join(meta),
             "note": comp.get("note") or "", "options": comp.get("options") or "", "url": find or url,
             "host": "Facebook Marketplace" if find else calc.host_of(url), "kind": "find" if find else calc.link_kind(url), "use": bool(comp["use"]), "linkOk": comp.get("link_ok"), "delta": delta,
@@ -207,7 +208,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             "trust": trust_of(comp, car),
             "gearFlag": bool(calc.gearbox_kind(car.get("transmission")) and not gear and str(comp.get("source") or "") != "Added by you"),
             "img": comp.get("img") or "", "vin": comp.get("vin") or "",
-            "seen": comp.get("seen") or "", "seenOn": comp.get("seen_on") or "",
+            "seen": comp.get("seen") or "", "seenOn": comp.get("seen_on") or "", "seenWhy": comp.get("seen_why") or "",
             "history": comp.get("history") or "", "histFlag": calc.history_flag(comp.get("history")),
             "miles": comp.get("miles") or 0, "when": calc.date_key(comp.get("date")),
             "image": showcase.data_url(comp_photos.get(comp.get("img") or "") or comp_images.get(url)),
@@ -938,8 +939,12 @@ function create(root) {
     const url = safeUrl(k.url);
     const flag = k.kind === "find" ? ""                      /* the fold it sits in says what it is */
       : k.kind === "page" ? '<div class="c-flag">This link opens a results page, not this car.</div>' : (k.linkOk === false ? '<div class="c-flag">Link not confirmed. Open it before you cite it.</div>' : "");
-    const seen = k.group !== "live" || k.kind === "find" ? "" : k.seen === "live" ? `<div class="c-seen ok">Checked ${esc(k.seenOn)}: the page still shows it for sale.</div>`
-      : k.seen === "unknown" ? `<div class="c-seen">Could not confirm it is still for sale. Open it to check.</div>`
+    /* what the last look at its page found, and what that rests on */
+    const because = k.seenWhy ? ` (${esc(k.seenWhy)})` : "";
+    const seen = k.kind === "find" ? "" : k.group === "ended" ? (k.seen === "gone" && k.seenWhy ? `<div class="c-seen">Checked ${esc(k.seenOn)}: no longer for sale${because}.</div>` : "")
+      : k.group !== "live" ? "" : k.seen === "live" ? `<div class="c-seen ok">Checked ${esc(k.seenOn)}: still for sale${because || " (the page still shows it)"}.</div>`
+      : k.seen === "listed" ? `<div class="c-seen">Checked ${esc(k.seenOn)}: ${esc(k.seenWhy || "a site that copies listings still shows it")}. That site copies sellers' listings and can be days behind, so open it to be sure.</div>`
+      : k.seen === "unknown" ? `<div class="c-seen">Checked ${esc(k.seenOn)}: could not confirm it is still for sale${because}. Open it to check.</div>`
       : '<div class="c-seen">Not checked yet. Tap Check they are still for sale.</div>';
     const out = big && k.group === "sold" && !k.use, flip = big && k.group === "sold" ? `<button type="button" class="textbtn usebtn" data-i="${k.idx}" data-price="${k.price}" data-use="${k.use ? 0 : 1}">${k.use ? "Leave it out" : "Count it"}</button>` : "";
     const text = `<div><i class="tdot t${k.trust || 3}" title="${k.trust === 1 ? "Opens on its own page, has a VIN, nothing left to confirm" : k.trust === 2 ? "Opens on its own page, with something left to confirm" : "Nothing to open and check"}"></i><span class="pill ${esc(k.group)}${k.unsure ? " unsure" : ""}">${esc(k.label)}</span>${out ? `<span class="pill out">Not counted: ${esc(k.why)}</span>` : ""}<span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
@@ -981,7 +986,7 @@ function create(root) {
     const d = S.d, c = d.case || {}, [nSold, nSale] = counts(d);
     const sort = S.sort || (S.sort = { key: "trust", dir: 1 });
     /* most reliable first: own page with a VIN, then own page, then the rest; newest first within each. Cars missing a value go last. */
-    const order = (x, y) => { if (sort.key === "trust") return ((x.trust || 3) - (y.trust || 3)) * sort.dir || (x.group === "live" && x.seen !== "live" ? 1 : 0) - (y.group === "live" && y.seen !== "live" ? 1 : 0) || (y.when || 0) - (x.when || 0) || x.price - y.price;
+    const order = (x, y) => { if (sort.key === "trust") return ((x.trust || 3) - (y.trust || 3)) * sort.dir || (x.group === "live" ? ({ live: 0, listed: 1 }[x.seen] ?? 2) : 0) - (y.group === "live" ? ({ live: 0, listed: 1 }[y.seen] ?? 2) : 0) || (y.when || 0) - (x.when || 0) || x.price - y.price;
       const p = x[sort.key] || 0, q = y[sort.key] || 0; if (!p || !q) return (q ? 1 : 0) - (p ? 1 : 0); return (p - q) * sort.dir; };
     const list = (groups, title, only, lead) => { const rows = (d.comps || []).filter((k) => groups.includes(k.group) && (!only || only(k))).sort(order); return rows.length ? `<h3>${title} · ${rows.length}</h3>${lead || ""}` + rows.map((k) => compCard(k, true)).join("") : ""; };
     const arrow = (key) => (sort.key === key ? (sort.dir > 0 ? " ↑" : " ↓") : "");

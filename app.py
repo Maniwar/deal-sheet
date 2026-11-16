@@ -61,7 +61,7 @@ EDIT_FIELDS = ("year", "make", "model", "trim", "body", "transmission", "drivetr
                "exterior", "interior", "seller", "location", "history")
 SELLER_TYPES = ["", "dealer", "private", "auction"]
 COMP_COLUMNS = ["use", "status", "price", "miles", "title", "date", "source", "url", "note", "link_ok", "img", "options", "vin",
-                "available", "seen", "seen_on", "body", "history", "aside", "gearbox", "gear_seen"]
+                "available", "seen", "seen_on", "seen_why", "body", "history", "aside", "gearbox", "gear_seen"]
 DOT = " \u00b7 "
 QR_SIZES = {"Large (1.1 in)": 82, "Extra large (1.5 in)": 108}
 EMPTY_DEAL = {"car": {}, "comps": [], "offer": {}, "summary": "", "message": "", "sample": False}
@@ -322,28 +322,109 @@ def drop_spare_trims(comps: list[dict]) -> tuple[list[dict], int]:
     return kept, len(comps) - len(kept)
 
 
-def check_listings(comps: list[dict], car: dict | None = None, say=None, only_new: bool = False) -> tuple[list[dict], dict]:
-    """Open each for-sale page, where its site allows, and record what it shows.
+# Why the app's own request could not read a page, where another reader might: the site's rules shut the app
+# out, the site turned it away, the page did not load, or it is built by scripts.
+SECOND_LOOK = ("robots", "refused", "unreachable", "slow", "empty")
 
-    Sets `seen` (live, gone or unknown) and `seen_on` on each comp, fills in a VIN and a transmission the page
-    states, moves a car whose page says sold or removed out of the for-sale list, and drops a car whose own page
-    states the other transmission from the buyer's. 'live' is only said with proof that the car is on the page
-    (see `previews.judge_page`). Returns (the comps that stay, how many were live, gone, unknown and wrong).
+
+def second_look(reader, cars: list[dict], say=None) -> tuple[dict, dict]:
+    """Pages this app could not read, opened by Claude's page reader and judged by the same rules.
+
+    `reader` is (client, model). Returns ({url: (state, VIN, gearbox, why, code)}, what it used). The reader only
+    fetches: the verdict comes from `previews.judge_page` run on the text it brings back, not from the model.
+    A copy more than six hours old cannot show that a car is still for sale.
+    """
+    client, model = reader
+    found, used = {}, []
+
+    def one(car: dict):
+        page = llm.open_page(client, model, car["url"])
+        if not page["text"]:
+            return car["url"], ("unknown", "", "", page["error"], "reader"), page["used"]
+        look = previews.judge_page(page["text"], car["url"], page["url"], str(car.get("vin") or ""), calc.to_int(car.get("price")) or 0,
+                                   calc._year_of(car.get("title")), title=page["title"])
+        state, vin, gearbox, why, code = look
+        age = None
+        try:
+            age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(page["at"].replace("Z", "+00:00"))).total_seconds() / 3600
+        except (ValueError, TypeError, AttributeError):
+            pass
+        if state in ("live", "listed") and age is not None and age > 6:
+            state, why, code = "unknown", f"the newest copy Claude's reader had was {int(age // 24)} days old" if age >= 48 else "the newest copy Claude's reader had was hours old", "stale"
+        return car["url"], (state, vin, gearbox, f"read by Claude's page reader: {why}", code), page["used"]
+
+    if say and cars:
+        say(f"Asking Claude's page reader to open {len(cars)} page{'s' if len(cars) != 1 else ''} the app could not read itself")
+    pool = ThreadPoolExecutor(max_workers=6)
+    try:
+        for future in [pool.submit(one, car) for car in cars[:24]]:
+            try:
+                url, look, spent = future.result()
+            except llm.LLMError as exc:
+                if exc.kind in ("key", "rate"):
+                    if say:
+                        say(f"Claude's page reader stopped: {exc}")
+                    break
+                continue
+            found[url] = look
+            used.append(spent)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return found, llm.add_used(*used)
+
+
+def check_listings(comps: list[dict], car: dict | None = None, say=None, only_new: bool = False, reader=None,
+                   again: bool = False) -> tuple[list[dict], dict]:
+    """Open each for-sale page and record what it shows, with the reason.
+
+    Two readers, the same rules. The app opens every page itself, all at once. Pages it could not read (a site
+    that shuts apps out, a page built by scripts) go to Claude's page reader when `reader` (client, model) is
+    given. Either way the answer comes from `previews.judge_page`: 'live' only with proof the car is on the
+    seller's page, 'listed' when only a site that copies listings shows it, 'gone' only with proof, else 'unknown'.
+
+    Sets `seen`, `seen_on` and `seen_why` on each comp, fills in a VIN and a transmission the page states, moves
+    a car whose page says sold or removed out of the for-sale list, and drops a car whose own page states the
+    other transmission from the buyer's. With `again`, listings marked gone before are opened too, and one that
+    is provably back for sale returns to the list. Returns (the comps that stay, counts of live, listed, gone,
+    unknown and wrong, with 'used' for what Claude's reader cost).
     """
     today = dt.date.today().strftime("%b %-d")
-    listed = [comp for comp in comps if calc.comp_group(comp) == "live" and comp["url"] and not calc.is_list_page(comp["url"])
-              and not (only_new and comp.get("seen") and comp.get("seen_on") == today)]      # `only_new`: not the ones opened a moment ago
+
+    def wanted(comp: dict) -> bool:
+        if comp["status"] != "asking" or not comp["url"] or calc.is_list_page(comp["url"]):
+            return False
+        if calc.comp_group(comp) == "live":
+            return not (only_new and comp.get("seen") and comp.get("seen_on") == today)      # `only_new`: not the ones opened a moment ago
+        return again and comp.get("seen") == "gone"                                          # one the app itself moved out
+
+    listed = [comp for comp in comps if wanted(comp)]
     looks = previews.listing_checks(listed)                  # every page at the same time
-    count = {"live": 0, "gone": 0, "unknown": 0, "wrong": 0}
+    count = {"live": 0, "listed": 0, "gone": 0, "unknown": 0, "wrong": 0, "used": {}}
+    retry = [comp for comp in listed if looks.get(comp["url"], ("unknown", "", "", "", "slow"))[0] == "unknown"
+             and looks.get(comp["url"], ("", "", "", "", "slow"))[4] in SECOND_LOOK]
+    if reader and retry:
+        more, count["used"] = second_look(reader, retry, say)
+        for url, look in more.items():
+            if look[0] != "unknown" or look[4] != "reader":  # the second reader got somewhere: its answer stands
+                looks[url] = look
+            else:                                            # neither reader could open it: say so
+                first = looks.get(url, ("unknown", "", "", "", ""))
+                looks[url] = (first[0], first[1], first[2], f"{first[3]}, and {look[3]}", first[4])
     for comp in listed:
-        state, vin, gearbox = looks.get(comp["url"], ("unknown", "", ""))
-        comp["seen"], comp["seen_on"] = state, today
+        state, vin, gearbox, why, _ = looks.get(comp["url"], ("unknown", "", "", "the page did not load in time", "slow"))
+        was_gone = calc.comp_group(comp) != "live"
+        if was_gone and state not in ("live", "listed"):
+            continue                             # still gone, or nothing new to say: it stays where it is
+        comp["seen"], comp["seen_on"], comp["seen_why"] = state, today, why
         if vin and not comp.get("vin"):
             comp["vin"] = vin                    # the page states it, so it is there to copy
         if gearbox:
             comp["gearbox"], comp["gear_seen"] = gearbox, "page"     # the car's own page outranks what a results list said
-        if state == "live":
-            if comp.get("link_ok") is False:     # the app opened the link and found the car on it: the link is confirmed
+        if state in ("live", "listed"):
+            if was_gone:                         # it was marked gone and its page shows it again
+                comp["available"] = "yes"
+                comp["note"] = comp["note"].replace("The page now says it has sold or gone. ", "").replace("The page now says it has sold or gone.", "").strip()
+            if comp.get("link_ok") is False:     # the link was opened and the car found on it: the link is confirmed
                 comp["link_ok"] = True
                 if comp.get("aside") == "lead":
                     comp["aside"], comp["use"] = "", True
@@ -354,23 +435,27 @@ def check_listings(comps: list[dict], car: dict | None = None, say=None, only_ne
     kept, count["wrong"] = same_gearbox_only(car or {}, comps, say)
     stays = {id(comp) for comp in kept}
     for comp in listed:
-        if id(comp) in stays:
+        if id(comp) in stays and comp.get("seen_on") == today and comp.get("seen") in count:
             count[comp["seen"]] += 1
     return kept, count
 
 
 def checked_note(count: dict) -> str:
-    total = count["live"] + count["gone"] + count["unknown"]
+    total = count["live"] + count.get("listed", 0) + count["gone"] + count["unknown"]
     if not total:
         return ""
     bits = []
     if count["live"]:
-        bits.append(f"{count['live']} still listed")
+        bits.append(f"{count['live']} still for sale on the seller's page")
+    if count.get("listed"):
+        bits.append(f"{count['listed']} still listed, but only on a site that copies listings and can lag")
     if count["gone"]:
-        bits.append(f"{count['gone']} already sold or gone")
+        bits.append(f"{count['gone']} sold or gone")
     if count["unknown"]:
         bits.append(f"{count['unknown']} could not be confirmed either way, so open those to check")
-    return f"The app opened {total} for-sale page{'s' if total != 1 else ''}: " + ", ".join(bits) + "."
+    cost = llm.used_note(count.get("used"))
+    return (f"The app opened {total} for-sale page{'s' if total != 1 else ''}: " + ", ".join(bits) + "."
+            + (f" Claude's page reader helped. {cost}" if cost else ""))
 
 
 def progress_for(slot):
@@ -394,10 +479,11 @@ def progress_for(slot):
 
 
 def add_counts(*counts) -> dict:
-    total = {"live": 0, "gone": 0, "unknown": 0, "wrong": 0}
+    total = {"live": 0, "listed": 0, "gone": 0, "unknown": 0, "wrong": 0}
     for count in counts:
         for key in total:
             total[key] += int((count or {}).get(key) or 0)
+    total["used"] = llm.add_used(*[(count or {}).get("used") for count in counts])
     return total
 
 
@@ -415,7 +501,7 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
         cars, wrong = same_gearbox_only(car, cars, tell)
         if cars:
             tell("Opening each for-sale page to see whether the car is still there and what its page says")
-        cars, count = check_listings(cars, car, tell)
+        cars, count = check_listings(cars, car, tell, reader=(client, model))
         return {**sale, "comps": cars, "count": add_counts(count, {"wrong": wrong}), "off_body": off_body}
 
     pool = ThreadPoolExecutor(max_workers=1)                 # cars for sale are looked for while the sales are
@@ -440,7 +526,7 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     dropped += int(sale.get("off_body") or 0)
     comps, wrong_box = same_gearbox_only(car, comps, tell)
     comps, spare = drop_spare_trims(comps)
-    comps, count = check_listings(comps, car, tell, only_new=True)   # the for-sale cars the sales searches turned up
+    comps, count = check_listings(comps, car, tell, only_new=True, reader=(client, model))   # the for-sale cars the sales searches turned up
     count = add_counts(count, sale.get("count"))
     note, wrong_box = checked_note(count), wrong_box + count["wrong"]
     leads = calc.set_aside_leads(comps)            # cars that cannot be opened and checked stay out of the numbers
@@ -788,7 +874,7 @@ def comps_frame(comps: list[dict]) -> pd.DataFrame:
     frame["use"] = frame["use"].astype("boolean").fillna(True).astype(bool)
     for column in ("price", "miles"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Int64")
-    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available", "seen", "seen_on", "body", "history", "aside", "gearbox", "gear_seen"):
+    for column in ("status", "title", "date", "source", "url", "note", "img", "options", "vin", "available", "seen", "seen_on", "seen_why", "body", "history", "aside", "gearbox", "gear_seen"):
         frame[column] = frame[column].astype("string").fillna("")
     return frame
 
@@ -940,8 +1026,10 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
     progress = job.progress
     if kind == "verify":                                         # look at each for-sale page again
         progress.say("Opening each for-sale page to see whether the car is still there")
-        have, count = check_listings(have, the_car, progress.say)
+        have, count = check_listings(have, the_car, progress.say, reader=(client, model) if client else None, again=True)
         note, wrong = checked_note(count), count["wrong"]
+        if not client and count["unknown"]:
+            note += " Connect your Anthropic API key and Claude's page reader will open the ones the app could not."
         if wrong:
             note = f"{wrong} car{'s' if wrong != 1 else ''} whose page states the other transmission {'were' if wrong != 1 else 'was'} removed. {note}".strip()
         return {"pending": {"add_comps": [], "keep": have}, "notices": [note or "There are no for-sale listings to check yet."]}
@@ -952,7 +1040,7 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
         pool = ThreadPoolExecutor(max_workers=1)                 # and the for-sale pages already held, opened meanwhile
         if any(calc.comp_group(comp) == "live" for comp in have):
             progress.say("Opening the for-sale pages you already had, to see whether each car is still there")
-        opened = pool.submit(check_listings, have, the_car, progress.say)
+        opened = pool.submit(check_listings, have, the_car, progress.say, False, (client, model), True)
         try:
             found = research_market(client, model, the_car, searches, progress=progress)
         finally:
@@ -983,7 +1071,7 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
             row = {**comp, "trim": ""}
             if calc.ease_trim_mark(the_car, row):
                 comp["note"], comp["use"], back = row["note"], True, back + 1
-        have, count = check_listings(have, the_car, progress.say, only_new=True)   # one that only now has a page of its own
+        have, count = check_listings(have, the_car, progress.say, only_new=True, reader=(client, model))   # one that only now has a page of its own
         note = checked_note(add_counts(early, count))            # the new ones were opened by the search itself
         sold = sum(comp["status"] != "asking" for comp in fresh)
         bits = [f"{better} car{'s' if better != 1 else ''} now with a direct link and VIN" if better else "",
@@ -997,7 +1085,7 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
     if wants_sale and fresh:
         progress.say("Opening each new page to see whether the car is still there")
     if wants_sale:
-        fresh, count = check_listings(fresh, the_car, progress.say)
+        fresh, count = check_listings(fresh, the_car, progress.say, reader=(client, model))
         note = checked_note(count)
     cost = llm.used_note(found.get("used"))
     if cost:
@@ -1124,7 +1212,7 @@ def handle_stage_requests(progress_slot) -> None:
                 continue                         # the same request again (the page came back): it is already under way
             ss["stage_error"] = still_working(running)
         else:
-            client = llm.get_client(ss["api_key"]) if kind == "more" else None
+            client = llm.get_client(ss["api_key"]) if ss["api_key"] else None      # a check runs without a key, with fewer pages read
             model, searches = llm.MODELS[ss["model_label"]], int(ss["max_searches"])
             start_job(jobs.Job(kind, lambda job, kind=kind, what=what: more_work(job, kind, what, the_car, have, client, model, searches),
                                car_id=ss["active"], name=short_car(the_car), flag="verify" if kind == "verify" else (what or "sold")))
