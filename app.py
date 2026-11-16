@@ -376,7 +376,7 @@ def second_look(reader, cars: list[dict], say=None) -> tuple[dict, dict]:
 
 
 def check_listings(comps: list[dict], car: dict | None = None, say=None, only_new: bool = False, reader=None,
-                   again: bool = False) -> tuple[list[dict], dict]:
+                   again: bool = False, listings: bool = True) -> tuple[list[dict], dict]:
     """Open each for-sale page and record what it shows, with the reason.
 
     Two readers, the same rules. The app opens every page itself, all at once. Pages it could not read (a site
@@ -387,7 +387,8 @@ def check_listings(comps: list[dict], car: dict | None = None, say=None, only_ne
     Sets `seen`, `seen_on` and `seen_why` on each comp, fills in a VIN and a transmission the page states, moves
     a car whose page says sold or removed out of the for-sale list, and drops a car whose own page states the
     other transmission from the buyer's. With `again`, listings marked gone before are opened too, and one that
-    is provably back for sale returns to the list. Returns (the comps that stay, counts of live, listed, gone,
+    is provably back for sale returns to the list. With `listings` off, cars held from the big listing sites
+    are left alone: a refresh reads those sites' own pages again, which settles them all in one go. Returns (the comps that stay, counts of live, listed, gone,
     unknown and wrong, with 'used' for what Claude's reader cost).
     """
     today = dt.date.today().strftime("%b %-d")
@@ -395,7 +396,11 @@ def check_listings(comps: list[dict], car: dict | None = None, say=None, only_ne
     def wanted(comp: dict) -> bool:
         if comp["status"] != "asking" or not comp["url"] or calc.is_list_page(comp["url"]):
             return False
+        if not listings and calc.from_listings(comp):
+            return False
         if calc.comp_group(comp) == "live":
+            if calc.read_live(comp, today):
+                return False                     # read off the listing site's own page today: opening it again costs and adds nothing
             return not (only_new and comp.get("seen") and comp.get("seen_on") == today)      # `only_new`: not the ones opened a moment ago
         return again and comp.get("seen") == "gone"                                          # one the app itself moved out
 
@@ -1042,7 +1047,7 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
         pool = ThreadPoolExecutor(max_workers=1)                 # and the for-sale pages already held, opened meanwhile
         if any(calc.comp_group(comp) == "live" for comp in have):
             progress.say("Opening the for-sale pages you already had, to see whether each car is still there")
-        opened = pool.submit(check_listings, have, the_car, progress.say, False, (client, model), True)
+        opened = pool.submit(check_listings, have, the_car, progress.say, False, (client, model), True, False)
         try:
             found = research_market(client, model, the_car, searches, progress=progress)
         finally:
@@ -1055,7 +1060,15 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
     else:
         found = llm.research_comps(client, model, the_car, max_searches=searches, known=known, progress=progress)
     better = calc.upgrade_leads(have, found["comps"])            # a lead whose own page has now turned up takes that page
-    relisted = calc.relist(have, found["comps"], dt.date.today().strftime("%b %-d")) if (refresh or wants_sale) else {}
+    relisted, cleared = {}, 0
+    if refresh or wants_sale:
+        now = dt.date.today().strftime("%b %-d")
+        if any(calc.read_live(comp, now) for comp in found["comps"]):       # the sites' own pages were read: what only a stored copy showed goes
+            cleared = sum(calc.unproven_listing(comp) for comp in have)
+            have = [comp for comp in have if not calc.unproven_listing(comp)]
+            if cleared:
+                progress.say(f"Cleared {cleared} car{'s' if cleared != 1 else ''} that came from stored copies of listing-site pages, with no VIN to check")
+        relisted = calc.relist(have, found["comps"], now)
     if relisted.get("repriced"):
         progress.say(f"{relisted['repriced']} car{'s' if relisted['repriced'] != 1 else ''} on the listing sites {'have' if relisted['repriced'] != 1 else 'has'} a new price")
     fresh = calc.new_comps(have, found["comps"])
@@ -1081,6 +1094,7 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
         sold = sum(comp["status"] != "asking" for comp in fresh)
         bits = [f"{better} car{'s' if better != 1 else ''} now with a direct link and VIN" if better else "",
                 f"{relisted['repriced']} listed car{'s' if relisted['repriced'] != 1 else ''} with a new price" if relisted.get("repriced") else "",
+                f"{cleared} unverifiable listing{'s' if cleared != 1 else ''} cleared" if cleared else "",
                 f"{sold} more sale{'s' if sold != 1 else ''} and no-sales" if sold else "",
                 f"{len(fresh) - sold} more for sale" if len(fresh) - sold else "",
                 f"{back} sale{'s' if back != 1 else ''} counted again that had been set aside over a trim detail" if back else ""]

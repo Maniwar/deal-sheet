@@ -20,7 +20,7 @@ import os
 import re
 import threading
 import time
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
@@ -39,6 +39,7 @@ _NO_EFFORT: set[str] = set()                 # models that turned down an effort
 WEB_SEARCH_TYPE = "web_search_20250305"
 WEB_FETCH_TYPE = "web_fetch_20250910"         # opens a page the search returned and reads all of it, links included
 _FETCH_OFF: list[str] = []                    # set once the API has turned the fetch tool down, so it is not offered again
+_FRESH_OFF: list[str] = []                    # set once the API has turned down the form of it that skips the stored copy
 
 
 class LLMError(Exception):
@@ -143,6 +144,22 @@ def _result_links(response) -> list[str]:
         if _field(block, "type") == "web_search_tool_result" and isinstance(body, list):
             links += [str(_field(result, "url")) for result in body if _field(result, "url")]
     return links
+
+
+def _opened_pages(response) -> tuple[list[dict], list[str]]:
+    """(the pages the reader opened in this response, each {"url", "at", "text"}; why each failed open failed)."""
+    pages, errors = [], []
+    for block in _field(response, "content", []) or []:
+        if _field(block, "type") != "web_fetch_tool_result":
+            continue
+        body = _field(block, "content")
+        if _field(body, "type") == "web_fetch_result":
+            data = _field(_field(_field(body, "content"), "source"), "data")
+            if isinstance(data, str) and data.strip():
+                pages.append({"url": str(_field(body, "url") or ""), "at": str(_field(body, "retrieved_at") or ""), "text": data})
+        else:
+            errors.append(str(_field(body, "error_code") or "unknown"))
+    return pages, errors
 
 
 def _search_urls(response) -> set[str]:
@@ -865,12 +882,15 @@ def _tokens_note(used: dict) -> str:
 
 def _research(client, model: str, prompt: str, max_searches: int, max_rounds: int, problem: str,
               car: dict | None = None, only=None, never=None, progress: Progress | None = None, label: str = "Search",
-              opens: int = 0) -> dict:
+              opens: int = 0, fresh: bool = False, page_tokens: int = 16000) -> dict:
     """Run one web research turn that ends in a record_comps call.
 
     `only` limits the searches to those sites; `never` keeps sites out. The API takes one or the other.
     With `opens` (and `only`), the model may also open that many pages on those sites and read them whole:
     a market page then gives every car with the address of its own page, which a search snippet does not.
+    With `fresh` the reader is asked for the page as it is now, not a stored copy; a key or model that does not
+    take that form of the reader gets the plain one. The result's "opened" holds each page that was read
+    ({"url", "at", "text"}), so the caller can check a recorded car against the page itself.
 
     What keeps the cost down: the API runs the searches in a loop on its side and reads everything found so far
     again at each step. With prompt caching on from the first request it puts a cache point after each search
@@ -882,11 +902,16 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
         search["allowed_domains"] = list(only)
     elif never:
         search["blocked_domains"] = list(never)
+    live = bool(fresh and not _FRESH_OFF)
     reader = {"type": WEB_FETCH_TYPE, "name": "web_fetch", "max_uses": int(opens), "allowed_domains": list(only or []),
-              "max_content_tokens": 16000}
+              "max_content_tokens": int(page_tokens)}
+    if live:                                       # the page as it is now, handed over whole
+        reader = {**reader, "type": FETCH_FRESH, "use_cache": False, "allowed_callers": ["direct"]}
     record = {**COMPS_TOOL, "cache_control": {"type": "ephemeral"}}       # a cache marker on the request turns on the per-result cache points
     can_open = bool(opens and only and not _FETCH_OFF)
     tools = [search, reader, record] if can_open else [search, record]
+    opened: list[dict] = []
+    open_errors: list[str] = []
     messages = [{"role": "user", "content": prompt}]
     seen_urls: set[str] = set()
     links: list[str] = []
@@ -902,17 +927,34 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
         except LLMError as exc:
             if not (can_open and reader in tools and exc.kind == "request" and "fetch" in str(exc).lower()):
                 raise
-            _FETCH_OFF.append(str(exc))            # this key or model cannot use the page reader: search alone from now on
-            tools = send["tools"] = [search, record]
-            if progress:
-                progress.say(f"{label}: pages cannot be opened with this key, so reading the search results alone")
-            response = _create(client, **send)
+            response = None
+            if live:                               # this key or model does not take the fresh form: try the plain reader
+                _FRESH_OFF.append(str(exc))
+                live = False
+                reader = {key: value for key, value in reader.items() if key not in ("use_cache", "allowed_callers")} | {"type": WEB_FETCH_TYPE}
+                tools = send["tools"] = [search, reader, record]
+                try:
+                    response = _create(client, **send)
+                except LLMError as again:
+                    if not (again.kind == "request" and "fetch" in str(again).lower()):
+                        raise
+                    exc = again
+            if response is None:
+                _FETCH_OFF.append(str(exc))        # this key or model cannot use the page reader: search alone from now on
+                can_open = False
+                tools = send["tools"] = [search, record]
+                if progress:
+                    progress.say(f"{label}: pages cannot be opened with this key, so reading the search results alone")
+                response = _create(client, **send)
         usage = _field(response, "usage")
         for key in used:
             used[key] += int(_field(usage, key) or 0) if usage is not None else 0
         searches += int(_field(_field(usage, "server_tool_use"), "web_search_requests") or 0) if usage is not None else 0
         seen_urls |= _search_urls(response)
         links += [link for link in _result_links(response) if link not in links]
+        pages_now, errors_now = _opened_pages(response)
+        opened += pages_now
+        open_errors += errors_now
         failed += _search_errors(response)
         recorded = _tool_input(response, "record_comps")
         if isinstance(recorded, dict):
@@ -938,6 +980,9 @@ def _research(client, model: str, prompt: str, max_searches: int, max_rounds: in
                 "failed": failed,
                 "pages": pages,
                 "links": links,                    # every address the searches returned, as given
+                "opened": opened,                  # every page the reader opened, with its text
+                "open_errors": open_errors,        # why each open that failed did
+                "live": live,                      # the opens asked for the page as it is now
                 "used": {**used, "searches": searches},
             }
         messages.append({"role": "assistant", "content": _field(response, "content")})
@@ -1195,66 +1240,173 @@ def _marketplace_prompt(car: dict, today: str, max_searches: int = 3) -> str:
 
 
 _NO_LISTING_SITE: set[str] = set()          # listing sites the search tool will not be limited to, once known
+_SITE_NAMES = {"cars.com": "Cars.com", "cargurus.com": "CarGurus", "autotrader.com": "Autotrader", "edmunds.com": "Edmunds"}
+LISTING_OPENS = 3                           # results pages opened live per run, one per site
+LISTING_PAGE_TOKENS = 30000                 # how much of each page is read: about twenty cars with their VINs
 
 
-def _listings_prompt(car: dict, today: str, max_searches: int, sites: list[str]) -> str:
+def _listings_prompt(car: dict, today: str, max_searches: int, sites: list[str], opens: int = LISTING_OPENS) -> str:
     name = car_title(car) or "this car"
     place = str(car.get("location") or "").strip()
-    names = ", ".join({"cars.com": "Cars.com", "cargurus.com": "CarGurus", "autotrader.com": "Autotrader", "edmunds.com": "Edmunds"}[site]
-                      for site in sites)
+    names = ", ".join(_SITE_NAMES[site] for site in sites)
     return (
-        f"Today is {today}. Find cars like this one that are listed for sale now on the big listing sites. Your "
-        f"searches are limited to {names}, where most dealers' cars are shown.\n\n"
+        f"Today is {today}. Find cars like this one that are listed for sale now on the big listing sites: {names}. "
+        "Your searches and page opens are limited to those sites.\n\n"
         f"{_car_block(car)}\n\n"
-        f"Run up to {max_searches} searches, then call record_comps once. Word them the way a shopper would, for "
-        f"example \"used {name} for sale\"" + (f", \"{name} for sale {place}\"" if place else "") +
-        f" and \"used {str(car.get('make') or '').strip()} {str(car.get('model') or '').strip()} {str(car.get('trim') or '').strip()} for sale\".\n"
-        "What comes back is mostly results pages: each one lists many cars, as lines of text and often again as a "
-        "block of data for each car. Read every car on every page.\n"
-        "Rules:\n"
-        "- Record a car only if it is used, has a price, and is the same model as this one"
-        + (f", of model year {car.get('year')} or the year either side" if car.get("year") else "") + ".\n"
+        "How to work:\n"
+        f"1. Search (at most {max_searches} searches, sent together) to find each site's results page for this car, "
+        f"for example \"used {name} for sale\"" + (f" and \"used {name} for sale {place}\"" if place else "") + ".\n"
+        f"2. Open up to {opens} results pages with web_fetch, each on a different site. The search engine's copy of "
+        "a results page can be weeks old, with old prices and cars that have gone, so a car counts only when you "
+        "read it on a page you opened yourself.\n"
+        "   Which page to open on a site: the one for this exact model, year and trim when there is one. For a "
+        "rare car take the page for the whole country (an address with no town in it). For a common car take "
+        + (f"the page for {place} or the nearest big city to it" if place else "the page for the whole country") + ".\n"
+        "3. Call record_comps once with the cars on the pages you opened.\n"
+        "Rules for each car:\n"
+        "- Only a used car, with a price and a VIN, that is the same model as this one"
+        + (f", of model year {car.get('year')} or the year either side" if car.get("year") else "") + ". No VIN on the page, no record.\n"
         + _trim_rule(car) + _gear_rule(car) +
+        "- How these sites word a gearbox: 'automated manual', 'DCT', 'double clutch' and 'automatic' are all "
+        "automatic; only 'manual' or 'N-speed manual' is a manual.\n"
         "- A drive type is part of the trim on these sites: an all-wheel-drive car and a rear-wheel-drive car are "
         "different cars. Leave out the other one when this car states which it is.\n"
-        "- For each car: status asking, available yes; the title as the site words it; the price in whole dollars; "
-        "the miles; the dealer or seller in source; the town and state at the start of the note, then the site "
-        "it was seen on, for example 'Plano, TX. Seen on Cars.com.'; the date it was listed when shown.\n"
-        "- The VIN whenever the page shows one for that car (beside 'VIN', or as vehicleIdentificationNumber in the "
-        "car's block of data). Copy it exactly, all 17 characters, and never guess one. It is what lets the buyer "
-        "find the car.\n"
-        "- url: the car's own page when the search returned it (an address with /vehicle/, /vehicledetail/ or "
-        "/vin/ in it). Otherwise the exact address of the results page you read the car on. Never build an address.\n"
-        "- The same car is often on several sites, and twice on one page. Record it once.\n"
-        "- Record up to 30 cars. Prefer the ones nearest this car in miles"
-        + (f" and nearest {place}" if place else "") + ".\n"
-        "- Record only what the pages show. Never fill a gap from memory.\n"
-        "- Send your searches together in one step, then record. Do not search again for more detail on a car.\n"
-        "In the summary say how many cars you recorded from each site and how many of them show a VIN."
+        "- status asking, available yes. title: year, make, model and trim as the page words them. price: the "
+        "price shown for that car, in whole dollars, copied exactly. miles: copied exactly.\n"
+        "- vin: all 17 characters, copied exactly from that car's entry on the opened page. Never guess one.\n"
+        "- url: the address of that car's own page as the opened page gives it (it has /vin/, /vehicledetail/ or "
+        "/details/ in it), made absolute with the site's host. If the page gives none, the address of the page "
+        "you opened. Never build an address from parts.\n"
+        "- source: the dealer's name when the page names it, else the site's name.\n"
+        "- note: the car's own town and state first (where the dealer is, not how far away the page says it is), "
+        "then 'Seen on' and the site, for example 'Lilburn, GA. Seen on Edmunds.'\n"
+        "- date: the day it was listed ('Listed since') when the page shows it.\n"
+        "- The same VIN on two sites: record it for each site, so the buyer sees both prices.\n"
+        "- Record up to 30 cars. When a page has more, take the ones nearest this car in miles.\n"
+        "- If no page could be opened, record the cars the search results themselves show with a VIN, and start "
+        "the summary with 'No page could be opened.'\n"
+        "In the summary say which pages you opened and how many cars you recorded from each."
     )
+
+
+def _on_page(comp: dict, pages: list[dict]) -> dict | None:
+    """The opened page that shows this car: its VIN is on the page, and its price stands close to that VIN.
+
+    A car is trusted only when the page itself bears it out, so a price copied from the row above, a VIN put
+    together from memory, or a car that only a stored copy of the page showed, does not get through.
+    """
+    vin, price = comp.get("vin") or "", int(comp.get("price") or 0)
+    if not vin or not price:
+        return None
+    forms = (f"{price:,}", str(price))
+    for page in pages:
+        text = page["text"]
+        upper = text.upper()
+        at = upper.find(vin)
+        while at >= 0:
+            near = text[max(0, at - 2500):at + 1500]
+            if any(form in near for form in forms):
+                return page
+            at = upper.find(vin, at + 1)
+    return None
+
+
+def _from_listing_sites(found: dict | None, car: dict, progress: Progress | None = None) -> tuple[list[dict], str]:
+    """The cars a search of the listing sites recorded, kept only when a page that was opened bears them out.
+
+    Returns (cars, a line for the summary). A car on a page read live is marked as seen there today. When no
+    page could be opened at all, a car the search results showed with a VIN is kept as a lead: not counted,
+    and marked as coming from a stored copy that may be weeks old.
+    """
+    if not found:
+        return [], ""
+    today = dt.date.today().strftime("%b %-d")
+    pages, year = found.get("opened") or [], to_int(car.get("year"))
+    kept, left = [], 0
+    for comp in found.get("comps", []):
+        site = listing_site(comp["url"])
+        then = re.search(r"\b(19|20)\d\d\b", comp["title"])
+        if (comp["status"] != "asking" or not comp["price"] or not site or not comp.get("vin")
+                or (year and then and abs(int(then.group()) - year) > 1)):
+            left += 1
+            continue
+        where = _SITE_NAMES[site]
+        comp["available"] = comp.get("available") or "yes"
+        if "seen on" not in comp["note"].lower():
+            comp["note"] = f"{comp['note']} Seen on {where}.".strip()
+        page = _on_page(comp, pages)
+        if page is not None:
+            path = urlparse(comp["url"]).path.rstrip("/").lower()
+            if link_kind(comp["url"]) == "car" and len(path) > 8 and path in page["text"].lower():
+                comp["link_ok"] = True                       # the page itself gives that address, in full or from the site's root
+            if not comp.get("link_ok") or link_kind(comp["url"]) != "car":    # no page of its own was given: the page it was read on
+                comp["url"], comp["link_ok"] = page["url"], True
+            fresh = found.get("live") or page["at"][:10] == dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+            comp["seen"], comp["seen_on"] = "listed", today
+            comp["seen_why"] = f"on the {where} results page, read live" if fresh else f"on a copy of the {where} results page from {page['at'][:10] or 'an unknown day'}"
+            kept.append(comp)
+        elif not pages:                                      # nothing could be opened: a lead from a stored copy, never counted
+            links = [url for url in found.get("links", []) if listing_site(url) == site and link_kind(url) != "car"]
+            if not comp.get("link_ok"):
+                if not links:
+                    left += 1
+                    continue
+                comp["url"], comp["link_ok"] = links[0], True
+            comp["seen"], comp["seen_on"] = "unknown", today
+            comp["seen_why"] = f"read from a search engine's stored copy of the {where} results, which can be weeks old, so the price may have changed"
+            comp["use"], comp["aside"] = False, "lead"
+            kept.append(comp)
+        else:
+            left += 1                                        # a page was opened and does not bear this car out
+    # one car, one card: the same VIN on two sites keeps the lower price and names the other
+    by_vin: dict[str, list[dict]] = {}
+    for comp in kept:
+        by_vin.setdefault(comp["vin"], []).append(comp)
+    cars = []
+    for group in by_vin.values():
+        group.sort(key=lambda comp: (link_kind(comp["url"]) != "car", comp["price"]))
+        best = group[0]
+        for other in group[1:]:
+            site = _SITE_NAMES[listing_site(other["url"])]
+            if site not in best["note"].split("Seen on")[-1] and other["price"] != best["price"]:
+                best["note"] = f"{best['note']} Also on {site} at {money(other['price'])}.".strip()
+            if best["source"] in _SITE_NAMES.values() and other["source"] not in _SITE_NAMES.values():
+                best["source"] = other["source"]             # one site names the dealer, the other does not
+        cars.append(best)
+    if left and progress:
+        progress.say(f"Listing sites: {left} car{'s' if left != 1 else ''} left out (no VIN, another model year, or not on a page that was opened with that price)")
+    read = sorted({_SITE_NAMES[listing_site(page['url'])] for page in pages if listing_site(page["url"])})
+    if read:
+        how = "read live" if any("read live" in comp["seen_why"] for comp in cars) or not cars else "read from the page reader's stored copies"
+        line = f"Listing sites {how} ({', '.join(read)}): {len(cars)} car{'s' if len(cars) != 1 else ''}, each with a VIN."
+    elif cars:
+        line = (f"The listing sites' pages could not be opened, so {len(cars)} car{'s' if len(cars) != 1 else ''} from the search's stored "
+                "copies are shown as leads and not counted.")
+    else:
+        line = "The listing sites' pages could not be opened this time."
+    return cars, line
 
 
 def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_rounds: int = 6,
                       today: str | None = None, known=None, progress: Progress | None = None) -> dict:
     """Search the web for cars like this one that are for sale now: live auctions, classifieds and dealers; the
-    big listing sites, where most dealers' cars are shown; and Facebook Marketplace ads. The three searches run
-    at the same time."""
+    big listing sites, whose results pages are opened and read as they are now; and Facebook Marketplace ads.
+    The three searches run at the same time."""
     today = today or dt.date.today().strftime("%B %d, %Y")
     problem = "The search for cars for sale did not finish."
-    budget = int(max_searches)
-    max_searches = max(3, min(8, budget * 5 // 12))
+    max_searches = max(3, min(8, int(max_searches) * 5 // 12))
 
     def listings() -> dict:
-        """The big listing sites, searched from the inside. A site the search tool will not be limited to is
-        dropped and the rest are searched without it."""
+        """The big listing sites: find each site's results page, open it live, read the cars off it. A site
+        the search tool will not be limited to is dropped and the rest are used."""
         for _ in range(len(LISTING_SITES) + 1):
             sites = [site for site in LISTING_SITES if site not in _NO_LISTING_SITE]
             if not sites:
                 break
-            count = max(2, budget // 4)
             try:
-                return _again(lambda: _research(client, model, _listings_prompt(car, today, count, sites) + _known_note(known), count, 3,
-                                                problem, car=car, only=sites, progress=progress, label="Listing sites"),
+                return _again(lambda: _research(client, model, _listings_prompt(car, today, 2, sites), 2, 4, problem, car=car,
+                                                only=sites, progress=progress, label="Listing sites", opens=LISTING_OPENS, fresh=True,
+                                                page_tokens=LISTING_PAGE_TOKENS),
                               progress, "Listing sites")
             except LLMError as exc:
                 if exc.kind != "request":
@@ -1289,27 +1441,7 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
         if progress:
             progress.say(f"Listing sites: could not be searched this time ({sites_found}), so they were left out")
         sites_found = None
-    # a car read off a listing site: priced, on one of those sites, and marked as seen there, not confirmed
-    seen_on, shown = dt.date.today().strftime("%b %-d"), []
-    returned = (sites_found or {}).get("links", [])
-    for comp in (sites_found or {}).get("comps", []):
-        site = listing_site(comp["url"])
-        if comp["status"] != "asking" or not comp["price"] or not site:
-            continue
-        if not comp.get("link_ok"):
-            # the address is not one the search returned (a part dropped, or put together): the car is real
-            # enough to keep when it has a VIN, but its link has to be a page the search did return
-            near = [url for url in returned if listing_site(url) == site and link_kind(url) != "car"]
-            if not near or not comp.get("vin"):
-                continue
-            comp["url"], comp["link_ok"] = near[0], True
-        where = {"cars.com": "Cars.com", "cargurus.com": "CarGurus", "autotrader.com": "Autotrader", "edmunds.com": "Edmunds"}[site]
-        comp["available"] = comp.get("available") or "yes"
-        if link_kind(comp["url"]) != "car":                  # read off a results page: say so, and when
-            comp["seen"], comp["seen_on"], comp["seen_why"] = "listed", seen_on, f"seen in {where} listings"
-            if "seen on" not in comp["note"].lower():
-                comp["note"] = f"{comp['note']} Seen on {where}.".strip()
-        shown.append(comp)
+    shown, sites_line = _from_listing_sites(sites_found, car, progress)
     if isinstance(lists, LLMError):
         if lists.kind == "request":
             _UNSEARCHABLE.add(tuple(MARKETPLACE_ADS))
@@ -1332,13 +1464,11 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
         comp["source"], comp["available"] = "Facebook Marketplace", comp.get("available") or "yes"
     if lists is not None:
         result["summary"] = f"{result['summary']} Facebook Marketplace ads, each with its own link: {len(listed)}.".strip()
-    shown = merge_comps([], shown)                          # the same car on two sites, or twice on one page, once
-    if sites_found is not None:
-        with_vin = sum(bool(comp.get("vin")) for comp in shown)
-        result["summary"] = (f"{result['summary']} Cars.com, CarGurus, Autotrader and Edmunds: {len(shown)} car{'s' if len(shown) != 1 else ''} "
-                             f"listed, {with_vin} with a VIN.").strip()
+    if sites_line:
+        result["summary"] = f"{result['summary']} {sites_line}".strip()
     result["comps"] = merge_comps(merge_comps(comps, shown), listed)
     result["used"] = add_used(result.get("used"), (lists or {}).get("used"), (sites_found or {}).get("used"))
+    result["listing_sites"] = sorted({listing_site(page["url"]) for page in (sites_found or {}).get("opened", []) if listing_site(page["url"])})
     return result
 
 

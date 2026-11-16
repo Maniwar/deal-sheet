@@ -215,45 +215,67 @@ def merge_comps(*groups) -> list[dict]:
 
 
 def from_listings(comp: dict) -> bool:
-    """True for a car for sale that was read off a listing site's results page, rather than opened on a page of its own."""
-    return comp.get("status") == "asking" and bool(listing_site(comp.get("url"))) and is_list_page(comp.get("url"))
+    """True for a car for sale whose record comes from one of the big listing sites, not from the seller's own page."""
+    return comp.get("status") == "asking" and bool(listing_site(comp.get("url")))
+
+
+def read_live(comp: dict, today: str) -> bool:
+    """True for a listing-site car that was read off the site's results page, as it is now, today."""
+    return (from_listings(comp) and comp.get("seen") == "listed" and comp.get("seen_on") == today
+            and "read live" in str(comp.get("seen_why") or ""))
+
+
+def unproven_listing(comp: dict) -> bool:
+    """True for a car that an earlier version read off a search engine's stored copy of a listing site's results
+    page: no VIN, no page of its own, and a price and place that may be weeks out of date. Nothing can be checked
+    about it, so a new search of those sites clears it, unless the buyer chose to keep it."""
+    return (from_listings(comp) and is_list_page(comp.get("url")) and not comp.get("vin")
+            and comp.get("aside") != "mine" and str(comp.get("source") or "") != "Added by you")
 
 
 def relist(have: list[dict], found: list[dict], today: str) -> dict:
-    """Bring the cars held from listing sites up to date after a new search of those sites.
+    """Bring the cars held from listing sites up to date after those sites' pages were read again.
 
-    A held car whose VIN the search read again is marked as seen today and takes today's price and miles, with
-    the old price kept in its note: a price that has moved is news to a buyer. A held car the search did not
-    read this time is marked as not confirmed, since a results page shows only some of a site's cars and its
-    absence proves nothing. Only acts when the search read at least one car from a listing site. Returns counts:
-    again, repriced, missing.
+    A held car whose VIN the new search found again takes the new record's price, miles, link and dealer, with
+    the old price kept in its note: a price that has moved is news to a buyer. A held car from a site whose
+    page was read live just now, but which is not on that page, is marked as not confirmed: one page shows only
+    some of a site's cars, so its absence proves nothing either way. Returns counts: again, repriced, missing.
     """
     count = {"again": 0, "repriced": 0, "missing": 0}
-    latest = {comp["vin"]: comp for comp in found if comp.get("vin") and comp.get("status") == "asking" and listing_site(comp.get("url"))}
-    if not any(from_listings(comp) for comp in found):
-        return count
+    latest: dict[str, dict] = {}
+    for comp in found:                                       # the same VIN again, from a listing site or a seller's own page
+        if comp.get("vin") and comp.get("status") == "asking" and comp_group(comp) == "live":
+            if comp["vin"] not in latest or read_live(comp, today):
+                latest[comp["vin"]] = comp
+    sites = {listing_site(comp["url"]) for comp in found if read_live(comp, today)}
+    names = {"cars.com": "Cars.com", "cargurus.com": "CarGurus", "autotrader.com": "Autotrader", "edmunds.com": "Edmunds"}
     for comp in have:
         if not from_listings(comp) or comp_group(comp) != "live":
             continue
         new = latest.get(comp.get("vin") or "")
         if new is None:
-            if comp.get("seen_on") != today:
-                comp["seen"], comp["seen_on"], comp["seen_why"] = "unknown", today, "not among the listings read this time"
+            site = listing_site(comp["url"])
+            if site in sites:
+                comp["seen"], comp["seen_on"] = "unknown", today
+                comp["seen_why"] = f"not on the {names[site]} page that was read just now"
                 count["missing"] += 1
             continue
         count["again"] += 1
+        note = re.sub(r"\s*Was \$[\d,]+ when seen [^.]*\.", "", str(new.get("note") or comp.get("note") or "")).strip()
         if new["price"] and new["price"] != comp["price"]:
-            was = f"Was {money(comp['price'])} when seen {comp.get('seen_on') or 'before'}."
-            note = re.sub(r"\s*Was \$[\d,]+ when seen [^.]*\.", "", str(comp.get("note") or "")).strip()
-            comp["price"], comp["note"] = new["price"], f"{note} {was}".strip()
+            note = f"{note} Was {money(comp['price'])} when seen {comp.get('seen_on') or 'before'}.".strip()
             count["repriced"] += 1
-        if new.get("miles"):
-            comp["miles"] = new["miles"]
-        comp["seen"], comp["seen_on"] = new.get("seen") or "listed", today
-        comp["seen_why"] = new.get("seen_why") or comp.get("seen_why") or ""
-        if link_kind(new["url"]) == "car":                   # this time the search returned the car's own page
-            comp["url"], comp["link_ok"] = new["url"], new.get("link_ok")
-            comp["seen"], comp["seen_why"] = "", ""          # to be opened and checked like any other page
+        else:
+            kept = re.search(r"Was \$[\d,]+ when seen [^.]*\.", str(comp.get("note") or ""))
+            note = f"{note} {kept.group()}".strip() if kept else note
+        comp["price"], comp["note"] = new["price"] or comp["price"], note
+        for key in ("miles", "source", "date", "gearbox", "gear_seen"):
+            if new.get(key):
+                comp[key] = new[key]
+        comp["url"], comp["link_ok"] = new["url"], new.get("link_ok")
+        comp["seen"], comp["seen_on"], comp["seen_why"] = new.get("seen") or "", (new.get("seen_on") or "") if new.get("seen") else "", new.get("seen_why") or ""
+        if comp.get("aside") == "lead":                      # it was a lead from a stored copy: now it is on a live page
+            comp["aside"], comp["use"] = "", True
     return count
 
 
