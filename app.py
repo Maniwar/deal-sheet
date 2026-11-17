@@ -687,6 +687,9 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
     comps += calc.new_comps(comps, sale["comps"])
+    comps, tidied = calc.tidy_comps(car, comps)       # the car's own listing on another site is no comparison
+    for own in tidied["own"]:
+        tell(f"Left out: {own['title']} at {calc.money(own['price'])} ({own.get('source') or calc.host_of(own['url'])}) is this car itself")
     comps, dropped = same_body_only(car, comps)
     dropped += int(sale.get("off_body") or 0)
     comps, wrong_box = same_gearbox_only(car, comps, tell)
@@ -714,6 +717,7 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     cost = llm.used_note(spent)
     if cost:
         tell(cost)
+    note = f"{calc.tidy_note(tidied)} {note}".strip()
     return {"comps": comps, "summary": " ".join(part for part in (summary, sale["summary"], note, cost) if part).strip(), "used": spent}
 
 
@@ -976,6 +980,13 @@ def apply_pending() -> None:
         ss["offer_walk"] = fmt_money_input(numbers.get("walk"))
     if "message" in payload:
         ss["message_text"] = payload["message"]
+    if "deal" in payload or "add_comps" in payload:   # a list just put in place: never the car itself, never a car twice
+        kept, tidied = calc.tidy_comps(current_car(), ss["comps_base"])
+        if len(kept) != len(ss["comps_base"]):
+            ss["comps_base"] = kept
+            ss["comps_ver"] += 1
+            if not ss["is_sample"]:
+                ss["notices"] = (ss.get("notices") or []) + [calc.tidy_note(tidied)]
 
 
 def current_car() -> dict:

@@ -58,3 +58,37 @@ bad = [(i, got, want) for i, (got, want) in enumerate(far) if got != want]
 for row in bad:
     print("FAILED", row)
 print(f"kind and far-sale cases: {len(cases) + len(far)} failures: {len(bad) + len([1 for got, want in cases if got != want])}")
+
+# The buyer's own car is not a comparison, and one VIN for sale is one car (rows from a real garage).
+def row(status, price, vin="", url="", source="", available="yes", title="2020 BMW M2 CS", date="", aside=""):
+    comp = calc.clean_comp({"status": status, "title": title, "price": price, "vin": vin, "url": url, "source": source, "available": available, "date": date, "miles": 2000})
+    comp["aside"] = aside
+    return comp
+
+me = {"year": 2014, "make": "Porsche", "model": "911", "trim": "Carrera S", "vin": "WP0CB2A98ES154726", "url": "https://racperformance.com/2014-porsche-911-carrera-s-carrollton-tx-75006/7525914"}
+edm = "https://www.edmunds.com/bmw/m2-cs/2020/vin/WBS1J3C01L7H18422/"
+veh = "https://www.classic.com/veh/2020-bmw-m2-cs-wbs1j3c01l7g34827-pPEG7N4/"
+rows = [
+    row("asking", 100220, "WP0CB2A98ES154726", "https://www.cars.com/shopping/results/", "RAC Performance", title="2014 Porsche 911 2dr Cabriolet Carrera S"),   # the car itself, on Cars.com
+    row("sold", 64000, "WP0CB2A98ES154726", "https://bringatrailer.com/listing/2014-porsche-911-carrera-s-cabriolet-9/", "Bring a Trailer", date="Mar 3, 2023"),  # its own earlier sale stays
+    row("asking", 106900, "WBS1J3C01L7H18422", edm + "?national=true", "Edmunds", title="2020 BMW M2 CS Base Coupe"),
+    row("asking", 106900, "WBS1J3C01L7H18422", edm + "?radius=500", "Edmunds"),                                                                                 # the same car again
+    row("sold", 86500, "WBS1J3C01L7G34827", veh, "Classic.com", date="Jan 19, 2023"),
+    row("sold", 104000, "WBS1J3C01L7G34827", veh, "Classic.com", date="May 15, 2022"),                                                                          # one VIN, two prices: both stay, flagged
+    row("sold", 86500, "WBS1J3C01L7G34827", veh, "Classic.com", date="Jan 19, 2023"),                                                                           # the same sale again
+    row("asking", 99000, "", "https://racperformance.com/2014-porsche-911-carrera-s-carrollton-tx-75006/7525914/", "RAC Performance"),                          # the car's own listing page, no VIN
+]
+kept, tidied = calc.tidy_comps(me, rows)
+tidy = [
+    ([c["price"] for c in kept], [64000, 106900, 86500, 104000]),
+    ([c["price"] for c in tidied["own"]], [100220, 99000]),
+    (tidied["twice"], 2),
+    (calc.vins_on_two_sales(kept), {"WBS1J3C01L7G34827"}),
+    ("RAC Performance, $100,220" in calc.tidy_note(tidied) and "2 second copies" in calc.tidy_note(tidied), True),
+    (calc.tidy_comps(me, kept)[1] == {"own": [], "twice": 0}, True),                                                       # nothing more to take out the second time
+    ([c["price"] for c in calc.tidy_comps({}, rows[2:4] + [row("asking", 105000, "WBS1J3C01L7H18422", edm, "Edmunds", aside="mine")])[0]], [105000]),   # the buyer's own row is the one kept
+]
+bad = [(i, got, want) for i, (got, want) in enumerate(tidy) if got != want]
+for item in bad:
+    print("FAILED", item)
+print(f"tidy cases: {len(tidy)} failures: {len(bad)}")

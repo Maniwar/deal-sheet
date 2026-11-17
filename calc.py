@@ -949,6 +949,71 @@ def is_lead(comp: dict) -> bool:
     return proof(comp) in ("list", "loose", "none")
 
 
+def is_the_car(car: dict, comp: dict) -> bool:
+    """True when a comp is the buyer's own car: it carries the car's VIN, or sits on the car's own listing page."""
+    mine, theirs = clean_vin(car.get("vin")), clean_vin(comp.get("vin"))
+    if mine and theirs:
+        return mine == theirs
+    page = normalize_url(str(car.get("url") or ""))
+    return bool(page) and page == normalize_url(str(comp.get("url") or "")) and not is_list_page(comp.get("url") or "")
+
+
+def tidy_comps(car: dict, comps: list[dict]) -> tuple[list[dict], dict]:
+    """Take out what never belongs in a car's list. Returns (kept, {"own": the rows that were the car itself,
+    "twice": how many second copies went}).
+
+    - A car for sale that is the buyer's own car (its VIN, or its own listing page) is that car on another site,
+      not a comparison. An earlier sale of the buyer's car stays: nothing says more about what it is worth.
+    - Two for-sale rows with one VIN are one car, whatever each site calls it or asks for it.
+    - Two sales with one VIN at one price are one sale. One VIN at two prices is left alone: a car can be sold
+      twice, and when it was not, one of the two is matched to the wrong page, which the buyer has to see.
+    Of two copies the one kept is the buyer's own choice, then one still for sale, then one with its own page.
+    """
+    def rank(comp: dict) -> tuple:
+        return (0 if comp.get("aside") == "mine" or str(comp.get("source") or "") == "Added by you" else 1,
+                0 if comp.get("available") != "no" else 1,
+                {"own": 0, "yours": 0, "listed": 1}.get(proof(comp), 2), 0 if comp.get("use") else 1)
+
+    own, kept, at, twice = [], [], {}, 0
+    for comp in comps:
+        if comp["status"] == "asking" and is_the_car(car, comp):
+            own.append(comp)
+            continue
+        vin = clean_vin(comp.get("vin"))
+        key = None if not vin else ("asking", vin) if comp["status"] == "asking" else (comp["status"], vin, comp["price"])
+        if key is None or key not in at:
+            if key is not None:
+                at[key] = len(kept)
+            kept.append(comp)
+            continue
+        twice += 1
+        if rank(comp) < rank(kept[at[key]]):
+            kept[at[key]] = comp
+    return kept, {"own": own, "twice": twice}
+
+
+def tidy_note(tidied: dict) -> str:
+    """One line on what tidy_comps took out, or ''."""
+    parts = []
+    for comp in tidied["own"][:2]:
+        where = comp.get("source") or host_of(comp.get("url") or "") or "another site"
+        parts.append(f"This car's own listing ({where}, {money(comp['price'])}) is the car itself, so it is not kept as a comparison.")
+    if tidied["twice"]:
+        n = tidied["twice"]
+        parts.append(f"{n} second cop{'ies' if n != 1 else 'y'} of a car already in the list {'were' if n != 1 else 'was'} removed (the same VIN).")
+    return " ".join(parts)
+
+
+def vins_on_two_sales(comps: list[dict]) -> set[str]:
+    """VINs that more than one sale or no-sale carries. A car can sell twice; when it did not, one row has the wrong page."""
+    count: dict[str, int] = {}
+    for comp in comps:
+        vin = clean_vin(comp.get("vin"))
+        if vin and comp["status"] != "asking":
+            count[vin] = count.get(vin, 0) + 1
+    return {vin for vin, n in count.items() if n > 1}
+
+
 def set_aside_leads(comps: list[dict], fresh: list[dict] | None = None) -> int:
     """Switch off the cars that cannot be checked, once there are enough that can. Returns how many were set aside.
 

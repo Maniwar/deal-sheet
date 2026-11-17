@@ -205,6 +205,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
     order = {"sold": 0, "live": 1, "high_bid": 2, "ended": 3}
     names = {"sold": "Sold", "live": "For sale", "high_bid": "No sale", "ended": "Listing ended"}
     cards = []
+    twice = calc.vins_on_two_sales(comps)             # one VIN on two sales: the same car sold twice, or one row on the wrong page
     for idx, comp in sorted(enumerate(comps), key=lambda p: (order[calc.comp_group(p[1])], not p[1]["use"], p[1]["price"])):
         group = calc.comp_group(comp)
         meta = []
@@ -238,6 +239,8 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             "trust": trust_of(comp, car),
             "gearFlag": bool(calc.gearbox_kind(car.get("transmission")) and not gear and str(comp.get("source") or "") != "Added by you"),
             "img": comp.get("img") or "", "vin": comp.get("vin") or "",
+            "vinTwice": calc.clean_vin(comp.get("vin")) in twice,
+            "ownSale": bool(comp["status"] != "asking" and calc.clean_vin(car.get("vin")) and calc.is_the_car(car, comp)),
             "seen": comp.get("seen") or "", "seenOn": comp.get("seen_on") or "", "seenWhy": comp.get("seen_why") or "",
             "history": comp.get("history") or "", "histFlag": calc.history_flag(comp.get("history")),
             "miles": comp.get("miles") or 0, "when": calc.date_key(comp.get("date")),
@@ -1004,7 +1007,7 @@ function create(root) {
       : '<div class="c-seen">Not checked yet. Tap Check they are still for sale.</div>';
     const out = big && k.group === "sold" && !k.use, flip = big && k.group === "sold" ? `<button type="button" class="textbtn usebtn" data-i="${k.idx}" data-price="${k.price}" data-use="${k.use ? 0 : 1}">${k.use ? "Leave it out" : "Count it"}</button>` : "";
     const text = `<div><i class="tdot t${k.trust || 3}" title="${k.trust === 1 ? "Opens on its own page, has a VIN, nothing left to confirm" : k.trust === 2 ? (k.proof === "listed" ? "Read from a listing site's results, with its VIN" : "Opens on its own page, with something left to confirm") : "Nothing to open and check"}"></i><span class="pill ${esc(k.group)}${k.unsure ? " unsure" : ""}">${esc(k.label)}</span>${out ? `<span class="pill out">Not counted: ${esc(k.why)}</span>` : ""}<span class="c-price">${esc(k.priceText)}</span>${k.delta ? `<span class="c-delta">${esc(k.delta)}</span>` : ""}` +
-      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div><div>${k.vin ? vinChip(k.vin, "c-vin", k.vinOk, k.vinYear) : '<span class="vin none c-vin"><b>VIN</b>not found</span>'}</div>${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.gearFlag ? '<div class="c-flag">Manual or automatic is not stated. Check before you count on it.</div>' : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${seen}${flag}` +
+      `<div class="c-title">${esc(k.title)}</div><div class="c-meta">${esc(k.meta)}</div><div>${k.vin ? vinChip(k.vin, "c-vin", k.vinOk, k.vinYear) : '<span class="vin none c-vin"><b>VIN</b>not found</span>'}</div>${k.ownSale ? '<div class="c-flag">This is the car you are looking at, at an earlier sale.</div>' : ""}${k.vinTwice && !k.ownSale ? '<div class="c-flag">This VIN is on another sale in this list too. A car can sell twice, but one of the two may be matched to the wrong page: open it and check which sale it shows.</div>' : ""}${k.options ? `<div class="c-note">Options: ${esc(k.options)}</div>` : ""}${k.note ? `<div class="c-note">${esc(k.note)}</div>` : ""}${k.gearFlag ? '<div class="c-flag">Manual or automatic is not stated. Check before you count on it.</div>' : ""}${k.history ? `<div class="c-hist ${esc(k.histFlag)}">${k.histFlag === "bad" ? "⚠ " : ""}${esc(k.history)}</div>` : ""}${seen}${flag}` +
       (url ? `<a class="c-link" href="${esc(url)}" target="_blank" rel="noopener">${k.kind === "find" ? "Find it on Marketplace" : k.kind === "page" ? "Open the results" : "Open"} ${ARROW} <small>${esc(k.kind === "find" ? "" : k.host)}</small></a>` : "") +
       /* seen on a listing site, with a VIN: one tap to find the seller's own page for it */
       (k.group === "live" && k.vin && k.vinOk === "ok" && (k.seen === "listed" || k.proof === "listed") ? `<a class="c-find" href="https://www.google.com/search?q=%22${encodeURIComponent(k.vin)}%22" target="_blank" rel="noopener">Find the seller's page by VIN ${ARROW}</a>` : "") +

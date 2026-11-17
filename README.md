@@ -112,6 +112,12 @@ what that car has been selling for and gives you a typical sale price, the comps
   sales is shown under "not counted" until you confirm it: it is more likely a dealer's asking
   price than a sale. The offer also prices a car from its whole generation, never from its own
   model year alone.
+- **Never the car itself, never a car twice.** A car for sale that carries your car's VIN, or sits
+  on its own listing page, is your car on another site: it is taken out of the comparisons and
+  named in a note. Two for-sale rows with one VIN are one car, and one VIN sold at one price is one
+  sale. An earlier sale of your own car stays and is marked. One VIN on two different sales stays
+  too, with a flag on both cards: a car can sell twice, but one of the two may be matched to the
+  wrong page. A list already saved is tidied the same way the next time it is opened.
 - **What each site gave.** "What the search found" lists every site that was searched with the
   number of cars it gave, or the reason it did not finish, and **Every step of the last search**
   opens the full list of searches that were run.

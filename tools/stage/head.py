@@ -205,6 +205,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
     order = {"sold": 0, "live": 1, "high_bid": 2, "ended": 3}
     names = {"sold": "Sold", "live": "For sale", "high_bid": "No sale", "ended": "Listing ended"}
     cards = []
+    twice = calc.vins_on_two_sales(comps)             # one VIN on two sales: the same car sold twice, or one row on the wrong page
     for idx, comp in sorted(enumerate(comps), key=lambda p: (order[calc.comp_group(p[1])], not p[1]["use"], p[1]["price"])):
         group = calc.comp_group(comp)
         meta = []
@@ -238,6 +239,8 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             "trust": trust_of(comp, car),
             "gearFlag": bool(calc.gearbox_kind(car.get("transmission")) and not gear and str(comp.get("source") or "") != "Added by you"),
             "img": comp.get("img") or "", "vin": comp.get("vin") or "",
+            "vinTwice": calc.clean_vin(comp.get("vin")) in twice,
+            "ownSale": bool(comp["status"] != "asking" and calc.clean_vin(car.get("vin")) and calc.is_the_car(car, comp)),
             "seen": comp.get("seen") or "", "seenOn": comp.get("seen_on") or "", "seenWhy": comp.get("seen_why") or "",
             "history": comp.get("history") or "", "histFlag": calc.history_flag(comp.get("history")),
             "miles": comp.get("miles") or 0, "when": calc.date_key(comp.get("date")),
