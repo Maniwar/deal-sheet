@@ -74,7 +74,8 @@ begin
 end;
 $$;
 
-revoke all on function public.dealsheet_load(text) from public;
-revoke all on function public.dealsheet_save(text, text, jsonb, boolean, double precision) from public;
-grant execute on function public.dealsheet_load(text) to anon, authenticated;
-grant execute on function public.dealsheet_save(text, text, jsonb, boolean, double precision) to anon, authenticated;
+-- The app calls with the publishable key and no sign-in, so that role alone may run the two functions.
+revoke all on function public.dealsheet_load(text) from public, authenticated;
+revoke all on function public.dealsheet_save(text, text, jsonb, boolean, double precision) from public, authenticated;
+grant execute on function public.dealsheet_load(text) to anon;
+grant execute on function public.dealsheet_save(text, text, jsonb, boolean, double precision) to anon;
