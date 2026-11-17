@@ -987,15 +987,14 @@ def apply_pending() -> None:
             ss["comps_ver"] += 1
             if not ss["is_sample"]:
                 ss["notices"] = (ss.get("notices") or []) + [calc.tidy_note(tidied)]
-        if "deal" in payload and not ss["is_sample"]:   # a saved car gets the rule a new search applies
-            far = calc.set_aside_far(ss["comps_base"])
-            if far:
+        if "deal" in payload and not ss["is_sample"]:   # undo a rule an earlier version applied: see calc.restore_far
+            back = calc.restore_far(ss["comps_base"])
+            if back:
                 ss["comps_ver"] += 1
                 ss["notices"] = (ss.get("notices") or []) + [
-                    f"{far} sale{'s' if far != 1 else ''} that cannot be opened or checked, and {'sit' if far != 1 else 'sits'} "
-                    "out of line with the other prices, "
-                    f"{'are' if far != 1 else 'is'} no longer counted. Tap Work out the offer again to price the car without "
-                    f"{'them' if far != 1 else 'it'}."]
+                    f"{back} sale{'s' if back != 1 else ''} that an earlier version of the app left out for being far from "
+                    f"the other prices {'are' if back != 1 else 'is'} counted again: a sale is no longer left out for its "
+                    "price. Tap Work out the offer again."]
 
 
 def current_car() -> dict:

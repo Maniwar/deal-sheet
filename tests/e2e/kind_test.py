@@ -37,7 +37,9 @@ for row in bad:
     print("FAILED", row)
 print(f"kind cases: {len(cases)} failures: {len(bad)}")
 
-# A sale nobody can open or check that sits far from the others is not counted (15 sales from one real search).
+# A sale is never left out for its price. An earlier version set aside sales with no page and no VIN that sat far
+# from the rest; in a market that had moved, the two it set aside were real auction results ($108,000 on Bring a
+# Trailer, $110,000 on Cars & Bids). Rows it marked are counted again when the car is opened.
 def sale(price, url="https://www.classic.com/m/porsche/911/991/9911/carrera-s/cabriolet-manual/", vin="", aside=""):
     comp = calc.clean_comp({"status": "sold", "title": "2013 Porsche 911 Carrera S Cabriolet", "price": price, "url": url, "vin": vin,
                             "source": "Classic.com market", "date": "Apr 4, 2025", "miles": 20000})
@@ -46,13 +48,13 @@ def sale(price, url="https://www.classic.com/m/porsche/911/991/9911/carrera-s/ca
 
 real = [sale(p) for p in (52500, 108000, 110000, 68500, 86000, 70000, 82500, 78500, 77000, 62500, 54101, 59500, 71250, 75000)]
 real.append(sale(64250, url="https://bringatrailer.com/listing/2012-porsche-911-carrera-s-cabriolet-41/", vin="WP0CB2A91CS754100"))
+marked = [sale(60000), dict(sale(108000), use=False, aside="far"), dict(sale(110000), use=False, aside="far"), dict(sale(90000), use=False, aside="mine")]
 far = [
-    (calc.set_aside_leads(real), 2),
-    (sorted(c["price"] for c in real if c.get("aside") == "far"), [108000, 110000]),
-    (calc.median([c["price"] for c in real if c["use"]]), 70000),
-    (calc.set_aside_leads([sale(p) for p in (60000, 62000, 64000, 66000)] + [sale(120000, url="https://bringatrailer.com/listing/x-1/", vin="WP0CB2A98ES154077")]), 0),   # its own page and VIN: checkable
-    (calc.set_aside_leads([sale(p) for p in (60000, 62000, 64000, 150000)]), 0),                # too few sales to judge by
-    (calc.set_aside_leads([sale(p) for p in (60000, 62000, 64000, 66000, 68000)] + [sale(120000, aside="mine")]), 0),   # the buyer chose to count it
+    (calc.set_aside_leads(real), 0),                                          # nothing is set aside for its price
+    (sum(c["use"] for c in real), 15),
+    (calc.restore_far(marked), 2),
+    ([(c["price"], c["use"]) for c in marked], [(60000, True), (108000, True), (110000, True), (90000, False)]),   # the buyer's own choice stays
+    (calc.restore_far(marked), 0),
 ]
 bad = [(i, got, want) for i, (got, want) in enumerate(far) if got != want]
 for row in bad:
@@ -114,8 +116,12 @@ buyer_car = {"year": 2014, "make": "Porsche", "model": "911", "trim": "Carrera S
 rows = phone_rows()
 plain = llm.template_message(buyer_car, rows, 81000)
 low = llm.template_message(buyer_car, rows, 68000)
-opened = phone_rows()
-far_on_open = calc.set_aside_far(opened)                                  # four sales: judged against the cars now for sale
+import datetime
+NOV17 = datetime.date(2026, 11, 17).toordinal()
+fall = [car_row("sold", 108000, 10000, "Aug 22, 2026", url="https://bringatrailer.com/listing/2014-porsche-911-carrera-s-cabriolet-20/", vin="WP0CB2A96ES154062", source="Bring a Trailer"),
+        car_row("sold", 88000, 44000, "Aug 26, 2026", url="https://bringatrailer.com/listing/2015-porsche-911-carrera-s-cabriolet-12/", vin="WP0CB2A98FS155165", source="Bring a Trailer"),
+        car_row("sold", 86000, 29000, "Sep 16, 2026", url="https://bringatrailer.com/listing/2012-porsche-911-carrera-s-cabriolet-19-2/", vin="WP0CB2A99CS155039", source="Bring a Trailer"),
+        car_row("sold", 77000, 20000, "Apr 4, 2025"), car_row("sold", 71250, 15000, "Feb 25, 2024"), car_row("sold", 70000, 29332, "Jun 24, 2025")]
 msg = [
     ([c["price"] for c in calc.cite_sales(buyer_car, rows, offer=81000)], []),            # $86,000 is above the offer, $75,000 is from 2021
     ([c["price"] for c in calc.cite_sales(buyer_car, rows, offer=90000)], [86000]),
@@ -126,8 +132,9 @@ msg = [
     ("I'd like to offer $81,000" in plain and "out-the-door" in plain, True),
     ("listed at" in low or "sold for" in low, False),                                    # nothing supports $68,000: the message cites nothing
     ("listed at $85,980" in llm.template_message(buyer_car, rows, 82500) and "asking prices, not sales" in llm.template_message(buyer_car, rows, 82500), True),
-    (far_on_open, 2),
-    (sorted(c["price"] for c in opened if c.get("aside") == "far"), [108000, 110000]),
+    # with sales from the last twelve months, a message cites those and not the older, cheaper ones a seller would wave away
+    ([c["price"] for c in calc.cite_sales(buyer_car, fall, offer=91000, today=NOV17)], [86000, 88000]),
+    ([c["price"] for c in calc.cite_sales(buyer_car, fall, offer=80000, today=NOV17)], [70000, 77000, 71250]),   # none recent supports it: the older ones, newest first
 ]
 bad = [(i, got, want) for i, (got, want) in enumerate(msg) if got != want]
 for item in bad:

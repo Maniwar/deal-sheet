@@ -107,14 +107,17 @@ what that car has been selling for and gives you a typical sale price, the comps
   matches. When exact matches are scarce it is kept as a guide to the range, not counted, and
   folded away under "Show N not counted" with the reason on each card. **Count it** and **Leave it
   out** move a sale between the two.
-- **A sale nobody can check does not move the offer.** A line read off a list of results, with no
-  page of its own and no VIN, is shown under "not counted" until you confirm it when it sits more
-  than about a third above or below the middle of the sales (five or more), or above every car of
-  the kind now for sale (three or more): it is more likely a dealer's asking price than a sale. A
-  car already saved gets the same check when it is opened.
+- **A sale is never left out for its price.** For one day the app set aside sales with no page of
+  their own that sat far from the rest, taking them for dealers' asking prices. In a market that
+  had moved they were the newest and truest sales in the list: two real auction results. That
+  rule is gone, and any sale it set aside is counted again when the car is opened. The offer is
+  told that prices move: it prices from the last twelve months' sales when those sit clearly
+  above or below older ones, and treats special equipment (a power kit, paint to sample) as a
+  reason a sale says less about a car without it.
 - **The message cites only what supports the offer.** A sale above the offer argues the seller's
-  case, so the message names only sales at the offer or within a few percent of it, from the last
-  three years. When there is none it names cars for sale now at about the offer and near this
+  case, so the message names only sales at the offer or within a few percent of it: from the last
+  twelve months when there are any, since a seller waves away an older, cheaper sale, else from
+  the last three years. When there is none it names cars for sale now at about the offer and near this
   car's miles, as asking prices. When there is none of those either it cites nothing and stays
   short. It never explains a price with a reason that is not in the data. The offer also prices a car from its whole generation, never from its own
   model year alone.
