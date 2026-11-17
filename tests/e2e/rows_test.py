@@ -110,7 +110,8 @@ rows = calc.classic_rows(PAGE, "Porsche")
 flat = calc.classic_rows(" ".join(PAGE.split()), "Porsche")
 linked = calc.classic_rows(LINKED, "Lotus")
 by_price = {row["price"]: row for row in rows}
-comps = calc.clean_comps(calc.market_comps(rows, MARKET))
+NOV17 = calc.date_key("Nov 17, 2026")
+comps = calc.clean_comps(calc.market_comps(rows, MARKET, today=NOV17))
 sold = {comp["price"]: comp for comp in comps}
 cases = [
     (len(rows), 6),                                                       # the heading, the estimate and the undisclosed price are no rows
@@ -133,7 +134,9 @@ cases = [
     (calc.classic_rows("Nothing here but words. Sold 14. For Sale 3.", "Porsche"), []),
     # ---- as comps
     ([(comp["status"], comp["price"], comp.get("available")) for comp in comps],
-     [("sold", 108000, ""), ("sold", 110000, ""), ("sold", 82500, ""), ("high_bid", 66850, ""), ("asking", 74900, "yes"), ("asking", 77000, "no")]),
+     [("sold", 108000, ""), ("sold", 110000, ""), ("sold", 82500, ""), ("high_bid", 66850, ""), ("asking", 74900, "yes")]),      # an asking price from April 2025 is history
+    ([(comp["status"], comp["price"]) for comp in calc.market_comps(rows, MARKET, today=calc.date_key("Dec 1, 2025"))][-1], ("asking", 77000)),
+    ([comp["price"] for comp in calc.market_comps(rows, MARKET, old=True, today=NOV17)], [108000, 110000, 82500, 66850]),       # an old copy: 'for sale' may not be
     (sold[108000]["source"], "Bring a Trailer"),
     (sold[108000]["note"].startswith("Listed on Classic.com. Auction result."), True),
     (calc.DEALER_SOLD in sold[82500]["note"] and calc.DEALER_SOLD not in sold[108000]["note"], True),
@@ -149,7 +152,9 @@ cases = [
     (calc.market_fits(CAB, MARKET.replace("cabriolet-manual", "cabriolet-pdk")), False),
     (calc.market_pages(CAB, [MARKET + "year-2014/", MARKET + "year-2015", "https://www.classic.com/m/porsche/911/991/",
                              MARKET.replace("cabriolet-manual", "coupe-pdk"), "https://bringatrailer.com/porsche/"]),
-     [MARKET, "https://www.classic.com/m/porsche/911/991/"]),
+     [MARKET]),                                                           # the market kept for this kind, not the general one
+    (calc.market_pages(CAB, ["https://www.classic.com/m/porsche/911/991/", "https://www.classic.com/m/porsche/911/"]), ["https://www.classic.com/m/porsche/911/991/"]),
+    (calc.market_fits(CAB, MARKET.replace("cabriolet-manual", "50th-anniversary-manual")), False),      # another version's market
     # ---- a lot of an auction on Classic.com is one car's page; the auction's page is a list
     (calc.is_list_page("https://www.classic.com/a/bring-a-trailer-auctions-JknXEWB/lots/2012-porsche-911-carrera-s-cabriolet-abc/"), False),
     (calc.is_list_page("https://www.classic.com/a/bring-a-trailer-auctions-JknXEWB/"), True),
@@ -170,7 +175,7 @@ model = calc.clean_comps([
 merged = calc.swap_in_rows(model, comps)
 at = {(comp["status"], comp["price"]): comp for comp in merged}
 cases += [
-    (len(merged), 7),
+    (len(merged), 6),
     (at[("sold", 108000)]["source"], "Bring a Trailer"),
     (("high_bid", 110000) in at, False),
     (at[("sold", 110000)]["source"], "Cars & Bids"),
@@ -242,13 +247,180 @@ cases += [
 ]
 
 # a message cites an auction result before a dealer's last asking price
-NOV17 = calc.date_key("Nov 17, 2026")
 pair = calc.clean_comps([
     {"status": "sold", "title": "2014 Porsche 911 Carrera S Cabriolet", "price": 90000, "miles": 21000, "date": "Sep 1, 2026", "source": "Some Dealer",
      "url": MARKET, "note": "Listed on Classic.com. " + calc.DEALER_SOLD},
     {"status": "sold", "title": "2013 Porsche 911 Carrera S Cabriolet", "price": 90500, "miles": 30000, "date": "Aug 1, 2026", "source": "Bring a Trailer",
      "url": MARKET, "note": "Listed on Classic.com. Auction result."}])
 cases += [(calc.cite_sales(CAB, pair, limit=1, offer=91000, today=NOV17)[0]["price"], 90500)]
+
+# The page as a browser shows it (what a person copies and pastes): statuses in capitals, a count of photos
+# above some titles, the seller named for a dealer and locked for a past auction, a live auction with no price.
+BROWSER = """Showing 24 of 30 related listings
+Default Sort
+Price (lowest first)
+Vehicle Year (oldest first)
+bookmark_border
+33
+2013 Porsche 911 Carrera S
+ORIGINAL & HIGHLY ORIGINAL
+89k mi
+Manual
+LHD
+Indio, California, USA
+FOR SALE
+$76,029*
+Oct 23, 2026
+Updated 25 days ago
+Desert Private Collection
+verified
+Fixed-price
+CONTACT SELLER
+bookmark_border
+2012 Porsche 911 Carrera S
+ORIGINAL & HIGHLY ORIGINAL
+25k mi
+Manual
+LHD
+Las Vegas, Nevada, USA
+FOR SALE
+Nov 20, 2026
+Ends in 3 days
+Bring a Trailer
+Auction
+VIEW AUCTION
+bookmark_border
+2015 Porsche 911 Carrera S
+ORIGINAL & HIGHLY ORIGINAL
+44k mi
+Manual
+LHD
+Naples, Florida, USA
+SOLD
+$88,000
+Aug 27, 2026
+2 months ago
+Auction
+View Source
+lock
+bookmark_border
+2014 Porsche 911 Carrera S
+ORIGINAL & HIGHLY ORIGINAL
+10k mi
+Manual
+LHD
+Palm Springs, California, USA
+SOLD
+$108,000
+Aug 22, 2026
+2 months ago
+Auction
+View Source
+lock
+bookmark_border
+29
+2012 Porsche 911 Carrera S
+ORIGINAL & HIGHLY ORIGINAL
+29k mi
+Manual
+LHD
+City of Glen Cove, New York, USA
+LAST ASKING
+$109,995
+Jul 21, 2026
+3 months ago
+Fixed-price
+bookmark_border
+11
+"""
+# An old copy of the page, as a page reader hands it back: the town above a second title, icon names as words,
+# a notice after a last asking price, no seller for an auction, and the page's footer after the last car.
+STALE = """Showing 5 of 5 related listings
+2014 Porsche 911 Carrera S
+City of Glen Cove, New York, USA
+34
+2014 Porsche 911 Carrera S
+Original & Highly Original
+6865 mi 453 mi
+Manual transmission Manual
+LHD steering LHD
+Last Asking
+$109,995
+info
+This listing was either sold, or removed, by the seller. The last asking price is the last price detected by Classic.com.
+Ryan Friedman Motor Cars
+verified
+verified Verified Seller
+Feb 8, 2025
+2014 Porsche 911 Carrera S
+Akron, OH, USA
+2014 Porsche 911 Carrera S
+Original & Highly Original
+6865 mi 37k mi
+Manual transmission Manual
+LHD steering LHD
+Price Undisclosed
+Jul 9, 2022
+2014 Porsche 911 Carrera S Cabriolet 7-Speed
+San Diego, CA, USA
+12
+2014 Porsche 911 Carrera S Cabriolet 7-Speed
+Original & Highly Original
+6865 mi 23k mi
+Manual transmission Manual
+LHD steering LHD
+Sold
+$75,000
+Mar 16, 2021
+Taxonomy
+Make Porsche
+"""
+seen = calc.classic_rows(BROWSER, "Porsche")
+aged = calc.classic_rows(STALE, "Porsche")
+pasted = calc.clean_comps(calc.market_comps(seen, MARKET, today=NOV17))
+cases += [
+    ([(row["state"], row["price"], row["date"], row["miles"], row["seller"], row["kind"], row["place"]) for row in seen],
+     [("for sale", 76029, "Oct 23, 2026", 89000, "Desert Private Collection", "fixed", "Indio, California, USA"),
+      ("sold", 88000, "Aug 27, 2026", 44000, "", "auction", "Naples, Florida, USA"),
+      ("sold", 108000, "Aug 22, 2026", 10000, "", "auction", "Palm Springs, California, USA"),
+      ("last asking", 109995, "Jul 21, 2026", 29000, "", "fixed", "Glen Cove, New York, USA")]),     # the live auction has no price: no row
+    (seen[1]["title"], "2015 Porsche 911 Carrera S"),
+    ([(row["state"], row["price"], row["date"], row["miles"], row["seller"], row["place"]) for row in aged],
+     [("last asking", 109995, "Feb 8, 2025", 453, "Ryan Friedman Motor Cars", "Glen Cove, New York, USA"),
+      ("sold", 75000, "Mar 16, 2021", 23000, "", "San Diego, CA, USA")]),
+    ((calc.proof(pasted[1]), pasted[1]["source"], pasted[1]["note"]), ("auction", "Classic.com", "Listed on Classic.com. Auction result. Naples, Florida, USA.")),
+    (calc.auction_find(pasted[1], CAB), ("https://www.google.com/search?q=%28site%3Abringatrailer.com+OR+site%3Acarsandbids.com+OR+site%3Apcarmarket.com%29"
+                                         "+2015+Porsche+911+Carrera+S+Cabriolet+%22%2488%2C000%22", "the auction sites")),
+    (calc.rows_newest(seen) == calc.date_key("Oct 23, 2026") and calc.rows_newest(aged) == calc.date_key("Feb 8, 2025"), True),
+]
+
+# a browser's copy hides who sold a past auction: pasting it never takes away a seller's name already held
+known = calc.clean_comps([{"status": "sold", "title": "2014 Porsche 911 Carrera S Cabriolet 7-Speed", "price": 108000, "date": "Aug 22, 2026", "miles": 10000,
+                           "source": "Bring a Trailer", "url": MARKET, "note": "Listed on Classic.com. Auction result. Palm Springs, California, USA."},
+                          {"status": "sold", "title": "2015 Porsche 911 Carrera S Cabriolet (Naples sale)", "price": 88000, "date": "Aug 27, 2026",
+                           "source": "Classic.com market (seller not named)", "url": MARKET, "note": "Listed on Classic.com market page."}])
+calc.take_rows(known, pasted)
+cases += [
+    ((known[0]["source"], known[0]["title"]), ("Bring a Trailer", "2014 Porsche 911 Carrera S Cabriolet 7-Speed")),
+    ((known[1]["source"], known[1]["title"], known[1]["miles"]), ("Classic.com", "2015 Porsche 911 Carrera S", 44000)),
+    (calc.proof(known[1]), "auction"),
+]
+
+# a model's copy of a row gets the labels the app's own reading gives
+copy_dealer = calc.clean_comp({"status": "sold", "title": "2015 Porsche 911 Carrera S Cabriolet", "price": 82500, "date": "Jun 16, 2025", "source": "SellYourSportscar.Net",
+                               "url": MARKET, "note": "Listed on Classic.com market page; Fixed-price."})
+copy_auction = calc.clean_comp({"status": "sold", "title": "2014 Porsche 911 Carrera S Cabriolet", "price": 108000, "date": "Aug 22, 2026", "source": "Bring a Trailer",
+                                "url": MARKET, "note": "Listed on Classic.com; Palm Springs."})
+copy_bare = calc.clean_comp({"status": "sold", "title": "2014 Porsche 911 Carrera S Cabriolet", "price": 110000, "date": "Jul 2, 2026", "source": "Classic.com market (seller not named)",
+                             "url": MARKET, "note": "Listed on Classic.com market page; no VIN shown."})
+for one in (copy_dealer, copy_auction, copy_bare):
+    calc.label_market_copy(one)
+cases += [
+    (copy_dealer["note"].startswith("Listed on Classic.com. " + calc.DEALER_SOLD), True),
+    (copy_auction["note"], "Listed on Classic.com. Auction result. Palm Springs."),
+    (copy_bare["note"], "Listed on Classic.com market page; no VIN shown."),     # nothing says which it was: left as it is
+    (calc.proof(copy_bare), "list"),
+]
 
 bad = [(i, got, want) for i, (got, want) in enumerate(cases) if got != want]
 for row in bad:

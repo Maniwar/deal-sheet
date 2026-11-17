@@ -200,6 +200,10 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "log": [str(line)[:200] for line in (flags.get("log") or [])][-200:],
         "sources": calc.source_counts(comps) if comps else [],
     }
+    # Classic.com's market page for this car's kind, for the buyer to open in a browser: it shows a browser this
+    # year's sales, which no page reader gets
+    markets = calc.market_pages(car, [comp.get("url") for comp in comps if comp.get("url")], limit=1)
+    market_url = markets[0] if markets else ""
 
     # ---- comps: sold first, then cars for sale now, then auctions with no sale and listings that have gone
     order = {"sold": 0, "live": 1, "high_bid": 2, "ended": 3}
@@ -225,7 +229,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             delta = f"{money(abs(comp['price'] - ask))} {'under' if comp['price'] < ask else 'over'} ask"
         url = comp.get("url") or ""
         find = calc.marketplace_find(comp)             # a car read from a Marketplace list: the link searches Marketplace for it
-        auction_url, auction_on = calc.auction_find(comp)     # a sale another site reported: a search for the auction's own page
+        auction_url, auction_on = calc.auction_find(comp, car)     # a sale another site reported: a search for the auction's own page
         cards.append({
             "status": comp["status"], "group": group, "price": comp["price"],
             "label": ("Live auction" if group == "live" and str(comp.get("note") or "").lower().startswith("live auction")
@@ -283,7 +287,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "offer": {"open": offer.get("open"), "target": offer.get("target"), "walk": offer.get("walk_away")},
         "money": {"tax": settings["tax_rate"], "fees": settings["fees"], "apr": settings["apr"],
                   "down": settings["down"], "months": settings["months"]},
-        "axis": axis, "comps": cards, "case": case, "message": str(flags.get("message") or ""),
+        "axis": axis, "comps": cards, "case": case, "message": str(flags.get("message") or ""), "marketUrl": market_url,
         # what a message can honestly cite for the offer on the sheet: sales at or under it, else cars for sale near it
         "backing": (lambda price: {"offer": calc.money(price), "sales": len(calc.cite_sales(car, comps, offer=price)),
                                    "asks": len(calc.cite_asks(car, comps, price))} if price else None)(
@@ -639,7 +643,9 @@ button.opt{cursor:pointer}
 .btn.ghost.on{background:rgba(255,255,255,.16);border-color:#fff}
 .btn[disabled]{opacity:.55}
 .optbox,.linkbox{width:100%;margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--ink);font:400 16px/1.4 var(--sans)}
-.optbox{resize:vertical}
+.optbox,.pastetext{resize:vertical}
+.pasteform .btn{margin-top:10px}
+.inlink{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
 .optrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}.optrow .btn{margin-top:0}
 .optthumb{position:relative;width:40px;height:40px;border-radius:9px;overflow:hidden;border:1px solid rgba(255,255,255,.35)}
 .optthumb img{width:100%;height:100%;object-fit:cover;display:block}
@@ -1075,6 +1081,12 @@ function create(root) {
       (kind === "sold" ? '<label class="fld"><span>Date sold</span><input class="linkbox" name="date" placeholder="Jun 3, 2026"></label>' : "") +
       `<label class="fld${kind === "sold" ? "" : " wide"}"><span>VIN</span><input class="linkbox" name="vin" autocapitalize="characters" spellcheck="false"></label>` +
       '<label class="fld wide"><span>Link</span><input class="linkbox" name="url" inputmode="url" placeholder="https://"></label><button type="submit" class="btn ghost">Add it</button></form></details>';
+    /* Classic.com shows this year's sales to a browser only: the person opens the page, copies it, and the app reads every row */
+    const pastePage = `<details class="byhand pastebox"${S.handOpen === "paste" ? " open" : ""}><summary>Paste Classic.com's page for its newest sales</summary>` +
+      `<div class="lead-sub">Classic.com shows this year's sales to a browser and turns page readers away, so a search can miss the newest ones. ` +
+      (d.marketUrl ? `<a class="inlink" href="${esc(d.marketUrl)}" target="_blank" rel="noopener">Open its page for this car ${ARROW}</a>, then` : "Open its market page for this car, then") +
+      ` select all, copy, and paste it here. The app reads every row itself: no search, no cost.</div>` +
+      `<form class="pasteform"><textarea class="linkbox pastetext" rows="3" placeholder="Paste the whole page here" aria-label="The page's text"></textarea><button type="submit" class="btn ghost">Read the sales</button></form></details>`;
     if (S.tab === "case") {
       h += `<div class="lead-line">${esc(c.headline || "")}</div>${c.sub ? `<div class="lead-sub">${esc(c.sub)}</div>` : ""}`;
       /* the offer follows the car's miles, price and history on its own; this runs it by hand, after comps change */
@@ -1141,7 +1153,7 @@ function create(root) {
       const whyNone = (String((d.case || {}).summary || "").match(/[^.]*\b(?:left out|of this exact kind|for exactly this kind)\b[^.]*\./g) || []).map((t) => t.trim()).slice(0, 3).join(" ");
       h = (rows ? sorter + rows : '<div class="lead-line">No completed sales yet</div>' + (whyNone ? `<div class="lead-sub">${esc(whyNone)} Search again and the app looks for this car's exact body style and gearbox.</div>`
           : '<div class="lead-sub">The search goes through Cars &amp; Bids, Bring a Trailer, the other auction sites and then the wider web.</div>')) +
-        ended + keyAsk + `<div>${find}</div>` + liveLog(S.moreBusy === "sold") + byHand("sold");
+        ended + keyAsk + `<div>${find}</div>` + liveLog(S.moreBusy === "sold") + pastePage + byHand("sold");
     } else if (S.tab === "sale") {
       const rows = list(["live"], "For sale now", (k) => !k.lead) +
         (() => { const out = (d.comps || []).filter((k) => k.group === "live" && k.lead); if (!out.length) return "";
@@ -1266,6 +1278,14 @@ function create(root) {
       if (!/\d/.test(v.price) && !/^https?:\/\//i.test(v.url || "")) { toast("Give the price, or paste the listing's link.", true); return; }
       const go = f.querySelector("button"); go.disabled = true; go.textContent = "Adding"; S.handOpen = "";
       post("addcomp", { ...v, status: f.dataset.kind === "sold" ? "sold" : "asking", at: Date.now() });
+    }; });
+    el.sheetBody.querySelectorAll(".pastebox").forEach((box) => { box.ontoggle = () => { if (box.open) S.handOpen = "paste"; else if (S.handOpen === "paste") S.handOpen = ""; }; });
+    el.sheetBody.querySelectorAll(".pasteform").forEach((f) => { f.onsubmit = (e) => {
+      e.preventDefault();
+      const text = f.querySelector("textarea").value;
+      if (text.trim().length < 80) { toast("Open the page, select all, copy, and paste it here first.", true); return; }
+      const go = f.querySelector("button"); go.disabled = true; go.textContent = "Reading"; S.handOpen = "";
+      post("pastepage", { text: text.slice(0, 200000), at: Date.now() });
     }; });
     el.sheetBody.querySelectorAll(".more").forEach((b) => { b.onclick = () => again("more", { kind: b.dataset.kind, at: Date.now() }, b.dataset.kind); });
     const verify = el.sheetBody.querySelector(".verify");

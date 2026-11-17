@@ -22,8 +22,9 @@ the model copies one row of it with no seller named, as real runs do. The app mu
 open the whole market on its own, tell an auction result from a dealer's asking price, offer a search for
 each auction's own page, and take the price from that page when its link is pasted. `rows_test.py` checks
 the reading of the page (as the page reader returns it and as a search shows it) and of an auction's page.
-The page layout in these tests is the one seen in search results on Nov 17, 2026; whether the page reader
-returns the same layout is checked on a real run, and the step log says so when no row could be read.
+The page layouts in these tests are the three seen on Nov 17, 2026: the live page's text (what a search
+result holds), the page as a browser shows it (what a person pastes), and the old copy Claude's page reader
+handed back on a real run. The step log says so when no row could be read off a page.
 
 The tests (`*.js`) each print what they saw and end with an `errors:` line. `judge_test.py` and
 `judge_real.py` are unit tests of how a listing page's wording is read (for sale, sold, gone).

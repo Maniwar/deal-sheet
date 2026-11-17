@@ -63,6 +63,28 @@ const fs = require('fs');
   log('4 pasted the auction link', { before, toast: t.slice(0, 260), after: after.slice(0, 260) });
   if (!/says sold for \$88,000, where the list had a high bid of \$86,000/.test(t)) wrong.push('4: the toast does not say what the auction page showed');
   if (!/\$88,000/.test(after) || !/Checked on the auction's own page: sold for \$88,000 on Aug 26, 2026/.test(after) || !/Sold/i.test(after.slice(0, 20))) wrong.push('4: the card did not become a sale at $88,000, checked on the page');
+
+  // 5. the page as a browser shows it, pasted in: the app reads its rows with no request to anyone
+  const requests = (calls().match(/^POST /gm) || []).length;
+  const page = ['Showing 24 of 30 related listings', 'bookmark_border', '33', '2013 Porsche 911 Carrera S', 'ORIGINAL & HIGHLY ORIGINAL', '89k mi', 'Manual', 'LHD', 'Indio, California, USA',
+    'FOR SALE', '$76,029*', 'Oct 23, 2026', 'Updated 25 days ago', 'Desert Private Collection', 'verified', 'Fixed-price', 'CONTACT SELLER',
+    'bookmark_border', '2015 Porsche 911 Carrera S', 'ORIGINAL & HIGHLY ORIGINAL', '44k mi', 'Manual', 'LHD', 'Naples, Florida, USA', 'SOLD', '$88,000', 'Aug 27, 2026', '2 months ago', 'Auction', 'View Source', 'lock',
+    'bookmark_border', '2014 Porsche 911 Carrera S', 'ORIGINAL & HIGHLY ORIGINAL', '10k mi', 'Manual', 'LHD', 'Palm Springs, California, USA', 'SOLD', '$108,000', 'Aug 22, 2026', '2 months ago', 'Auction', 'View Source', 'lock',
+    'bookmark_border', '2013 Porsche 911 Carrera S', 'ORIGINAL & HIGHLY ORIGINAL', '31k mi', 'Manual', 'LHD', 'Austin, Texas, USA', 'SOLD', '$91,500', 'Oct 2, 2026', '1 month ago', 'Auction', 'View Source', 'lock'].join('\n');
+  const box = p.locator('.sheet-body .pastebox'); await box.locator('summary').click(); await p.waitForTimeout(500);
+  const link = await box.locator('a.inlink').getAttribute('href').catch(() => '');
+  await box.locator('textarea').fill(page); await box.locator('button').click();
+  let t5 = ''; for (let i = 0; i < 80; i++) { await p.waitForTimeout(400); t5 = await toast(); if (/^Read /.test(t5)) break; }
+  await p.waitForTimeout(2500);
+  const sold5 = await cards();
+  const five = { link, toast: t5.slice(0, 220), newSale: (sold5.find((c) => c.includes('$91,500')) || '').slice(0, 420), eightyEight: sold5.filter((c) => c.includes('$88,000')).length,
+    oneOhEight: sold5.filter((c) => c.includes('$108,000')).length, requestsMade: (calls().match(/^POST /gm) || []).length - requests };
+  log('5 pasted the page from a browser', five);
+  if (!/cabriolet-manual\/$/.test(link || '')) wrong.push('5: the box does not link to the market page for this car');
+  if (!/Read 4 cars off the page\. New here: 1 sale, 1 for sale now\./.test(t5)) wrong.push('5: the toast does not say what was read and what was new');
+  if (!/Austin, Texas/.test(five.newSale) || !/Auction result/.test(five.newSale) || !/Find this auction on the auction sites/.test(five.newSale)) wrong.push('5: the new sale is not there as an auction result with a search for its page');
+  if (five.eightyEight !== 1 || five.oneOhEight !== 1) wrong.push('5: a sale already held was added a second time');
+  if (five.requestsMade !== 0) wrong.push('5: reading a pasted page made a request to the API');
   await p.locator('.sheet-body .card', { hasText: 'Naples' }).first().evaluate((e) => e.scrollIntoView({ block: 'start' })).catch(() => {});
   await p.screenshot({ path: '/tmp/e2e/market.png', timeout: 120000 }).catch(() => {});
   log('errors', { exc: await p.locator('[data-testid="stException"]').count(), errs: errs.concat(wrong) });

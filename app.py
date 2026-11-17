@@ -17,6 +17,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import pandas as pd
 import streamlit as st
@@ -438,6 +439,39 @@ def sales_of_this_kind(client, model: str, car: dict, comps: list[dict], max_sea
             f"exactly that and found {found} more." if found else
             f"A second search for exactly this kind ({kind}) found no more sales.")
     return {"comps": new, "note": note, "used": more.get("used") or {}}
+
+
+def pasted_market(car: dict, have: list[dict], text: str) -> tuple[list[dict], str]:
+    """Classic.com's market page as the buyer's browser shows it, pasted in: every row read by the app, with no
+    search and no request to anyone. Classic.com shows a browser this year's sales and turns page readers away,
+    so this is the one way to get them all. Cars already held take what the page says (`have` is changed in
+    place); the rest are returned as new comps. Returns (the new comps, what to tell the buyer).
+    """
+    rows = calc.classic_rows(text, str(car.get("make") or ""))
+    if not rows:
+        return [], ("No cars could be read from that text. Open Classic.com's market page for this car, select all, copy, "
+                    "and paste the whole page.")
+    held = calc.market_pages(car, [comp["url"] for comp in have if comp.get("url")], limit=1)
+    name = " ".join(str(car.get(key) or "").strip() for key in ("year", "make", "model", "trim")).strip()
+    market = held[0] if held else "https://www.classic.com/search/?q=" + quote_plus(name)
+    found = calc.merge_comps(calc.clean_comps(calc.market_comps(rows, market)))
+    updated = calc.take_rows(have, found)
+    fresh = calc.new_comps(have, found)
+    fresh, _ = same_body_only(car, fresh)
+    fresh, wrong = same_gearbox_only(car, fresh)
+    calc.set_aside_leads(have + fresh, fresh)
+    sold = sum(comp["status"] == "sold" for comp in fresh)
+    live = sum(calc.comp_group(comp) == "live" for comp in fresh)
+    rest = len(fresh) - sold - live
+    bits = [f"{sold} sale{'s' if sold != 1 else ''}" if sold else "", f"{live} for sale now" if live else "",
+            f"{rest} no-sale{'s' if rest != 1 else ''} and ended listing{'s' if rest != 1 else ''}" if rest else ""]
+    new = ", ".join(bit for bit in bits if bit)
+    said = f"Read {len(found)} car{'s' if len(found) != 1 else ''} off the page. " + (f"New here: {new}." if new else "All of them were here already.")
+    if updated:
+        said += f" {updated} you had now show{'s' if updated == 1 else ''} what the page says."
+    if wrong:
+        said += f" {wrong} with the other gearbox {'were' if wrong != 1 else 'was'} left out."
+    return fresh, said
 
 
 def check_sale(comp: dict, reader=None) -> str:
@@ -1285,6 +1319,8 @@ def stage_event(name: str) -> None:
         ss["_car_request"] = value
     elif name == "addcomp":
         ss["_addcomp_request"] = value
+    elif name == "pastepage":
+        ss["_pastepage_request"] = value
     elif name == "detail":
         ss["detailed_car"] = bool(value)          # set before the settings widgets are drawn
     elif name == "switch":
@@ -1763,6 +1799,17 @@ def handle_stage_requests(progress_slot) -> None:
             ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
             ss["notices"] = [f"Saved. That car now opens on its own page and is counted. {said}".strip()]
         ss["build_seq"] += 1
+    request = ss.pop("_pastepage_request", None)
+    if isinstance(request, dict):                  # Classic.com's market page, copied from the buyer's browser
+        entry = ss["garage"].get(ss["active"]) or {}
+        have = calc.clean_comps(entry.get("comps") or [])
+        fresh, said = pasted_market(entry.get("car") or {}, have, str(request.get("text") or ""))
+        if said.startswith("No cars"):
+            ss["stage_error"] = said
+        else:
+            ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have}
+            ss["notices"] = [said]
+        ss["build_seq"] += 1
     request = ss.pop("_addcomp_request", None)
     if isinstance(request, dict):                  # a sale or a listing the buyer knows of, added on the main screen
         entry = ss["garage"].get(ss["active"]) or {}
@@ -2172,9 +2219,15 @@ with tab_comps:
         page_text = st.text_area("Page text", key="page_text", height=120)
         page_shot = st.file_uploader("Page screenshot", type=IMAGE_TYPES,
                                      key=f"page_shot_{ss['upload_ver']}")
-        if st.button("Read comps from this page", disabled=client is None, help=None if client else needs_key):
+        market_rows = calc.classic_rows(page_text, str(car.get("make") or "")) if page_text.strip() and page_shot is None else []
+        if st.button("Read comps from this page", disabled=client is None and len(market_rows) < 2, help=None if client or market_rows else needs_key):
             if not page_text.strip() and page_shot is None:
                 st.warning("Paste the page text or add a screenshot first.")
+            elif len(market_rows) >= 2:              # Classic.com's market page: the app reads its rows itself
+                fresh, said = pasted_market(car, comps, page_text)
+                ss["_pending"] = {"add_comps": fresh, "keep": comps}
+                ss["notices"] = [said]
+                st.rerun()
             else:
                 with st.spinner("Reading the page"):
                     try:
@@ -2385,7 +2438,7 @@ flags = {
                 if my_job() is not None and not my_job().done else None),
 }
 stage_events = ("key", "build", "switch", "offer", "prefs", "restore", "options", "photo", "detail", "more", "verify",
-                "message", "car", "addcomp", "remove", "usecomp", "link", "reoffer", "version")
+                "message", "car", "addcomp", "pastepage", "remove", "usecomp", "link", "reoffer", "version")
 with stage_box:
     STAGE(
         data=json.dumps(stage.build_payload(

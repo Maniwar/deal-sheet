@@ -122,11 +122,26 @@ what that car has been selling for and gives you a typical sale price, the comps
   market for the car's kind (every model year of the generation) with one small request when the
   search opened one model year only, and it reads that page again on later searches without
   searching for it. Cars already held as copies of those rows take what the page says.
+- **What a page reader gets from Classic.com is an old copy, and the app says so.** Classic.com
+  serves its market pages to browsers and turns other readers away (the app's own request gets
+  a 403, and the app does not go around a refusal). Claude's page reader then hands back a copy
+  it saved earlier, which on Nov 17, 2026 was about a year old: complete for older sales, with
+  nothing from this year. The app reads that copy for its history, never takes "for sale" from
+  it, drops asking prices that ended more than a year ago, and writes in the summary how old the
+  copy is. This year's sales reach the app two ways: the text of the search results, which the
+  model copies (the search prompt now spells out a row's layout, the seller and the word
+  Auction), and the page itself, pasted from a browser.
+- **Paste Classic.com's page and the app reads all of it.** The Sold tab has **Paste
+  Classic.com's page for its newest sales**: a link that opens the market page for this car's
+  kind, and a box. Open the page, select all, copy, paste. The app reads every row from the
+  text as a browser shows it, with no search and no request to anyone, adds what is new and
+  brings what it already had up to date. This is the complete, current list.
 - **An auction result and a dealer's price are told apart.** A result at a named auction on a
   known day (Bring a Trailer, Aug 22, 2026) is one auction that anyone can look up, so it
   counts. A dealer's listing that Classic.com marks sold shows what the dealer last asked, not
   what was paid: its card says so, the offer weighs it below an auction result, the message
   cites auction results first, and once three checkable sales are in hand it is not counted.
+  Rows from the market page of another body style, gearbox or version are never kept.
 - **Each auction result can be proven on the auction's own page.** A card that came from
   Classic.com's table has **Find this auction on Bring a Trailer** (or Cars & Bids, or
   PCARMARKET): a search of that site for the car and the price. Paste the page's link into the

@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import (trim_key, classic_market, classic_rows, display_url, market_comps, market_fits, market_pages, swap_in_rows,
+from calc import (label_market_copy, rows_newest, trim_key, classic_market, classic_rows, display_url, market_comps, market_fits, market_pages, swap_in_rows,
                   kind_words, cite_asks, AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, own_page, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
                   host_of, offer_basis, plain_date,
                   is_list_page, is_mirror, link_kind, link_pages, listing_site, loose_trim, mark_other_trim, merge_comps, money, normalize_url,
@@ -1104,6 +1104,15 @@ _SITE_NOTES = {
         "- If the opened page shows the cars but not their addresses, match each car to a vehicle page in your search "
         "results by its year, price, date or town. Only when a car's own page cannot be found, give the market page's address as its URL and start "
         "its note with 'Listed on Classic.com'. That is the one exception to the rule about market pages.\n"
+        "- A car's row reads in this order, in a search result's text and on an opened page: the title, the "
+        "condition, the miles, the gearbox, the town, then the status (Sold, Not Sold, For Sale, Last Asking), the "
+        "price, the date, the price again, the seller's name, and the word Auction or Fixed-price. Give the seller's "
+        "name as the source exactly as written ('Bring a Trailer', a dealer's name), never 'Classic.com' when a name "
+        "is there. Start the note with 'Auction result.' when the row says Auction, and with 'Dealer listing, "
+        "fixed price.' when it says Fixed-price: a dealer's listing marked Sold shows the last asking price.\n"
+        "- The page a reader opens can be an old copy that lacks this year's rows. The text of the search results "
+        "is often newer: record every row it shows as well, the newest first, and never skip a row because the "
+        "opened page does not have it.\n"
         "- If web_fetch is not available, work from the search results in the same way.\n"
         "- Record each car once. Leave a date empty rather than guess it.\n"
         "- 'CMB' figures are Classic.com's own estimates, not sales: never record one.\n"
@@ -1182,6 +1191,17 @@ def _run_side_by_side(jobs, progress: Progress | None) -> list:
         return out
 
 
+def _copy_days(at) -> float | None:
+    """How many days old a page reader's copy is, by the time it says it fetched the page: None when it does not say."""
+    try:
+        then = dt.datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=dt.timezone.utc)
+    return (dt.datetime.now(dt.timezone.utc) - then).total_seconds() / 86400
+
+
 def _market_rows(client, model: str, car: dict, results: list[dict], known=None, progress: Progress | None = None) -> dict:
     """The cars on Classic.com's market pages for this car, read off each page's text by the app.
 
@@ -1227,10 +1247,17 @@ def _market_rows(client, model: str, car: dict, results: list[dict], known=None,
         elif progress:
             progress.say(f"Classic.com: that page could not be opened ({page['error']})")
     out["used"] = add_used(*spent)
-    rows = []
+    rows, stale = [], 0
     mine = "-".join(trim_key(car.get("trim"), car))
+    today = dt.date.today().toordinal()
     for page in opened.values():
-        found = market_comps(classic_rows(page["text"], str(car.get("make") or "")), page["url"])
+        read = classic_rows(page["text"], str(car.get("make") or ""))
+        newest, age = rows_newest(read), _copy_days(page.get("at"))
+        # a copy saved a while ago, by the reader's own word or because nothing on it is from the last four months
+        old = bool(read) and ((age is not None and age > 3) or (newest and today - newest > 120))
+        if old:
+            stale = max(stale, newest)
+        found = market_comps(read, page["url"], old=old, today=today)
         if found:
             out["pages"].append(page["url"])
         elif progress:                                 # say what the page looked like, so a change of layout shows
@@ -1253,6 +1280,14 @@ def _market_rows(client, model: str, car: dict, results: list[dict], known=None,
                        f"{len(sold)} of them sold ({auction} at auction).")
         if progress:
             progress.say(f"Classic.com's market page, read by the app: {n} car{'s' if n != 1 else ''}, {len(sold)} sold ({auction} at auction)")
+    if stale:
+        when = dt.date.fromordinal(stale)
+        late = (f"Classic.com turns page readers away, so the page came from an old copy: its newest row is from "
+                f"{when.strftime('%b')} {when.day}, {when.year}. Sales after that come from the search results only. To get them all, "
+                "open the page in your browser and paste it in the Sold tab.")
+        out["note"] = f"{out['note']} {late}".strip()
+        if progress:
+            progress.say(late)
     return out
 
 
@@ -1335,6 +1370,8 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
     market = _market_rows(client, model, car, results, known, progress)       # the market pages, read by the app itself
     if market["comps"]:
         comps = swap_in_rows(comps, market["comps"])
+    for comp in comps:                                # a copy the model made of a market row says what kind of sale it was
+        label_market_copy(comp)
     joined = link_pages(comps, [page for result in results for page in result.get("pages", [])])
     if joined and progress:
         progress.say(f"{joined} sale{'s' if joined != 1 else ''} reported by another site now open{'s' if joined == 1 else ''} on the auction's own page")

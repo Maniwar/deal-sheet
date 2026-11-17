@@ -1,6 +1,7 @@
 """The words a sales search has to name for a car of an uncommon kind (an open car, a manual), and the requests that carry them."""
 import sys
 sys.path.insert(0, ".")
+import datetime as dt
 import calc, llm
 
 cab = {"year": 2014, "make": "Porsche", "model": "911", "trim": "Carrera S", "body": "Convertible", "transmission": "7-Speed Manual"}
@@ -87,8 +88,27 @@ tidy = [
     (tidied["twice"], 2),
     (calc.vins_on_two_sales(kept), {"WBS1J3C01L7G34827"}),
     ("RAC Performance, $100,220" in calc.tidy_note(tidied) and "2 second copies" in calc.tidy_note(tidied), True),
-    (calc.tidy_comps(me, kept)[1] == {"own": [], "twice": 0}, True),                                                       # nothing more to take out the second time
+    (calc.tidy_comps(me, kept)[1] == {"own": [], "twice": 0, "other": 0, "old": 0}, True),                                                       # nothing more to take out the second time
     ([c["price"] for c in calc.tidy_comps({}, rows[2:4] + [row("asking", 105000, "WBS1J3C01L7H18422", edm, "Edmunds", aside="mine")])[0]], [105000]),   # the buyer's own row is the one kept
+]
+# rows read off Classic.com's market page: another kind's market goes, an asking price that ended long ago goes,
+# a word of the page taken for a seller's name is put right, and the buyer's own choice stays
+MKT = "https://www.classic.com/m/porsche/911/991/9911/carrera-s/cabriolet-manual/"
+cab_car = {"year": 2014, "make": "Porsche", "model": "911", "trim": "Carrera S", "body": "Cabriolet", "transmission": "7-speed manual"}
+old_day, new_day = "Feb 8, 2020", dt.date.today().strftime("%b %d, %Y")
+page_rows = calc.clean_comps([
+    {"status": "sold", "title": "2014 Porsche 911 50th Anniversary Edition", "price": 120000, "date": "May 1, 2025", "source": "Classic.com", "url": MKT.replace("cabriolet-manual", "50th-anniversary-manual")},
+    {"status": "sold", "title": "2014 Porsche 911 Carrera S", "price": 95000, "date": "May 1, 2025", "source": "Classic.com", "url": MKT.replace("cabriolet-manual", "coupe-manual"), "aside": "mine", "use": True},
+    {"status": "asking", "available": "no", "title": "2014 Porsche 911 Carrera S", "price": 109995, "date": old_day, "source": "info", "url": MKT},
+    {"status": "asking", "available": "no", "title": "2013 Porsche 911 Carrera S", "price": 89900, "date": new_day, "source": "info", "url": MKT},
+    {"status": "sold", "title": "2014 Porsche 911 Carrera S Cabriolet 7-Speed", "price": 75000, "date": "Mar 16, 2021", "source": "Taxonomy", "url": MKT},
+])
+left, took = calc.tidy_comps(cab_car, page_rows)
+tidy += [
+    ([c["price"] for c in left], [95000, 89900, 75000]),
+    ((took["other"], took["old"]), (1, 1)),
+    ([c["source"] for c in left], ["Classic.com", "Classic.com", "Classic.com"]),
+    ("for another body style, gearbox or version was removed" in calc.tidy_note(took) and "ended more than a year ago was removed" in calc.tidy_note(took), True),
 ]
 bad = [(i, got, want) for i, (got, want) in enumerate(tidy) if got != want]
 for item in bad:

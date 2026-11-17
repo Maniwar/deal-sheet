@@ -12,6 +12,7 @@ const shared = /shared/.test(process.argv[1]);
   await ctx.route('https://api.sketchfab.com/**', (r) => r.abort());
   const p = await ctx.newPage(); p.on('pageerror', e => errs.push(String(e).slice(0, 200)));
   const saved = async () => (shared ? (await (await fetch('http://127.0.0.1:8895/dump')).json()).saved.map((s) => s[1] + ' ' + s[2]) : []);
+  const savedIds = async () => (shared ? (await (await fetch('http://127.0.0.1:8895/dump')).json()).saved.map((s) => String(s[0]).slice(0, 6) + ':' + s[1]) : []);
   const see = async () => ({ chips: (await p.locator('.garage .chip').allInnerTexts()).map((t) => t.trim()), head: (await p.locator('.head .title').innerText()).replace(/\s+/g, ' ') + ' · ' + (await p.locator('.head .sub').innerText()).replace(/\s+/g, ' ').slice(0, 44) });
   const wrong = [];
   const check = (step, state, onScreen) => {                 // the car must still be the car: by name in the garage, on screen, and in what was sent to the store
@@ -44,6 +45,7 @@ const shared = /shared/.test(process.argv[1]);
   }
   await p.reload({ waitUntil: 'domcontentloaded' }); await p.waitForTimeout(20000);
   log('6 reloaded quietly', check(6, { ...(await see()), sentToStore: await saved() }, /M2 Competition/));
+  if (wrong.length) log('which car each save was for', await savedIds());       // a wrong save under the car's own id, or the sample saved under its own
   log('errors', { exc: await p.locator('[data-testid="stException"]').count(), errs: errs.concat(wrong) });
   await b.close();
 })().catch(e => { console.log('TEST ERROR', String(e).slice(0, 900)); process.exit(1); });
