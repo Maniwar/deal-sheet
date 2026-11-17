@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import (AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, own_page, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
+from calc import (kind_words, AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, own_page, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
                   host_of, offer_basis, plain_date,
                   is_list_page, is_mirror, link_kind, link_pages, listing_site, loose_trim, mark_other_trim, merge_comps, money, normalize_url,
                   to_int)
@@ -771,12 +771,29 @@ def _trim_rule(car: dict) -> str:
             "three exact matches, with a note that starts with 'Different trim' so it is kept out of the numbers.\n")
 
 
-def _research_prompt(car: dict, today: str, max_searches: int = 8) -> str:
-    name = car_title(car) or "this car"
+def _kind_note(car: dict, focus: bool = False) -> str:
+    """What a search has to be told when the car is of a kind that a plain search does not return: an open car, a
+    Targa, a manual. `focus`: an earlier search found too few sales of the car's own body style and gearbox."""
+    kind = kind_words(car, every=focus)
+    if not kind:
+        return ""
+    lead = ("An earlier search found fewer than three sales with this car's body style and gearbox, because it mostly "
+            "returned the model's other kinds. This search is only for this exact kind. " if focus else "")
+    return (f"{lead}This car's kind is: {kind}. A search that leaves those words out returns mostly the model's "
+            "other body styles and gearboxes, which the rules below make you leave out, so name them in every search. "
+            "Auction titles word a manual as '7-Speed' or '6-Speed' and name the body ('Cabriolet', 'Convertible', "
+            "'Targa'), so try those wordings as well. Sales of the same kind from the neighbouring model years of this "
+            "generation are matches: run at least one search without the model year, and one with a neighbouring "
+            "year.\n")
+
+
+def _research_prompt(car: dict, today: str, max_searches: int = 8, focus: bool = False) -> str:
+    name = " ".join(part for part in (car_title(car) or "this car", kind_words(car, every=focus)) if part)
     return (
         f"Today is {today}. Find comparable prices for this car so the buyer can negotiate.\n\n"
         f"{_car_block(car)}\n\n"
         f"Search the web (you have up to {max_searches} searches), then call record_comps once with everything usable.\n"
+        + _kind_note(car, focus) +
         "Searches to run, in this order:\n"
         f"1. Bring a Trailer results for this car, e.g. \"bringatrailer.com {name} sold\". Always run this one.\n"
         f"2. Cars & Bids past auctions for this car, e.g. \"carsandbids.com {name}\". Always run this one.\n"
@@ -1050,6 +1067,15 @@ AUCTION_SITES = [
 # address of its own page, and that address holds the VIN.
 _SITE_OPENS = {"Classic.com": 2}
 
+# Classic.com files its sales by body style and gearbox. For a car of an uncommon kind that market page is the best
+# single source there is: every sale of that exact kind, each with its own page.
+_CLASSIC_KIND = (
+    "- Classic.com keeps a market of its own for each body style and gearbox, named like 'Carrera S Cabriolet - "
+    "Manual', and the market's address says so (it ends like /cabriolet-manual/ or /cabriolet-manual/year-2014). "
+    "Open the market for this car's kind ({kind}), never the model's general market and never another kind's. A "
+    "market address that ends in a model year lists that year only: spend your page opens on different model years "
+    "of this generation, or on the market for all its years when a result or an opened page links to it.\n")
+
 # How to read each site's pages, added to that site's search.
 _SITE_NOTES = {
     "Classic.com": (
@@ -1059,7 +1085,7 @@ _SITE_NOTES = {
         "- Search for the car first. The results hold Classic.com's market page for the model (its address has /m/, "
         "often ending in the model year) and vehicle pages (their addresses have /veh/ and contain the VIN).\n"
         "- Open the market page with web_fetch. It lists every recent car of that model with its status, price, date, "
-        "miles and the auction site or dealer, and each one links to that car's own vehicle page. You can open two "
+        "miles and the auction site or dealer, and each one links to that car's own vehicle page. You can open a few "
         "pages in all: if the page for one model year shows few sales, use the second for the neighbouring year or "
         "for all years.\n"
         "- Record every matching car on it, each with the address of its own vehicle page as the URL and the VIN "
@@ -1088,10 +1114,12 @@ _SITE_NOTES = {
 }
 
 
-def _site_prompt(car: dict, today: str, site: str, max_searches: int, limited: bool = True) -> str:
+def _site_prompt(car: dict, today: str, site: str, max_searches: int, limited: bool = True, focus: bool = False) -> str:
     name = car_title(car) or "this car"
     keys = ("make", "model") if loose_trim(car) else ("make", "model", "trim")      # a detail such as 2+2 only narrows a search
     short = " ".join(str(car.get(key) or "").strip() for key in keys).strip() or name
+    kind = kind_words(car, every=focus)              # 'Cabriolet 7-speed manual': the searches have to say it
+    short = f"{short} {kind}".strip()
     year = str(car.get("year") or "").strip()
     rules = _research_prompt(car, today, max_searches).split("Rules:\n", 1)[1]
     scope = (f"Your searches return pages from {site} only." if limited
@@ -1102,14 +1130,17 @@ def _site_prompt(car: dict, today: str, site: str, max_searches: int, limited: b
         f"{_car_block(car)}\n\n"
         f"{scope} Run up to {max_searches} searches, each worded differently so they surface different auctions, "
         "then call record_comps once with every usable one:\n"
+        + _kind_note(car, focus) +
         f"- \"{(year + ' ' + short).strip()}\"\n"
         f"- \"{short} sold\"\n"
         f"- \"{short}\" with a neighbouring model year of this generation\n"
-        f"- \"{short}\" with the transmission or a paint colour, if you still have searches left\n"
+        + (f"- \"{short}\" worded the way this site titles its auctions, if you still have searches left\n" if kind else
+           f"- \"{short}\" with the transmission or a paint colour, if you still have searches left\n") +
         "Each auction page says how it ended: 'Sold for' is sold; 'Bid to' or 'Reserve not met' is high_bid; an "
         "auction that is still running is asking, with available yes and a note that starts 'Live auction'. Leave "
         "out a page that does not show a price.\n"
-        + (_SITE_NOTES.get(site, "") if limited else "") +
+        + (_SITE_NOTES.get(site, "") if limited else "")
+        + (_CLASSIC_KIND.format(kind=kind) if limited and kind and site == "Classic.com" else "") +
         "Rules:\n" + rules
     )
 
@@ -1138,8 +1169,14 @@ def _run_side_by_side(jobs, progress: Progress | None) -> list:
 
 
 def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rounds: int = 6,
-                   today: str | None = None, known=None, progress: Progress | None = None) -> dict:
+                   today: str | None = None, known=None, progress: Progress | None = None, focus: bool = False,
+                   second: bool = False) -> dict:
     """Search the web for completed sales.
+
+    `focus`: look for the car's exact body style and gearbox only, naming both in every search: for a car whose
+    sales in hand hold too few of its own kind. `second`: this follows a full search made a moment ago, so it
+    asks only Classic.com, whose market pages are kept by body style and gearbox and record the other auction
+    sites' results, and the wider web.
 
     Each auction site that can be searched on its own gets its own search, and the wider web gets one too, all
     at the same time. Returns {'comps': [...], 'summary': str, 'searched': int, 'passes': [{'site', 'found',
@@ -1148,20 +1185,24 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
     today = today or dt.date.today().strftime("%B %d, %Y")
     problem = "The comp research did not finish. Try again, or add comps by hand."
     sites = [(site, domains) for site, domains in AUCTION_SITES if tuple(domains) not in _UNSEARCHABLE]
-    closed = [site for site, domains in AUCTION_SITES if tuple(domains) in _UNSEARCHABLE]
-    each = max(2, int(max_searches) // 6)      # per site: its own pages are few, and Classic.com reads a whole market page
-    wider = max(2, int(max_searches) // 4)
+    if second:
+        sites = [(site, domains) for site, domains in sites if site == "Classic.com"]
+    closed = [] if second else [site for site, domains in AUCTION_SITES if tuple(domains) in _UNSEARCHABLE]
+    scarce = bool(kind_words(car, every=focus))        # an open car or a manual: fewer sales, so a search more for each site
+    each = max(3 if scarce else 2, int(max_searches) // 6)      # per site: its own pages are few, and Classic.com reads a whole market page
+    wider = max(3 if scarce else 2, int(max_searches) // 4)
 
     def wide() -> dict:
         searches = wider
-        return _again(lambda: _research(client, model, _research_prompt(car, today, searches) + _known_note(known), searches,
+        return _again(lambda: _research(client, model, _research_prompt(car, today, searches, focus) + _known_note(known), searches,
                                         max_rounds, problem, car=car, never=MIRROR_SITES, progress=progress, label="Wider web"),
                       progress, "Wider web")
 
     def one_site(site: str, domains: list[str]) -> dict:
         def limited() -> dict:
-            return _research(client, model, _site_prompt(car, today, site, each) + _known_note(known), each, max_rounds,
-                             problem, car=car, only=domains, progress=progress, label=site, opens=_SITE_OPENS.get(site, 0))
+            return _research(client, model, _site_prompt(car, today, site, each, focus=focus) + _known_note(known), each, max_rounds,
+                             problem, car=car, only=domains, progress=progress, label=site,
+                             opens=_SITE_OPENS.get(site, 0) + (1 if scarce and _SITE_OPENS.get(site) else 0))
         nothing = {"comps": [], "summary": "", "searched": 0, "failed": [], "pages": [], "used": {}}
         try:
             result = limited()
@@ -1187,7 +1228,7 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
 
     if progress:
         note = f" ({', '.join(closed)} cannot be searched on its own, so it is covered by Classic.com and the wider web)" if closed else ""
-        progress.say("Searching at the same time: " + ", ".join(site for site, _ in sites) + " and the wider web" + note)
+        progress.say("Searching at the same time: " + ", ".join([site for site, _ in sites] + ["the wider web"]).replace(", the wider web", " and the wider web") + note)
     jobs = [(site, (lambda site=site, domains=domains: one_site(site, domains))) for site, domains in sites] + [("Wider web", wide)]
     results, passes, first_error = [], [], None
     for label, result in _run_side_by_side(jobs, progress):

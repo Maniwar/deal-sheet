@@ -23,10 +23,15 @@ const { chromium } = require('playwright');
   const steps = await p.locator('.sheet-body .steplog .livelog div').allInnerTexts();
   log('4 step log', { count: steps.length, notable: steps.filter((t) => /cannot look inside|busy|rate limit|Waiting|did not|Facebook|same time|used all/i.test(t)) });
   await p.locator('.sheet-tabs .tab[data-tab=comps]').click(); await p.waitForTimeout(1000);
-  log('5 sold tab', { tab: await p.locator('.sheet-tabs .tab[data-tab=comps]').innerText(), cards: await p.locator('.sheet-body .card').evaluateAll(els => els.map(e => e.innerText.replace(/\s+/g, ' ').slice(0, 84))) });
+  const soldCards = await p.locator('.sheet-body .card').evaluateAll(els => els.map(e => e.innerText.replace(/\s+/g, ' ').slice(0, 84)));
+  log('5 sold tab', { tab: await p.locator('.sheet-tabs .tab[data-tab=comps]').innerText(), cards: soldCards });
   await p.locator('.sheet-tabs .tab[data-tab=sale]').click(); await p.waitForTimeout(1000);
   log('6 for sale tab', { tab: await p.locator('.sheet-tabs .tab[data-tab=sale]').innerText(), cards: await p.locator('.sheet-body .card').evaluateAll(els => els.map(e => e.innerText.replace(/\s+/g, ' ').slice(0, 330))) });
   await p.screenshot({ path: '/tmp/e2e/build2-sale.png' });
+  // an uncommon kind (a manual) is named in the searches from the start
+  const kindNamed = [...new Set((require('fs').readFileSync('/tmp/e2e/calls.log', 'utf8').match(/names_kind=[^\n]+/g) || []))];
+  log('7 the searches name the kind', kindNamed);
+  if (!kindNamed.includes('names_kind=6-speed manual')) errs.push('the sales searches did not name the gearbox');
   log('errors', { exc: await p.locator('[data-testid="stException"]').count(), errs });
   await b.close();
 })().catch(e => { console.log('TEST ERROR', String(e).slice(0, 900)); process.exit(1); });

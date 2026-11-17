@@ -14,6 +14,9 @@ API key is needed:
 wins, a removed car stays removed, another key sees nothing, the store goes down and comes back).
 `cutshort.js` starts the app so that it waits before drawing a car it has just loaded, and taps the page
 meanwhile: the car must survive a run that is cut short.
+`kind.js` uses keys ending `kindfew` and `kindnone`, for which a plain search returns only the model's other
+kinds (automatics, an open car): the app must search again for the car's exact kind, and say what was left
+out when nothing of the kind exists. `kind_test.py` checks the words the searches name for such a car.
 
 The tests (`*.js`) each print what they saw and end with an `errors:` line. `judge_test.py` and
 `judge_real.py` are unit tests of how a listing page's wording is read (for sale, sold, gone).

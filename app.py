@@ -406,6 +406,40 @@ def same_body_only(car: dict, comps: list[dict]) -> tuple[list[dict], int]:
     return kept, len(comps) - len(kept)
 
 
+def exact_sales(car: dict, comps: list[dict]) -> int:
+    """How many completed sales are of the car's own body style, driven wheels and gearbox, and of its trim."""
+    kept, _ = same_body_only(car, comps)
+    kept, _ = same_gearbox_only(car, kept)
+    return sum(comp["status"] == "sold" and "different trim" not in str(comp.get("note") or "").lower() for comp in kept)
+
+
+def sales_of_this_kind(client, model: str, car: dict, comps: list[dict], max_searches: int, progress=None) -> dict:
+    """Search again for the car's exact body style and gearbox when the sales in hand hold fewer than three of them.
+
+    A plain search for a model returns its common kind: coupes for a cabriolet, automatics for a manual. Those
+    are left out as no comparison, which can leave nothing. Returns {'comps': the new ones, 'note', 'used'},
+    empty when there was no need or no body style or gearbox to name.
+    """
+    kind = calc.kind_words(car, every=True)
+    if not kind or exact_sales(car, comps) >= 3:
+        return {"comps": [], "note": "", "used": {}}
+    if progress:
+        progress.say(f"Fewer than three sales of this exact kind so far ({kind}). Searching again for exactly that")
+    try:
+        more = llm.research_comps(client, model, car, max_searches=max_searches, progress=progress, focus=True,
+                                  second=True, known=[comp["url"] for comp in comps if comp.get("url")])
+    except llm.LLMError as exc:
+        if progress:
+            progress.say(f"The second search did not finish. {exc}")
+        return {"comps": [], "note": "", "used": {}}
+    new = calc.new_comps(comps, more["comps"])
+    found = exact_sales(car, new)
+    note = (f"The first search held fewer than three sales of this exact kind ({kind}), so a second one looked for "
+            f"exactly that and found {found} more." if found else
+            f"A second search for exactly this kind ({kind}) found no more sales.")
+    return {"comps": new, "note": note, "used": more.get("used") or {}}
+
+
 def settle_trim(car: dict) -> str:
     """Check the trim against the VIN in NHTSA's public decoder, fixing it when the VIN is plainly more specific.
 
@@ -636,6 +670,10 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     try:
         result = llm.research_comps(client, model, car, max_searches=max_searches, progress=progress)
         comps, summary = list(result["comps"]), result["summary"]
+        again = sales_of_this_kind(client, model, car, comps, max_searches, progress)
+        comps += again["comps"]
+        summary = f"{summary} {again['note']}".strip()
+        result["used"] = llm.add_used(result.get("used"), again["used"])
         if not for_sale.done():
             tell(f"{len(comps)} sale{'s' if len(comps) != 1 else ''} and no-sales found. Finishing the search for cars for sale today")
         while not for_sale.done():                           # its lines are drawn from this thread
@@ -1234,8 +1272,9 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
         have = [comp for comp in have if id(comp) in stays]      # less any whose page states the other transmission
     elif wants_sale:
         found = llm.research_for_sale(client, model, the_car, max_searches=searches, known=known, progress=progress, zip_code=zip_code)
-    else:
-        found = llm.research_comps(client, model, the_car, max_searches=searches, known=known, progress=progress)
+    else:                                             # with too few sales of the car's own kind, look for exactly that kind
+        found = llm.research_comps(client, model, the_car, max_searches=searches, known=known, progress=progress,
+                                   focus=bool(calc.kind_words(the_car, every=True)) and exact_sales(the_car, have) < 3)
     better = calc.upgrade_leads(have, found["comps"])            # a lead whose own page has now turned up takes that page
     relisted, cleared = {}, 0
     if refresh or wants_sale:
@@ -1346,7 +1385,7 @@ def version_work(job, car: dict, facts: dict, comps: list[dict], client, model: 
     gear = other_gearbox(car, facts)
     if gear:
         job.progress.say(f"The sales held are for the other gearbox, so searching for {gear} sales first")
-        found = llm.research_comps(client, model, other, max_searches=searches, progress=job.progress)
+        found = llm.research_comps(client, model, other, max_searches=searches, progress=job.progress, focus=True)
         sales, _ = same_body_only(other, found["comps"])
         sales, _ = same_gearbox_only(other, sales, job.progress.say)
         sales, _ = drop_spare_trims(sales)

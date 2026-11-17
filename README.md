@@ -408,6 +408,15 @@ not use a headless or stealth browser, on purpose. Turn the fetch off in the set
 - Some sites cannot be searched from the inside (the search tool turns the request down, as it
   does for Bring a Trailer). The app remembers that and does not ask again: the site's sales come
   from Classic.com, which records them, and from the search of the wider web.
+- **An open car or a manual is searched for by name.** A plain search for a model returns its
+  common kind (coupes, automatics), and those are no comparison for a Cabriolet or a manual, so
+  they are left out. For such a car every sales search names the body style and the gearbox
+  ("Porsche 911 Carrera S Cabriolet 7-speed manual"), runs across the generation's model years,
+  and Classic.com's search opens the market it keeps for that exact kind. If fewer than three
+  sales of the car's own body style and gearbox come back for any car, the app searches once
+  more for exactly that kind (Classic.com and the wider web) and adds what it finds. An empty
+  Sold tab says what the last search left out, and **Search for sales** then looks for the exact
+  kind on every site.
 - A sale read from one of Classic.com's lists of results, when that car's own page was not among
   the search results, links to the list and says "Listed on Classic.com" in its note.
 - Results are merged so the same sale is not listed twice: the same page, the same VIN, or the

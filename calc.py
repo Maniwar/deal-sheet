@@ -789,6 +789,52 @@ def other_gearbox(car: dict, comp: dict) -> bool:
     return bool(mine and theirs and mine != theirs)
 
 
+# Makers whose open cars are sold as Cabriolets, whatever a dealer's listing calls them.
+_CABRIOLET_MAKES = {"porsche", "audi", "mercedes-benz", "mercedes", "volkswagen", "saab"}
+_OWN_GEARBOX = re.compile(r"\b(pdk|dct|dkg|dsg|tiptronic|steptronic|s[- ]?tronic|smg|cvt)\b", re.I)
+
+
+def body_word(car: dict, coupe: bool = False) -> str:
+    """The word a sale's title uses for this car's body, when a search has to say it to find the car: 'Cabriolet',
+    'Convertible', 'Spyder', 'Targa'. '' for a coupe (unless `coupe`) and for anything else: those are what a
+    search returns anyway."""
+    words = f"{car.get('body') or ''} {car.get('trim') or ''}".lower()
+    kind = body_kind(car.get("body")) or body_kind(car.get("trim"))
+    if kind == "targa":
+        return "Targa"
+    if kind == "coupe":
+        return "Coupe" if coupe else ""
+    if kind != "open":
+        return ""
+    for word in ("spyder", "spider", "roadster", "speedster", "volante", "drophead", "cabriolet"):
+        if word in words:
+            return word.capitalize()
+    make = str(car.get("make") or "").strip().lower()
+    return "Cabriolet" if "cabrio" in words or make in _CABRIOLET_MAKES else "Convertible"
+
+
+def gear_word(car: dict, automatic: bool = False) -> str:
+    """How a search names this car's gearbox when it has to: '7-speed manual' or 'manual' for a manual. An
+    automatic is what most sales are, so it is named only when `automatic` is set: by its own name when it has
+    one (PDK, DCT), else 'automatic'."""
+    words = str(car.get("transmission") or "")
+    kind = gearbox_kind(words)
+    if kind == "manual":
+        speeds = re.search(r"\b(\d)[- ]?(?:speed|spd)\b", words, re.I)
+        return f"{speeds.group(1)}-speed manual" if speeds else "manual"
+    if kind == "automatic" and automatic:
+        own = _OWN_GEARBOX.search(words)
+        return own.group(1).upper() if own else "automatic"
+    return ""
+
+
+def kind_words(car: dict, every: bool = False) -> str:
+    """The body style and gearbox a search for this car's sales has to name: 'Cabriolet 7-speed manual'. Without
+    them a search returns the model's common kind (a coupe, an automatic), which is no comparison for an open car
+    or a manual. `every`: name them whenever they are known, a coupe and an automatic too."""
+    return " ".join(word for word in (body_word(car, coupe=every), gear_word(car, automatic=every)) if word)
+
+
 def other_body(car: dict, comp: dict) -> bool:
     """True when a comp is plainly a different body style from the car: a cabriolet against a coupe, say."""
     mine = body_kind(car.get("body")) or body_kind(car.get("trim"))

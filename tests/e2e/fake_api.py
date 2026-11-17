@@ -87,7 +87,9 @@ class H(BaseHTTPRequestHandler):
             import os, time as _t
             _t.sleep(float(os.environ.get("FAKE_DELAY", "0")))        # a search that takes a while, as the real ones do
             ws = next(t for t in tools if t.get("name") == "web_search"); wf = next((t for t in tools if t.get("name") == "web_fetch"), {})
-            LOG.write(f"  budget: searches={ws.get('max_uses')} opens={wf.get('max_uses')} cache_top={'cache_control' in body} cache_tool={any('cache_control' in t for t in tools)} only={ws.get('allowed_domains')}\n"); LOG.flush()
+            asked = json.dumps(body["messages"][0]["content"])
+            LOG.write(f"  budget: searches={ws.get('max_uses')} opens={wf.get('max_uses')} cache_top={'cache_control' in body} cache_tool={any('cache_control' in t for t in tools)} only={ws.get('allowed_domains')}"
+                      f" exact_kind={'only for this exact kind' in asked} names_kind={(__import__('re').search(r'kind is: ([^.]+)', asked) or [0, None])[1]}\n"); LOG.flush()
         # ---- the rules the real API enforces for these models ----
         if choice in ("tool", "any"):
             return self.send(bad('tool_choice: type "tool" and "any" are not supported for this model.'), 400)
@@ -185,6 +187,19 @@ class H(BaseHTTPRequestHandler):
             return [{"type": "server_tool_use", "id": f"srvtoolu_{n}", "name": "web_search", "input": {"query": query}},
                     {"type": "web_search_tool_result", "tool_use_id": f"srvtoolu_{n}", "content": ({"type": "web_search_tool_result_error", "error_code": error} if error else
                         [{"type": "web_search_result", "url": u, "title": "Result", "encrypted_content": "enc", "page_age": None} for u in urls])}]
+        # Keys ending kindfew and kindnone: a plain search for the model returns only its other kinds (automatics, an
+        # open car). A search for the car's exact kind then finds three sales (kindfew) or the same cars again (kindnone).
+        who = self.headers.get("x-api-key", "") or self.headers.get("authorization", "").replace("Bearer ", "")
+        asked = json.dumps(body["messages"][0]["content"])
+        if search and who.endswith(("kindfew", "kindnone")) and ("completed auctions" in asked or "comparable prices" in asked):
+            bat = "https://bringatrailer.com/listing/"
+            sale = lambda i, **k: {"status": "sold", "title": "2019 BMW M2 Competition", "body": "Coupe", "miles": 20000 + 1500 * i, "price": 48000 + 700 * i,
+                                   "date": f"Aug {i + 1}, 2026", "source": "Bring a Trailer", **k}
+            others = [sale(i, transmission="automatic", url=f"{bat}fake-m2-dct-{i}/", note="7-speed DCT.") for i in range(3)] + \
+                     [sale(5, title="2019 BMW M2 Competition Convertible", body="Convertible", transmission="manual", url=f"{bat}fake-m2-open/", note="6-speed manual.")]
+            exact = [sale(i + 6, transmission="manual", url=f"{bat}fake-m2-manual-{i}/", note="6-speed manual.") for i in range(3)]
+            comps = exact if "only for this exact kind" in asked and who.endswith("kindfew") else others
+            return self.send(msg(looked(1, "2019 BMW M2 Competition sold", [c["url"] for c in comps]) + [tool("record_comps", {"summary": "From the stand-in search.", "comps": comps})]))
         if search and only:
             state["limited"] = state.get("limited", []) + [only]
             LOG.write(f"  limited search: {only}\n"); LOG.flush()
@@ -328,7 +343,10 @@ class H(BaseHTTPRequestHandler):
                 ], stop="pause_turn"))
             if step == 2:      # then answers in prose instead of calling the tool
                 return self.send(msg([{"type": "text", "text": "I found two sales and one asking price."}], stop="end_turn"))
-            return self.send(msg([{"type": "text", "text": "Recording."}, tool("record_comps", {"summary": "Three comps from the fake search.", "comps": [
+            exact = ([{"status": "sold", "title": "2019 BMW M2 Competition", "body": "Coupe", "transmission": "manual", "miles": 30500, "price": 50500, "date": "Sep 9, 2026",
+                       "source": "Bring a Trailer", "url": "https://bringatrailer.com/listing/fake-m2-competition-exact/", "note": "6-speed manual."}]
+                     if "only for this exact kind" in json.dumps(body["messages"][0]["content"]) else [])
+            return self.send(msg([{"type": "text", "text": "Recording."}, tool("record_comps", {"summary": "Three comps from the fake search.", "comps": exact + [
                 {"status": "sold", "title": "2020 BMW M2 CS", "trim": "M2 CS", "body": "Coupe", "miles": 8000, "price": 97000, "date": "Jun 3, 2026", "source": "Bring a Trailer", "url": "https://bringatrailer.com/listing/fake-m2-cs/", "note": "6-speed manual."},
                 {"status": "sold", "title": "2021 Porsche 718 Spyder", "body": "Convertible", "miles": 9000, "price": 99000, "date": "May 2, 2026", "source": "Bring a Trailer", "url": "https://bringatrailer.com/listing/fake-spyder/"},
                 {"status": "sold", "title": "2021 Porsche 718 Cayman GTS 4.0", "body": "Coupe", "history": "Accident reported on the Carfax", "miles": 21000, "price": 84000, "date": "Apr 22, 2026", "source": "Classic.com", "url": "https://classic.com/veh/2021-porsche-718-cayman-gts-40-wp0ab2a98ls228716-AAA", "note": "6-speed manual."},

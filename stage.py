@@ -1122,7 +1122,10 @@ function create(root) {
       const ended = (() => { const out = (d.comps || []).filter((k) => k.group === "ended"); if (!out.length) return "";
           return `<details class="byhand endedfold"${S.endOpen ? " open" : ""}><summary>Show ${out.length} listing${out.length === 1 ? "" : "s"} that ended</summary><div class="lead-sub">These were for sale and their pages now say sold or gone. The price is the last asking price, not what the car sold for, so they are not counted.</div>${out.sort(order).map((k) => compCard(k, true)).join("")}</details>`; })();
       const find = `<button type="button" class="btn${rows ? " ghost" : ""} more" data-kind="sold"${S.moreBusy ? " disabled" : ""}>${S.moreBusy === "sold" ? "Searching" : rows ? "Search for more sales" : "Search for sales"}</button>`;
-      h = (rows ? sorter + rows : '<div class="lead-line">No completed sales yet</div><div class="lead-sub">The search goes through Cars &amp; Bids, Bring a Trailer, the other auction sites and then the wider web.</div>') +
+      /* with nothing to show, say what the last search found and left out: a coupe is no sale of a cabriolet */
+      const whyNone = (String((d.case || {}).summary || "").match(/[^.]*\b(?:left out|of this exact kind|for exactly this kind)\b[^.]*\./g) || []).map((t) => t.trim()).slice(0, 3).join(" ");
+      h = (rows ? sorter + rows : '<div class="lead-line">No completed sales yet</div>' + (whyNone ? `<div class="lead-sub">${esc(whyNone)} Search again and the app looks for this car's exact body style and gearbox.</div>`
+          : '<div class="lead-sub">The search goes through Cars &amp; Bids, Bring a Trailer, the other auction sites and then the wider web.</div>')) +
         ended + keyAsk + `<div>${find}</div>` + liveLog(S.moreBusy === "sold") + byHand("sold");
     } else if (S.tab === "sale") {
       const rows = list(["live"], "For sale now", (k) => !k.lead) +
