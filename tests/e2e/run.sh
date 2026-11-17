@@ -33,7 +33,7 @@ done
 sleep 2
 
 echo "== unit: what a listing page says about the car"
-(cd "$repo" && python3 "$work/judge_test.py" | tail -1 && python3 "$work/judge_real.py" | tail -1 && python3 "$work/kind_test.py" | tail -3)
+(cd "$repo" && python3 "$work/judge_test.py" | tail -1 && python3 "$work/judge_real.py" | tail -1 && python3 "$work/kind_test.py" | tail -4)
 
 tests=("$@")
 [ ${#tests[@]} -eq 0 ] && tests=(build2 gear check verify ended refresh2 miles blank remove switch listsites details versions zip pasted shared cutshort cutshort_shared kind)

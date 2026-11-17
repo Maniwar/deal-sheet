@@ -68,7 +68,7 @@ def why_out(comp: dict) -> str:
     if "different trim" in str(comp.get("note") or "").lower():
         return "a different trim"
     if comp.get("aside") == "far":
-        return "far from the other sales, with no page or VIN to check it by"
+        return "out of line with the other prices, with no page or VIN to check it by"
     if comp.get("aside") == "lead":
         return {"list": "no page of its own to check", "loose": "its link was not confirmed",
                 "none": "no link to check"}.get(calc.proof(comp), "set aside")
@@ -281,6 +281,10 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "money": {"tax": settings["tax_rate"], "fees": settings["fees"], "apr": settings["apr"],
                   "down": settings["down"], "months": settings["months"]},
         "axis": axis, "comps": cards, "case": case, "message": str(flags.get("message") or ""),
+        # what a message can honestly cite for the offer on the sheet: sales at or under it, else cars for sale near it
+        "backing": (lambda price: {"offer": calc.money(price), "sales": len(calc.cite_sales(car, comps, offer=price)),
+                                   "asks": len(calc.cite_asks(car, comps, price))} if price else None)(
+            calc.to_int(offer.get("shown")) or calc.to_int(offer.get("open"))),
         "color": showcase.color_for(str(car.get("exterior") or "")),
         "paint": showcase.paint_for(str(car.get("exterior") or "")),
         "cabin": showcase.cabin_for(str(car.get("interior") or "")),

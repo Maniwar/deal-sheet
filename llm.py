@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import (kind_words, AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, own_page, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
+from calc import (kind_words, cite_asks, AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, own_page, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
                   host_of, offer_basis, plain_date,
                   is_list_page, is_mirror, link_kind, link_pages, listing_site, loose_trim, mark_other_trim, merge_comps, money, normalize_url,
                   to_int)
@@ -1766,22 +1766,31 @@ def _no_dashes(text: str) -> str:
 def draft_message(client, model: str, car: dict, comps: list[dict], offer_price: int,
                   buyer: str = "", channel: str = "text") -> str:
     seller = car.get("seller") or ""
-    best = cite_sales(car, comps)
-    rest = [comp for comp in comps if not any(comp is one for one in best)]
+    best = cite_sales(car, comps, offer=offer_price)            # only sales that support this offer
+    asks = [] if best else cite_asks(car, comps, offer_price)   # with none, cars for sale now at about the offer
+    if best:
+        cite = (f"The completed sales to cite (they support this offer):\n{_comps_block(best)}\n\n", "- Cite the "
+                "completed sales listed above, each with its price, miles and date, and its link when the rules below "
+                "allow one. Say they are sales, not asking prices.\n")
+    elif asks:
+        cite = (f"No completed sale in the buyer's list supports this offer. Cars for sale now at about the offer, to "
+                f"cite instead:\n{_comps_block(asks)}\n\n", "- Cite the cars for sale listed above, each with its "
+                "price and miles, and say plainly that they are asking prices, not sales.\n")
+    else:
+        cite = ("The buyer's list holds no sale and no car for sale that supports this offer.\n\n", "- Cite no "
+                "sale and no price other than the offer. Keep the message short: the offer, that the buyer can move "
+                "quickly, the inspection, and the out-the-door number.\n")
     prompt = (
         f"Write a short {channel} message from a buyer to the seller of this car, making an offer of "
-        f"{money(offer_price)}.\n\n{_car_block(car)}\n\n"
-        + (f"The sales nearest this car in miles and most recent, to cite first:\n{_comps_block(best)}\n\n" if best else "")
-        + (f"The buyer's other comps, for context:\n{_comps_block(rest)}\n\n" if rest else "") +
+        f"{money(offer_price)}.\n\n{_car_block(car)}\n\n" + cite[0] +
         "Rules:\n"
         "- Plain, friendly and direct. First person. Under 170 words.\n"
         "- State the car's miles exactly as given above. If no miles are given, do not mention miles.\n"
-        "- Cite up to three completed sales with price, miles, date and the link. Say they are sales, "
-        "not asking prices. Cite an asking price only if there are fewer than two sales, and label it.\n"
-        "- Cite only sales that support this offer for this car: near it in miles, and recent. Leave out a sale "
-        "that is years old or far from this car's miles when a closer one exists, and never cite a sale well "
-        "above the offer without saying why it does not apply (far fewer miles, sold in a hotter market). If "
-        "even the nearest sales are far from this car's miles, say so in a few words.\n"
+        + cite[1] +
+        "- Mention no sale and no price that is not listed above. A sale above the offer argues the seller's case, "
+        "so none appears in this message.\n"
+        "- Give no reason that is not in the data above. Never guess at a region's market, a seller's motives or a "
+        "car's condition to explain a price.\n"
         "- Write a date plainly ('Nov 2023'), without words like 'Ended'.\n"
         "- Give a sale's link only when it opens that one sale's own page. A comp marked as a link to a page of "
         "many cars gets no link: name where it is recorded instead (for example 'per Classic.com'). Never give "
@@ -1808,10 +1817,8 @@ def template_message(car: dict, comps: list[dict], offer_price: int, buyer: str 
     seller = str(car.get("seller") or "").strip()
     is_dealer = (car.get("seller_type") or "") == "dealer"
     greeting = f"Hi {seller.split()[0]}," if seller and not is_dealer else "Hi,"
-    near = cite_sales(car, comps, 6)                       # nearest in miles and most recent
-    sold = [comp for comp in near if comp["price"] <= offer_price * 1.15][:3]     # a sale far above the offer argues the seller's case
-    if len(sold) < 2:
-        sold = near[:3]
+    sold = cite_sales(car, comps, offer=offer_price)       # nearest in miles and most recent, and only what supports the offer
+    asks = [] if sold else cite_asks(car, comps, offer_price)
     lines = [
         greeting, "",
         f"I'm interested in the {car_title(car)}"
@@ -1832,6 +1839,12 @@ def template_message(car: dict, comps: list[dict], offer_price: int, buyer: str 
             elif comp.get("source"):                         # its link opens a list of cars: say where it is recorded instead
                 line += ", per " + re.sub(r"\s*\(.*?\)", "", str(comp["source"])).strip()
             lines.append(line)
+    if asks:
+        lines += ["", "For comparison, these are for sale now. They are asking prices, not sales:"]
+        for comp in asks:
+            bits = [comp["title"]] + ([f"{comp['miles']:,} miles"] if comp.get("miles") else [])
+            line = f"- {', '.join(bits)}, listed at {money(comp['price'])}"
+            lines.append(line + (f": {comp['url']}" if own_page(comp) else f" (VIN {comp['vin']})" if comp.get("vin") else ""))
     lines += ["", "I'd want to have it inspected before closing."]
     if is_dealer:
         lines.append("If that works, please send the out-the-door number with all fees.")

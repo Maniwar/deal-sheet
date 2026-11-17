@@ -683,10 +683,17 @@ def own_page(comp: dict) -> bool:
     return bool(url) and link_kind(url) != "page" and not is_list_page(url) and comp.get("link_ok") is not False
 
 
-def cite_sales(car: dict, comps: list[dict], limit: int = 3) -> list[dict]:
+# What a message may cite for an offer. A sale above the offer argues the seller's case, so a sale has to be at
+# the offer or within a few percent of it, and recent enough to say where the market is. An asking price is
+# what a seller hopes for, so one a little above the offer still supports it.
+SALE_SUPPORTS, ASK_SUPPORTS, CITE_YEARS = 1.03, 1.05, 3
+
+
+def cite_sales(car: dict, comps: list[dict], limit: int = 3, offer: int | None = None) -> list[dict]:
     """The completed sales worth putting in a message to the seller: the ones nearest this car in miles and
     most recent, newest first. A 500-mile car sold four years ago says little about a 15,000-mile one today,
-    and the other way round."""
+    and the other way round. With `offer`, only sales that support it: a sale well above the offer argues the
+    seller's case, and none is better than one that has to be explained away."""
     mine, today = to_int(car.get("miles")), dt.date.today().toordinal()
 
     def far(comp: dict) -> float:
@@ -696,9 +703,31 @@ def cite_sales(car: dict, comps: list[dict], limit: int = 3) -> list[dict]:
         loose = 0.0 if own_page(comp) else 0.5                 # a sale the seller can open and check outranks one that is only on a list
         return gap + 0.35 * years + loose
 
-    sold = [comp for comp in comps if comp.get("status") == "sold" and comp.get("use", True) and comp.get("price")]
+    def recent(comp: dict) -> bool:
+        when = date_key(plain_date(comp.get("date")))
+        return not when or today - when <= CITE_YEARS * 365
+
+    sold = [comp for comp in comps if comp.get("status") == "sold" and comp.get("use", True) and comp.get("price")
+            and (not offer or (comp["price"] <= offer * SALE_SUPPORTS and recent(comp)))]
     best = sorted(sold, key=far)[:limit]
     return sorted(best, key=lambda comp: -date_key(plain_date(comp.get("date"))))
+
+
+def cite_asks(car: dict, comps: list[dict], offer: int, limit: int = 2) -> list[dict]:
+    """Cars for sale now, priced at or near the offer, to name in a message when no completed sale supports it:
+    the nearest this car in miles first. Each one has to be something the seller can look up (a page or a VIN),
+    and within about twice or half this car's miles: a car with three times the miles is no comparison, and the
+    seller will say so."""
+    mine = to_int(car.get("miles"))
+
+    def gap(comp: dict) -> float:
+        miles = to_int(comp.get("miles"))
+        return abs(math.log((miles + 1000) / (mine + 1000))) if (mine is not None and miles is not None) else 1.0
+
+    asks = [comp for comp in comps if comp_group(comp) == "live" and comp.get("use", True) and comp.get("price")
+            and comp["price"] <= offer * ASK_SUPPORTS and (own_page(comp) or clean_vin(comp.get("vin")))
+            and gap(comp) <= 0.75]
+    return sorted(asks, key=gap)[:limit]
 
 
 _OPEN_WORDS = ("cabriolet", "convertible", "cabrio", "spyder", "spider", "roadster", "speedster", "drophead", "volante")
@@ -1034,25 +1063,29 @@ def set_aside_leads(comps: list[dict], fresh: list[dict] | None = None) -> int:
 
 
 FAR_LOW, FAR_HIGH = 0.65, 1.35
+ABOVE_ASKS = 1.05
 
 
 def set_aside_far(comps: list[dict], fresh: list[dict] | None = None) -> int:
     """Switch off a sale that nobody can open or check and that sits far from the other sales. Returns how many.
 
     A line read off a list of results, with no page of its own and no VIN, may be a dealer's asking price shown
-    as sold, or a misread. When its price is more than about a third above or below the middle of the sales, it
-    is more likely that than a sale, and one or two of them can move an offer by thousands. It stays in the list,
-    not counted, until the buyer confirms it. With fewer than five sales there is no middle to judge by.
+    as sold, or a misread. It is more likely that than a sale when its price is more than about a third above or
+    below the middle of the sales (five sales or more: fewer give no middle to judge by), or when it is above
+    every car of this kind now for sale (three or more): a sale is not made above what sellers are asking. One or
+    two such lines can move an offer by thousands. They stay in the list, not counted, until the buyer confirms them.
     """
     fresh = comps if fresh is None else fresh
     prices = [comp["price"] for comp in comps if comp_group(comp) == "sold" and comp["use"] and comp["price"]]
-    if len(prices) < 5:
-        return 0
-    middle, count = median(prices), 0
+    asks = [comp["price"] for comp in comps if comp_group(comp) == "live" and comp["use"] and comp["price"]]
+    middle = median(prices) if len(prices) >= 5 else None
+    top = max(asks) * ABOVE_ASKS if len(asks) >= 3 else None
+    count = 0
     for comp in fresh:
         if (comp_group(comp) == "sold" and comp["use"] and comp.get("aside") != "mine" and is_lead(comp)
                 and not vin_checks_out(clean_vin(comp.get("vin")))
-                and not FAR_LOW * middle <= comp["price"] <= FAR_HIGH * middle):
+                and ((middle is not None and not FAR_LOW * middle <= comp["price"] <= FAR_HIGH * middle)
+                     or (top is not None and comp["price"] > top))):
             comp["use"], comp["aside"] = False, "far"
             count += 1
     return count

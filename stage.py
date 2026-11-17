@@ -68,7 +68,7 @@ def why_out(comp: dict) -> str:
     if "different trim" in str(comp.get("note") or "").lower():
         return "a different trim"
     if comp.get("aside") == "far":
-        return "far from the other sales, with no page or VIN to check it by"
+        return "out of line with the other prices, with no page or VIN to check it by"
     if comp.get("aside") == "lead":
         return {"list": "no page of its own to check", "loose": "its link was not confirmed",
                 "none": "no link to check"}.get(calc.proof(comp), "set aside")
@@ -281,6 +281,10 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "money": {"tax": settings["tax_rate"], "fees": settings["fees"], "apr": settings["apr"],
                   "down": settings["down"], "months": settings["months"]},
         "axis": axis, "comps": cards, "case": case, "message": str(flags.get("message") or ""),
+        # what a message can honestly cite for the offer on the sheet: sales at or under it, else cars for sale near it
+        "backing": (lambda price: {"offer": calc.money(price), "sales": len(calc.cite_sales(car, comps, offer=price)),
+                                   "asks": len(calc.cite_asks(car, comps, price))} if price else None)(
+            calc.to_int(offer.get("shown")) or calc.to_int(offer.get("open"))),
         "color": showcase.color_for(str(car.get("exterior") or "")),
         "paint": showcase.paint_for(str(car.get("exterior") or "")),
         "cabin": showcase.cabin_for(str(car.get("interior") or "")),
@@ -1149,9 +1153,14 @@ function create(root) {
       const kind = `<div class="choice chan">${[["text", "As a text"], ["email", "As an email"]].map(([id, t]) => `<button type="button" class="btn ghost${chan === id ? " on" : ""}" data-chan="${id}">${t}</button>`).join("")}</div>`;
       const write = `<div><button type="button" class="btn msgai"${S.msgBusy ? " disabled" : ""}>${S.msgBusy === "claude" ? "Writing" : d.message ? "Write it again with Claude" : "Write it with Claude"}</button> ` +
         `<button type="button" class="btn ghost msgplain"${S.msgBusy ? " disabled" : ""}>${S.msgBusy === "template" ? "Writing" : "Use the plain version"}</button></div>`;
-      h = d.message
+      /* an offer nothing in the list backs up: say so, and offer the search that would find the sales */
+      const bk = d.backing, bare = bk && !bk.sales && !bk.asks && !d.sample;
+      const backing = !bk || d.sample ? "" : bare
+        ? `<div class="c-flag">Nothing in your list backs up an offer of ${esc(bk.offer)}: no sale at or under it from the last three years, and no car for sale near it. The message will make the offer without evidence. Search for more sales first, or check the offer.</div><div><button type="button" class="btn ghost more" data-kind="sold"${S.moreBusy ? " disabled" : ""}>Search for sales</button></div>`
+        : `<div class="tiny">${bk.sales ? `${bk.sales} completed sale${bk.sales === 1 ? "" : "s"} at or under ${esc(bk.offer)} to cite.` : `No completed sale backs up ${esc(bk.offer)}, so the message cites ${bk.asks} car${bk.asks === 1 ? "" : "s"} for sale near it, as asking prices.`}</div>`;
+      h = backing + (d.message
         ? `<textarea class="linkbox msgbox" rows="12" aria-label="Your offer message">${esc(d.message)}</textarea><div class="tiny">Edit it here before you send it. Your changes are kept.</div><div><button type="button" class="btn copy">Copy the message</button></div><h3>Write it again</h3>${keyAsk}${kind}${write}${liveLog(S.msgBusy === "claude")}`
-        : `<div class="lead-line">Send the seller your offer</div><div class="lead-sub">A short message with your offer and the sales that back it up. You can edit it here before you copy it.</div>${keyAsk}${kind}${write}${liveLog(S.msgBusy === "claude")}`;
+        : `<div class="lead-line">Send the seller your offer</div><div class="lead-sub">A short message with your offer and the sales that back it up. You can edit it here before you copy it.</div>${keyAsk}${kind}${write}${liveLog(S.msgBusy === "claude")}`);
     } else if (S.tab === "car") {
       const e = d.edit || {};
       const fields = [["miles", "Miles", 1], ["price", "Asking price", 1], ["exterior", "Exterior color"], ["interior", "Interior color"], ["year", "Year", 1], ["make", "Make"], ["model", "Model"], ["trim", "Trim"], ["body", "Body style"], ["transmission", "Transmission"], ["drivetrain", "Drivetrain"], ["vin", "VIN"], ["seller", "Seller"], ["location", "Location"], ["history", "Accident and title history"]];

@@ -108,9 +108,15 @@ what that car has been selling for and gives you a typical sale price, the comps
   folded away under "Show N not counted" with the reason on each card. **Count it** and **Leave it
   out** move a sale between the two.
 - **A sale nobody can check does not move the offer.** A line read off a list of results, with no
-  page of its own and no VIN, that sits more than about a third above or below the middle of the
-  sales is shown under "not counted" until you confirm it: it is more likely a dealer's asking
-  price than a sale. The offer also prices a car from its whole generation, never from its own
+  page of its own and no VIN, is shown under "not counted" until you confirm it when it sits more
+  than about a third above or below the middle of the sales (five or more), or above every car of
+  the kind now for sale (three or more): it is more likely a dealer's asking price than a sale. A
+  car already saved gets the same check when it is opened.
+- **The message cites only what supports the offer.** A sale above the offer argues the seller's
+  case, so the message names only sales at the offer or within a few percent of it, from the last
+  three years. When there is none it names cars for sale now at about the offer and near this
+  car's miles, as asking prices. When there is none of those either it cites nothing and stays
+  short. It never explains a price with a reason that is not in the data. The offer also prices a car from its whole generation, never from its own
   model year alone.
 - **Never the car itself, never a car twice.** A car for sale that carries your car's VIN, or sits
   on its own listing page, is your car on another site: it is taken out of the comparisons and

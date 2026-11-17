@@ -92,3 +92,44 @@ bad = [(i, got, want) for i, (got, want) in enumerate(tidy) if got != want]
 for item in bad:
     print("FAILED", item)
 print(f"tidy cases: {len(tidy)} failures: {len(bad)}")
+
+# A message cites only what supports the offer (the rows of a real car whose message cited $108,000 and $110,000
+# sales for an $81,000 offer and explained them away with a "hotter market").
+mkt = "https://www.classic.com/m/porsche/911/991/9911/carrera-s/cabriolet-manual/"
+def car_row(status, price, miles, date="", vin="", url=mkt, source="Classic.com market listing", available=""):
+    return calc.clean_comp({"status": status, "title": "2014 Porsche 911 Carrera S Cabriolet", "price": price, "miles": miles, "date": date,
+                            "vin": vin, "url": url, "source": source, "available": available})
+
+def phone_rows():
+    return [car_row("asking", 91280, 43548, vin="WP0CB2A93ES154200", url="https://www.cars.com/vehicledetail/a1/", source="Coast to Coast Imports", available="yes"),
+            car_row("asking", 88370, 46311, vin="WP0CB2A95ES154201", url="https://www.truecar.com/used-cars-for-sale/listing/WP0CB2A95ES154201/", source="Crown", available="yes"),
+            car_row("asking", 67076, 57082, vin="WP0CB2A97ES154202", url="https://www.truecar.com/used-cars-for-sale/listing/WP0CB2A97ES154202/", source="Reliable Auto Source", available="yes"),
+            car_row("asking", 66202, 72304, vin="WP0CB2A99ES154203", url="https://www.truecar.com/used-cars-for-sale/listing/WP0CB2A99ES154203/", source="The Platinum Collection", available="yes"),
+            car_row("sold", 108000, 10000, "Aug 22, 2026"), car_row("sold", 110000, 43000, "Jul 2, 2026"), car_row("sold", 86000, 47000, "Mar 26, 2026"),
+            car_row("sold", 75000, 23000, "Mar 16, 2021"),
+            car_row("asking", 97900, 39000, "Oct 12, 2026", available="yes"), car_row("asking", 77950, 32000, available="yes"), car_row("asking", 86991, 13000, available="yes"),
+            car_row("asking", 85980, 30758, vin="WP0CB2A96ES155261", url="https://switchcars.com/2014-porsche-911/x1", source="Switchcars", available="yes")]
+
+buyer_car = {"year": 2014, "make": "Porsche", "model": "911", "trim": "Carrera S", "miles": 20178, "seller_type": "dealer"}
+rows = phone_rows()
+plain = llm.template_message(buyer_car, rows, 81000)
+low = llm.template_message(buyer_car, rows, 68000)
+opened = phone_rows()
+far_on_open = calc.set_aside_far(opened)                                  # four sales: judged against the cars now for sale
+msg = [
+    ([c["price"] for c in calc.cite_sales(buyer_car, rows, offer=81000)], []),            # $86,000 is above the offer, $75,000 is from 2021
+    ([c["price"] for c in calc.cite_sales(buyer_car, rows, offer=90000)], [86000]),
+    ([c["price"] for c in calc.cite_sales(buyer_car, rows)], [108000, 110000, 86000]),   # without an offer: nearest and newest, as before
+    ([c["price"] for c in calc.cite_asks(buyer_car, rows, 90000)], [85980, 91280]),      # nearest in miles first; rows on a list page have nothing to look up
+    ([c["price"] for c in calc.cite_asks(buyer_car, rows, 81000)], []),                   # the cheap ones have three times the miles: no comparison
+    ("$108,000" in plain or "$110,000" in plain or "hotter" in plain, False),
+    ("I'd like to offer $81,000" in plain and "out-the-door" in plain, True),
+    ("listed at" in low or "sold for" in low, False),                                    # nothing supports $68,000: the message cites nothing
+    ("listed at $85,980" in llm.template_message(buyer_car, rows, 82500) and "asking prices, not sales" in llm.template_message(buyer_car, rows, 82500), True),
+    (far_on_open, 2),
+    (sorted(c["price"] for c in opened if c.get("aside") == "far"), [108000, 110000]),
+]
+bad = [(i, got, want) for i, (got, want) in enumerate(msg) if got != want]
+for item in bad:
+    print("FAILED", item)
+print(f"message cases: {len(msg)} failures: {len(bad)}")
