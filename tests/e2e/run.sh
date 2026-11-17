@@ -33,10 +33,10 @@ done
 sleep 2
 
 echo "== unit: what a listing page says about the car"
-(cd "$repo" && python3 "$work/judge_test.py" | tail -1 && python3 "$work/judge_real.py" | tail -1 && python3 "$work/kind_test.py" | tail -4)
+(cd "$repo" && python3 "$work/judge_test.py" | tail -1 && python3 "$work/judge_real.py" | tail -1 && python3 "$work/kind_test.py" | tail -4 && python3 "$work/rows_test.py" | tail -1)
 
 tests=("$@")
-[ ${#tests[@]} -eq 0 ] && tests=(build2 gear check verify ended refresh2 miles blank remove switch listsites details versions zip pasted shared cutshort cutshort_shared kind)
+[ ${#tests[@]} -eq 0 ] && tests=(build2 gear check verify ended refresh2 miles blank remove switch listsites details versions zip pasted shared cutshort cutshort_shared kind market)
 failed=0
 for t in "${tests[@]}"; do
   case "$t" in shared*) start_app store;; cutshort) start_app "" 2;; cutshort_shared) start_app store 2;; *) start_app;; esac

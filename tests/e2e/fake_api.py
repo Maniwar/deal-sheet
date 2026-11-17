@@ -29,6 +29,25 @@ def bad(message):
 
 LISTS = {}
 
+def market_row(title, miles, place, state, price, date, seller, kind):
+    """One car on a Classic.com market page, the way Claude's page reader returns it: a fact a line, no links."""
+    return "\n".join([f"### {title}", "Original & Highly Original", f"6865 mi {miles} mi", "Manual transmission Manual", "LHD steering LHD", place,
+                      state, f"${price:,}", date] + (["Highest Bid"] if state == "Not Sold" else [f"${price:,}"]) + [seller, kind, date, "3 months ago"])
+
+CAB = "Porsche 911 Carrera S Cabriolet"
+MARKET_ROWS = [
+    (f"2014 {CAB} 7-Speed", "10k", "Palm Springs, California, USA", "Sold", 108000, "Aug 22, 2026", "Bring a Trailer", "Auction"),
+    (f"2014 {CAB}", "43k", "Saint Louis, Missouri, USA", "Sold", 110000, "Jul 2, 2026", "Cars & Bids", "Auction"),
+    (f"2015 {CAB} 7-Speed", "44k", "Naples, Florida, USA", "Not Sold", 86000, "Aug 26, 2026", "Bring a Trailer", "Auction"),
+    (f"2012 {CAB} 7-Speed", "29k", "Cleveland, Ohio, USA", "Sold", 86000, "Sep 16, 2026", "Bring a Trailer", "Auction"),
+    (f"2015 {CAB}", "29.5k", "Ann Arbor, Michigan, USA", "Sold", 82500, "Jun 16, 2025", "SellYourSportscar.Net", "Fixed-price"),
+    (f"2013 {CAB}", "20k", "Tampa, Florida, USA", "Sold", 77000, "Apr 4, 2025", "Bring a Trailer", "Auction"),
+    (f"2013 {CAB}", "51k", "Dallas, Texas, USA", "For Sale", 74900, "Oct 30, 2026", "Porsche Plano", "Fixed-price"),
+]
+MARKET_HEAD = "Porsche 911 - 991 Carrera S Cabriolet - Manual Market - CLASSIC.COM\nCMB $72,418\nFor Sale 3\nSold 14\n"
+MARKET_PAGE = MARKET_HEAD + "\n".join(market_row(*row) for row in MARKET_ROWS)
+MARKET_2014 = MARKET_HEAD + "\n".join(market_row(*row) for row in MARKET_ROWS if row[0].startswith("2014"))
+
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -116,7 +135,10 @@ class H(BaseHTTPRequestHandler):
             def read(title, text, at=now):
                 return {"type": "web_fetch_result", "url": url, "retrieved_at": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
                         "content": {"type": "document", "title": title, "source": {"type": "text", "media_type": "text/plain", "data": text + "\n" + pad}}}
-            if "/blocked/" in url:                   # a site that shuts the app out, with the car still on it
+            if "classic.com/m/porsche/911/991/9911/carrera-s/cabriolet-manual" in url:     # the whole market, as the reader returns it
+                LOG.write(f"  market page read by the app: tokens={tools[0].get('max_content_tokens')} whole={'year-' not in url}\n"); LOG.flush()
+                result = read("Porsche 911 Carrera S Cabriolet - Manual Market", MARKET_PAGE)
+            elif "/blocked/" in url:                 # a site that shuts the app out, with the car still on it
                 result = read("2019 BMW M2 Competition | Auctions", "2019 BMW M2 Competition\nCurrent Bid: $41,000\nEnds in 2 days\nTransmission: 6-Speed Manual")
             elif "/shell/" in url:                   # a page built by scripts, whose car has sold
                 result = read("2019 BMW M2 Competition | Script Motors", "2019 BMW M2 Competition\nThis vehicle has been sold.\nSee similar vehicles")
@@ -151,6 +173,9 @@ class H(BaseHTTPRequestHandler):
                 return self.send(msg([], stop="max_tokens"))                 # thinking used every token
             if "buyer's own description" in prompt and "gibberish" in prompt:
                 return self.send(msg([tool("record_listing", {"make": "", "model": ""})]))
+            if "buyer's own description" in prompt and "Carrera S Cabriolet" in prompt:
+                return self.send(msg([tool("record_listing", {"year": 2014, "make": "Porsche", "model": "911", "trim": "Carrera S", "body": "Cabriolet", "transmission": "7-speed manual",
+                                                              "miles": 20178, "price": 99995, "vin": "WP0CB2A98ES154726", "shape": "convertible", "layout": "rear"})]))
             if "buyer's own description" in prompt:
                 return self.send(msg([tool("record_listing", {"year": 2020, "make": "BMW", "model": "M2", "trim": "CS", "transmission": "6-speed manual", "price": 99999, "shape": "coupe", "layout": "front"})]))
             if "Dealer notes:" in prompt:      # a pasted dealer description: options only
@@ -164,6 +189,8 @@ class H(BaseHTTPRequestHandler):
             return self.send(msg([tool("record_listing", {"year": 2021, "make": "Porsche", "model": "718 Cayman", "trim": "GTS 4.0",
                 "body": "Coupe", "transmission": "6-speed manual", "miles": 15781, "price": 101911, "vin": "WP0AD2A89MS281685",
                 "seller_type": "dealer", "notes": "Stock 69918511.", "exterior": "Racing Yellow", "shape": "coupe", "layout": "mid", "options": ["Sport Chrono Package", "Sport exhaust", "Carbon-ceramic brakes"], "msrp": 104500, "photo_box": [0.0, 0.10, 1.0, 0.40]})]))
+        if "web_search" in names and (self.headers.get("x-api-key", "") or "").endswith("market") and "buy right now" in json.dumps(body["messages"][0]["content"]):
+            return self.send(msg([{"type": "text", "text": "Recording."}, tool("record_comps", {"summary": "No cars for sale found.", "comps": []})]))
         if "web_search" in names and "buy right now" in json.dumps(body["messages"][0]["content"]):
             state["sale_calls"] = state.get("sale_calls", 0) + 1
             n = state["sale_calls"]
@@ -191,6 +218,18 @@ class H(BaseHTTPRequestHandler):
         # open car). A search for the car's exact kind then finds three sales (kindfew) or the same cars again (kindnone).
         who = self.headers.get("x-api-key", "") or self.headers.get("authorization", "").replace("Bearer ", "")
         asked = json.dumps(body["messages"][0]["content"])
+        if search and who.endswith("market"):
+            # Classic.com's search opens the market page for one model year only, and the model copies part of it
+            # and names no seller, as it does on real runs. Every other search finds nothing.
+            year_page = "https://www.classic.com/m/porsche/911/991/9911/carrera-s/cabriolet-manual/year-2014/"
+            if only == ["classic.com"]:
+                opened = [{"type": "server_tool_use", "id": "srvtoolu_m1", "name": "web_fetch", "input": {"url": year_page}},
+                          {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_m1", "content": {"type": "web_fetch_result", "url": year_page, "retrieved_at": "2026-11-17T19:00:00Z",
+                              "content": {"type": "document", "title": "Market", "source": {"type": "text", "media_type": "text/plain", "data": MARKET_2014}}}}]
+                copied = [{"status": "sold", "title": "2014 Porsche 911 Carrera S Cabriolet - Manual (Palm Springs, CA)", "miles": 10000, "price": 108000, "date": "Aug 22, 2026",
+                           "source": "Classic.com market (seller not named)", "url": year_page, "note": "Listed on Classic.com market page; no VIN shown."}]
+                return self.send(msg(looked(1, "2014 Porsche 911 Carrera S Cabriolet 7-speed manual", [year_page]) + opened + [tool("record_comps", {"summary": "One sale copied from the market page.", "comps": copied})]))
+            return self.send(msg(looked(1, "Porsche 911 Carrera S Cabriolet", []) + [tool("record_comps", {"summary": "Nothing found.", "comps": []})]))
         if search and who.endswith(("kindfew", "kindnone")) and ("completed auctions" in asked or "comparable prices" in asked):
             bat = "https://bringatrailer.com/listing/"
             sale = lambda i, **k: {"status": "sold", "title": "2019 BMW M2 Competition", "body": "Coupe", "miles": 20000 + 1500 * i, "price": 48000 + 700 * i,
@@ -227,6 +266,8 @@ class H(BaseHTTPRequestHandler):
                 cars.append({"status": "sold", "title": "2017 Lotus Evora 400", "price": 62500, "date": "Aug 18, 2025", "source": "Cars & Bids", "url": market, "note": "Different trim (2+2 not stated). Listed on Classic.com."})
                 cars.append({"status": "sold", "title": "2018 Lotus Evora GT430", "trim": "GT430", "price": 120000, "date": "Jan 5, 2025", "source": "Bring a Trailer", "url": "https://www.classic.com/veh/2018-lotus-evora-gt430-x/", "note": "Different trim (GT430)."})
                 return self.send(msg(looked(1, "2017 Lotus Evora 400", [market]) + opened + [tool("record_comps", {"summary": "Classic.com's market page.", "comps": cars})]))
+            if only == ["pcarmarket.com"]:           # asked for a Porsche: the stand-in has no auctions there
+                return self.send(msg(looked(1, "Porsche sold", []) + [tool("record_comps", {"summary": "Nothing on PCARMARKET.", "comps": []})]))
             if only == ["carsandbids.com"]:
                 state["cb"] = state.get("cb", 0) + 1
                 if state["cb"] == 1:                 # the search service is busy: nothing comes back

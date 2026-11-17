@@ -17,6 +17,13 @@ meanwhile: the car must survive a run that is cut short.
 `kind.js` uses keys ending `kindfew` and `kindnone`, for which a plain search returns only the model's other
 kinds (automatics, an open car): the app must search again for the car's exact kind, and say what was left
 out when nothing of the kind exists. `kind_test.py` checks the words the searches name for such a car.
+`market.js` uses a key ending `market`: the search opens Classic.com's market page for one model year and
+the model copies one row of it with no seller named, as real runs do. The app must read every row itself,
+open the whole market on its own, tell an auction result from a dealer's asking price, offer a search for
+each auction's own page, and take the price from that page when its link is pasted. `rows_test.py` checks
+the reading of the page (as the page reader returns it and as a search shows it) and of an auction's page.
+The page layout in these tests is the one seen in search results on Nov 17, 2026; whether the page reader
+returns the same layout is checked on a real run, and the step log says so when no row could be read.
 
 The tests (`*.js`) each print what they saw and end with an `errors:` line. `judge_test.py` and
 `judge_real.py` are unit tests of how a listing page's wording is read (for sale, sold, gone).

@@ -6,7 +6,7 @@ import datetime as dt
 import math
 import re
 from statistics import median
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, quote_plus, urlparse
 
 STATUSES = ("sold", "high_bid", "asking")
 STATUS_LABEL = {"sold": "SOLD", "high_bid": "HIGH BID", "asking": "ASKING"}
@@ -77,7 +77,8 @@ def is_mirror(url) -> bool:
     return any(host == site or host.endswith("." + site) for site in MIRROR_SITES)
 
 
-_LIST_PAGE = re.compile(r"classic\.com/(m|search|a)/|[?&]tab=comps|facebook\.com/marketplace/(?!item/)", re.I)
+# a Classic.com auction's page (/a/...) is a list, but one lot of it (/a/.../lots/...) is one car's own page
+_LIST_PAGE = re.compile(r"classic\.com/(m|search)/|classic\.com/a/(?![^?#]*/lots/[\w-])|[?&]tab=comps|facebook\.com/marketplace/(?!item/)", re.I)
 
 
 # The big listing sites, where nearly every dealer's car is shown. A search finds their results pages, each a
@@ -701,7 +702,8 @@ def cite_sales(car: dict, comps: list[dict], limit: int = 3, offer: int | None =
         gap = abs(math.log((miles + 1000) / (mine + 1000))) if (mine is not None and miles is not None) else 1.0
         years = max(0.0, (today - when) / 365.0) if when else 2.0
         loose = 0.0 if own_page(comp) else 0.5                 # a sale the seller can open and check outranks one that is only on a list
-        return gap + 0.35 * years + loose
+        asked = 0.6 if DEALER_SOLD in str(comp.get("note") or "") else 0.0      # a dealer's last asking price is not a public sale price
+        return gap + 0.35 * years + loose + asked
 
     def within(comp: dict, years: float) -> bool:
         when = date_key(plain_date(comp.get("date")))
@@ -965,15 +967,28 @@ def vin_check(comp: dict) -> tuple[str, int]:
 def proof(comp: dict) -> str:
     """How a buyer can check a comp: 'own' (its link opens that one car's own page, and the search or an opened
     page gave that link), 'yours' (the buyer added it), 'listed' (read off a listing site's results page with
-    its VIN, so it is one identifiable car), 'list' (the link opens a page of many cars and nothing picks this
-    one out), 'loose' (the link was not among the pages the search returned), 'none' (no link at all)."""
+    its VIN, so it is one identifiable car), 'auction' (a result in Classic.com's table that names the auction
+    and the day it ended, so it is one auction and can be looked up there), 'list' (the link opens a page of
+    many cars and nothing picks this one out), 'loose' (the link was not among the pages the search returned),
+    'none' (no link at all)."""
     url = str(comp.get("url") or "")
     if not url:
         return "yours" if str(comp.get("source") or "") == "Added by you" else "none"
     if is_list_page(url) or link_kind(url) == "page":
+        if named_auction(comp):
+            return "auction"
         # a car read off a listing site's results, with its VIN: no page of its own, but one car and findable
         return "listed" if listing_site(url) and vin_checks_out(clean_vin(comp.get("vin"))) else "list"
     return "loose" if comp.get("link_ok") is False else "own"
+
+
+def named_auction(comp: dict) -> bool:
+    """True for an auction result in Classic.com's table of a market: the auction site is named and the day it
+    ended is given. That is one auction and no other, which anyone can look up on the auction's own site."""
+    if comp.get("status") == "asking" or not classic_market(comp.get("url")) or not date_key(plain_date(comp.get("date"))):
+        return False
+    named = f"{source_name(comp)} {comp.get('source') or ''}".lower()
+    return any(name.lower() in named for name in _AUCTION_HOSTS)
 
 
 def is_lead(comp: dict) -> bool:
@@ -1088,7 +1103,7 @@ def upgrade_leads(have: list[dict], found: list[dict]) -> int:
     """
     count = 0
     for new in found:
-        if is_lead(new):
+        if is_lead(new) or not own_page(new):          # a row of a market page is no page of the car's own
             continue
         for old in have:
             if (not is_lead(old) or old["status"] != new["status"] or old["price"] != new["price"]
@@ -1147,6 +1162,300 @@ def link_pages(comps: list[dict], pages: list[dict]) -> int:
                 count += 1
                 break
     return count
+
+
+# ---------------------------------------------------------------- Classic.com's market pages, read by the app
+#
+# A market page lists every sale of one model (and, for many, of one body style and gearbox): the status, the
+# price, the date, the miles, the town, who sold it and whether that was an auction or a dealer's fixed price.
+# The app reads those rows itself, so the same page gives the same sales on every run, and nothing depends on
+# how carefully a model copied a table. The rules below were written against the page as Claude's page reader
+# returns it (one fact a line, no links) and as a search shows it (a row a line, with links): both are read.
+
+_MONTHS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?"
+_ROW_DATE = re.compile(rf"\b{_MONTHS} \d{{1,2}},? \d{{4}}\b")
+# a status, not the count on a tab of the page ('Sold 14', 'For Sale 3')
+_ROW_STATE = re.compile(r"\b(Not Sold|Sold|For Sale|Last Asking|Pending Sale|Sale Pending|Price Undisclosed)\b(?!\s+\d{1,4}\b)")
+_ROW_PRICE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+|\d{4,8})(?![\d,])")
+_ROW_MILES = re.compile(r"(?<![\w.$])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s?(k)?\s?(mi|miles|km)\b", re.I)
+_ROW_KIND = re.compile(r"\b(Auction|Fixed[- ]price)\b", re.I)
+_ROW_OWN = re.compile(r"(?:https?://(?:www\.)?classic\.com)?(/(?:veh|a/[\w-]+/lots)/[\w-]+)", re.I)
+_ROW_TITLE_END = re.compile(r"\]\(|\n| Original\b| Modified\b| Restored\b| Restomod\b| Project\b| \d[\d,.]*\s?k? mi\b| Manual transmission"
+                            r"| Automatic transmission| (?:Not Sold|Sold|For Sale|Last Asking|Pending Sale|Sale Pending)\b| \$")
+_ROW_PLACE = re.compile(r"(?<![A-Za-z])((?:[A-Z][a-z.'\-]+ ?)+(?:, ?(?:[A-Z][A-Za-z.'\-]+ ?)+){1,2})")
+_ROW_SELLERS = ("Bring a Trailer", "Cars & Bids", "PCARMARKET", "Hagerty Marketplace", "Hagerty", "Collecting Cars", "Hemmings",
+                "RM Sotheby's", "Mecum", "Barrett-Jackson", "Gooding", "Bonhams", "Broad Arrow", "The MB Market", "eBay Motors")
+_MARKET_PAGE = re.compile(r"classic\.com/m/[\w-]", re.I)
+_MARKET_YEAR = re.compile(r"/year-\d{4}/?$", re.I)
+
+
+def classic_market(url, whole: bool = False) -> str:
+    """A Classic.com market page's address, or '' when the link is not one. With `whole`, the address of the
+    market for every model year (a market address that ends in /year-2014 lists that year only)."""
+    link = str(url or "").split("?")[0].split("#")[0].strip()
+    if not _MARKET_PAGE.search(link):
+        return ""
+    if whole:
+        link = _MARKET_YEAR.sub("/", link)
+    return link if link.endswith("/") else link + "/"
+
+
+def market_fits(car: dict, url) -> bool:
+    """True when a Classic.com market page is for this car's kind, as far as its address says. Classic.com names
+    the body style and the gearbox in the address of a market kept for them (.../cabriolet-manual/): a market
+    for the other body style or the other gearbox is another car's."""
+    path = urlparse(str(url or "")).path.lower()
+    body, gear = body_kind(car.get("body")) or body_kind(car.get("trim")), gearbox_kind(car.get("transmission"))
+    theirs_body, theirs_gear = body_kind(path.replace("-", " ")), gearbox_kind(path.replace("-", " ").replace("/", " "))
+    if body and theirs_body and body != theirs_body:
+        return False
+    return not (gear and theirs_gear and gear != theirs_gear)
+
+
+def market_pages(car: dict, links, limit: int = 2) -> list[str]:
+    """The Classic.com market pages worth reading for this car, out of every link a search or the car's own list
+    holds: the whole market (every model year) of each one that is for the car's kind, the ones whose address
+    names a body style or a gearbox first. At most `limit`."""
+    found, seen = [], set()
+    for link in links or []:
+        market = classic_market(link, whole=True)
+        key = normalize_url(market)
+        if market and key not in seen and market_fits(car, market):
+            seen.add(key)
+            words = urlparse(market).path.lower().replace("-", " ").replace("/", " ")
+            found.append((0 if (body_kind(words) or gearbox_kind(words)) else 1, market))
+    return [market for _, market in sorted(found, key=lambda pair: pair[0])][:limit]
+
+
+def _row_number(found) -> int:
+    value = float(found.group(1).replace(",", "")) * (1000 if found.group(2) else 1)
+    return int(round(value * 0.621371)) if found.group(3).lower() == "km" else int(round(value))
+
+
+def classic_rows(text: str, make: str = "") -> list[dict]:
+    """Every car on a Classic.com market page, read from the page's text. Each row: {"title", "year", "state"
+    ('sold', 'not sold', 'for sale', 'last asking', 'pending sale'), "price", "date", "miles", "gearbox", "place",
+    "seller", "kind" ('auction', 'fixed' or ''), "page" (the car's own page on Classic.com, when the text has it)}.
+
+    A row starts at a model year followed by the make and runs to the next one. Inside it the status comes
+    first, then the price right after it and the date; the miles, the gearbox and the town stand before the
+    status. A row with no price (Price Undisclosed, a figure Classic.com estimates) is left out.
+    """
+    text = str(text or "").replace("\r", "\n")
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    name = re.escape(str(make or "").strip())
+    start = re.compile(rf"(?<!\d, )(?<![\d$,.])\b((?:19|20)\d\d) +{name}\b" if name else
+                       r"(?<!\d, )(?<![\d$,.])\b((?:19|20)\d\d) +(?=[A-Z][A-Za-z-]+\b)", re.I if name else 0)
+    marks = [found for found in start.finditer(text) if 1900 <= int(found.group(1)) <= dt.date.today().year + 1]
+    rows, seen = [], set()
+    for at, mark in enumerate(marks):
+        end = marks[at + 1].start() if at + 1 < len(marks) else len(text)
+        part = text[mark.start():min(end, mark.start() + 900)]
+        state = _ROW_STATE.search(part)
+        if not state or state.group(1) == "Price Undisclosed":
+            continue
+        before, after = part[:state.start()], part[state.end():]
+        price = _ROW_PRICE.search(after)
+        if price and price.start() > 45:
+            price = None
+        if not price:                                  # some layouts put the price just before the status
+            earlier = [found for found in _ROW_PRICE.finditer(before) if len(before) - found.end() <= 12]
+            price = earlier[-1] if earlier else None
+        if not price:
+            continue
+        around = (after if price.string is after else before)[max(0, price.start() - 8):price.end() + 8]
+        if "CMB" in around:                            # Classic.com's own estimate of the market, not a car's price
+            continue
+        amount = int(price.group(1).replace(",", ""))
+        if not 500 <= amount <= 50_000_000:
+            continue
+        date = _ROW_DATE.search(after) or _ROW_DATE.search(before)
+        miles = [found for found in _ROW_MILES.finditer(before)] or [found for found in _ROW_MILES.finditer(after)][:1]
+        cut = _ROW_TITLE_END.search(part, mark.end() - mark.start())
+        title = re.sub(r"[\[\]#*]", "", part[:cut.start() if cut else 90]).strip(" -:|")[:90]
+        if re.search(r"\bMarket\b|CLASSIC\.COM", title):  # the page's own heading, not a car
+            continue
+        rest = before[len(title):]
+        gear = re.search(r"\b(Manual|Automatic)\b", rest)
+        places = [found.group(1).strip() for line in rest.split("\n") for found in _ROW_PLACE.finditer(line)]
+        places = [re.sub(r"^(?:(?:Original|Highly|Modified|Restored|Restomod|Manual|Automatic)\s+)+", "", place) for place in places]
+        places = [place for place in places if "," in place]
+        kind = _ROW_KIND.search(after)
+        seller = next((known for known in _ROW_SELLERS if known.lower() in after.lower()), "")
+        if not seller:
+            tail = after[:kind.start()] if kind else after
+            tail = _ROW_MILES.sub(" ", _ROW_DATE.sub(" ", _ROW_PRICE.sub(" ", tail)))
+            tail = re.sub(r"\b(?:Highest Bid|Bid To|ago|\d+ (?:day|week|month|year|hour|minute)s?)\b", " ", tail, flags=re.I)
+            names = [line.strip(" -:|·") for line in tail.split("\n") if re.search(r"[A-Za-z]{3}", line)]
+            names = [line for line in names if 2 < len(line) <= 60 and not line.startswith("[")]
+            seller = names[-1] if kind and names else names[0] if names else ""
+        own = _ROW_OWN.search(part)
+        row = {"title": title, "year": mark.group(1), "state": state.group(1).lower().replace("sale pending", "pending sale"),
+               "price": amount, "date": date.group(0) if date else "", "miles": _row_number(miles[-1]) if miles else None,
+               "gearbox": gear.group(1).lower() if gear else "", "place": places[-1] if places else "", "seller": seller,
+               "kind": "" if not kind else "auction" if kind.group(1).lower() == "auction" else "fixed",
+               "page": "https://www.classic.com" + own.group(1).rstrip("/") + "/" if own else ""}
+        key = (row["title"].lower(), row["state"], row["price"], row["date"])
+        if key not in seen:
+            seen.add(key)
+            rows.append(row)
+    return rows
+
+
+DEALER_SOLD = "Dealer listing marked sold: the price is what the dealer last asked, not a public sale price."
+
+
+def market_comps(rows: list[dict], market: str) -> list[dict]:
+    """A market page's rows as comps. A car with no page of its own in the text opens on the market page, with
+    a note that says so. An auction result names the auction; a dealer's listing that was marked sold says that
+    its price is the last asking price, which is not the same thing as a sale anyone can look up."""
+    states = {"sold": ("sold", ""), "not sold": ("high_bid", ""), "for sale": ("asking", "yes"),
+              "pending sale": ("asking", "yes"), "last asking": ("asking", "no")}
+    out = []
+    for row in rows:
+        status, available = states.get(row["state"], ("", ""))
+        if not status:
+            continue
+        bits = [] if row.get("page") else ["Listed on Classic.com."]
+        if status == "sold" and row["kind"] == "fixed":
+            bits.append(DEALER_SOLD)
+        elif status != "asking" and row["kind"] == "auction":
+            bits.append("Auction result." if status == "sold" else "Auction, not sold: the price is the highest bid.")
+        if row["state"] == "pending sale":
+            bits.append("Sale pending.")
+        if row.get("place"):
+            bits.append(row["place"] + ".")
+        out.append({"status": status, "available": available, "title": row["title"], "price": row["price"], "date": row["date"],
+                    "miles": row["miles"], "gearbox": row["gearbox"], "source": row["seller"] or "Classic.com",
+                    "url": row.get("page") or market, "note": " ".join(bits), "link_ok": True})
+    return out
+
+
+def swap_in_rows(found: list[dict], rows: list[dict]) -> list[dict]:
+    """A search's comps with the market pages' own rows in place of the model's copies of them.
+
+    The model's record of a car it read off a market page (the link is a market page) goes when the page's own
+    row for that model year and price is here: the row is what the page says, word for word. A car the model
+    found on its own page stays, and takes from the page's row what it lacks (who sold it, the date, the
+    miles, the gearbox). What is left of the model's is kept: it may have come from a page the app did not read.
+    """
+    at = {}
+    for row in rows:
+        at.setdefault((_year_of(row["title"]), row["price"]), row)
+    kept = []
+    for comp in found:
+        row = at.get((_year_of(comp["title"]), comp["price"]))
+        if row is None:
+            kept.append(comp)
+            continue
+        if classic_market(comp.get("url")) or not comp.get("url"):
+            continue                                   # the model's copy of a row the app has read itself
+        if row["status"] == comp["status"]:
+            if not names_seller(comp.get("source")) and source_name(comp) not in _AUCTION_HOSTS and row.get("source"):
+                comp["source"] = row["source"]
+            comp["date"] = comp.get("date") or row["date"]
+            comp["miles"] = comp["miles"] if comp.get("miles") is not None else row["miles"]
+            comp["gearbox"] = comp.get("gearbox") or row["gearbox"]
+            if DEALER_SOLD in row["note"] and DEALER_SOLD not in comp["note"]:
+                comp["note"] = f"{DEALER_SOLD} {comp['note']}".strip()
+        kept.append(comp)
+    return merge_comps(kept, rows)
+
+
+def take_rows(have: list[dict], rows: list[dict]) -> int:
+    """Bring the cars already held up to what Classic.com's market page says, now that the app has read it.
+
+    A held car that an earlier search copied off a market page (its link is a market page) takes the page's own
+    row for its model year and price: who sold it, whether that was an auction, the date, the miles, the
+    gearbox, and the status when the copy had it wrong. Whether it is counted stays as it was. Returns how many
+    were brought up to date.
+    """
+    at = {}
+    for row in rows or []:
+        at.setdefault((_year_of(row["title"]), row["price"]), row)
+    count = 0
+    for comp in have:
+        row = at.get((_year_of(comp["title"]), comp["price"]))
+        if row is None or not classic_market(comp.get("url")) or str(comp.get("source") or "") == "Added by you":
+            continue
+        before = (comp["status"], comp.get("source"), comp.get("note"))
+        comp.update(status=row["status"], available=row.get("available") or "", title=row["title"], source=row["source"], url=row["url"],
+                    date=row["date"] or comp.get("date") or "", gearbox=row.get("gearbox") or comp.get("gearbox") or "",
+                    miles=row["miles"] if row.get("miles") is not None else comp.get("miles"), note=row["note"], link_ok=True)
+        count += before != (comp["status"], comp.get("source"), comp.get("note"))
+    return count
+
+
+def auction_find(comp: dict) -> tuple[str, str]:
+    """(a search that finds a sale's own auction page, the auction's name), for a sale another site reported and
+    whose link does not open on the auction's site: ('', '') otherwise. The search is limited to the auction's
+    site and names the car and the price, which an auction's page states in its title or its first lines."""
+    if comp.get("status") == "asking" or not comp.get("price"):
+        return "", ""
+    named = f"{source_name(comp)} {comp.get('source') or ''}".lower()
+    site = next(((name, host) for name, host in _AUCTION_HOSTS.items() if name.lower() in named), None)
+    if not site or host_of(str(comp.get("url") or "")).endswith(site[1]) or proof(comp) in ("own", "yours"):
+        return "", ""
+    words = re.sub(r"\(.*?\)|\s-\s.*$", " ", str(comp.get("title") or ""))
+    words = " ".join(re.sub(r"[^\w.+ -]", " ", words).split())
+    return "https://www.google.com/search?q=" + quote_plus(f'site:{site[1]} {words} "${comp["price"]:,}"'), site[0]
+
+
+_SOLD_FOR = re.compile(r"\bsold\s+(?:after\s+(?:the\s+)?auction\s+)?for\s+(?:USD\s*)?\$\s?(\d{1,3}(?:,\d{3})+|\d{4,8})", re.I)
+_BID_TO = re.compile(r"\b(?:bid\s+to|high(?:est)?\s+bid(?:\s+of)?|reserve\s+not\s+met\s+at)\s*:?\s*(?:USD\s*)?\$\s?(\d{1,3}(?:,\d{3})+|\d{4,8})", re.I)
+_ON_DATE = re.compile(rf"\bon\s+({_MONTHS} \d{{1,2}},? \d{{4}}|\d{{1,2}}/\d{{1,2}}/\d{{2,4}})", re.I)
+
+
+def auction_result(text: str) -> dict:
+    """How an auction ended, read off the auction's own page: {"status": 'sold' or 'high_bid', "price", "date"},
+    or {} when the page does not say.
+
+    The page's own words come first, its title second. An auction page's title can go on showing the highest
+    bid after the car was sold for more once the auction had closed, while the page itself says what it sold for.
+    """
+    text = str(text or "")
+    lines = text.split("\n")
+    title = next((line for line in lines if line.lower().startswith("page title:")), "")
+    body = text.replace(title, " ", 1)[:9000] if title else text[:9000]
+    for where in (body, title):
+        sold = _SOLD_FOR.search(where)
+        if sold:
+            when = _ON_DATE.search(where, sold.end(), sold.end() + 60)
+            return {"status": "sold", "price": int(sold.group(1).replace(",", "")), "date": when.group(1) if when else ""}
+    for where in (body, title):
+        bid = _BID_TO.search(where)
+        if bid:
+            when = _ON_DATE.search(where, bid.end(), bid.end() + 60)
+            return {"status": "high_bid", "price": int(bid.group(1).replace(",", "")), "date": when.group(1) if when else ""}
+    return {}
+
+
+CHECKED = "Checked on the auction's own page"
+
+
+def settle_sale(comp: dict, result: dict) -> str:
+    """Bring a sale into line with what the auction's own page says. Returns what to tell the buyer, '' when the
+    page said nothing usable. The page wins: on the price, on whether the car sold at all, and on the date."""
+    if not result or not result.get("price"):
+        return ""
+    if abs(result["price"] - comp["price"]) > 0.25 * comp["price"]:      # too far apart to be one sale read two ways
+        return (f"Its page shows {money(result['price'])}, far from the {money(comp['price'])} here, so nothing was changed. "
+                "Open it and check that it is the same car.")
+    was = (comp["status"], comp["price"])
+    comp["status"], comp["price"] = result["status"], result["price"]
+    day = date_key(result.get("date"))
+    if day:
+        when = dt.date.fromordinal(day)
+        comp["date"] = f"{when.strftime('%b')} {when.day}, {when.year}"
+    word = "sold for" if result["status"] == "sold" else "bid to"
+    line = f"{CHECKED}: {word} {money(result['price'])}{' on ' + comp['date'] if comp.get('date') else ''}."
+    note = re.sub(rf"{re.escape(CHECKED)}[^.]*\.\s*", "", str(comp.get("note") or ""))
+    note = re.sub(r"(?i)listed on classic\.com\.?\s*|auction result\.\s*|auction, not sold[^.]*\.\s*", "", note).strip()
+    comp["note"], comp["link_ok"] = f"{line} {note}".strip(), True
+    if was == (comp["status"], comp["price"]):
+        return f"The auction's own page agrees: {word} {money(comp['price'])}."
+    return (f"The auction's own page says {word} {money(comp['price'])}, where the list had "
+            f"{'a sale at' if was[0] == 'sold' else 'a high bid of'} {money(was[1])}. The card now shows what the page says.")
 
 
 def loose_trim(car: dict) -> bool:
@@ -1327,7 +1636,7 @@ def short_money(value: float) -> str:
 # Which links open one car's own page. For the sites comps usually come from, the part of the
 # address that marks a single listing is known; anything else on those sites is a results page.
 _CAR_PAGES = {
-    "classic.com": ("/veh/",),
+    "classic.com": ("/veh/", "/lots/"),
     "bringatrailer.com": ("/listing/",),
     "carsandbids.com": ("/auctions/",),
     "pcarmarket.com": ("/auction/",),

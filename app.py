@@ -440,6 +440,59 @@ def sales_of_this_kind(client, model: str, car: dict, comps: list[dict], max_sea
     return {"comps": new, "note": note, "used": more.get("used") or {}}
 
 
+def check_sale(comp: dict, reader=None) -> str:
+    """Read how a sale ended off its own page and bring the comp into line with it: the price, whether the car
+    sold at all, the date, and the VIN and miles when the page gives them and the comp has none.
+
+    The app opens the page itself; when its site turns apps away and `reader` (client, model) is given, Claude's
+    page reader opens it. Returns what to tell the buyer, '' when the page could not be read or says nothing.
+    """
+    if comp["status"] == "asking" or not calc.own_page(comp):
+        return ""
+    page = previews.read_page(comp["url"])
+    text = page["text"] if page["status"] == "ok" else ""
+    if not calc.auction_result(text) and reader:
+        try:
+            read = llm.open_page(reader[0], reader[1], comp["url"])
+            text = f"Page title: {read['title']}\n{read['text']}" if read["text"] else text
+        except llm.LLMError:
+            pass
+    said = calc.settle_sale(comp, calc.auction_result(text))
+    if said:
+        facts = calc.listing_facts(text)
+        comp["vin"] = comp.get("vin") or facts.get("vin") or ""
+    return said or ("Its page could not be read from here, so open it and check the price yourself." if not text else "")
+
+
+def check_sales(comps: list[dict], say=None, limit: int = 12) -> int:
+    """Check each sale that opens on an auction's own page against that page, the ones not checked before.
+    The app's own request only: a site that turns it away is left as it is. Returns how many the page changed."""
+    hosts = tuple(calc._AUCTION_HOSTS.values())
+    todo = [comp for comp in comps if comp["status"] != "asking" and comp["use"] and calc.own_page(comp)
+            and calc.host_of(comp["url"]).endswith(hosts) and calc.CHECKED not in comp["note"]][:limit]
+    if not todo:
+        return 0
+    pool, changed, agreed = ThreadPoolExecutor(max_workers=6), 0, 0
+    try:
+        for comp, future in [(comp, pool.submit(check_sale, comp)) for comp in todo]:
+            try:
+                said = future.result(timeout=25)
+            except Exception:
+                continue
+            if "where the list had" in said:
+                changed += 1
+                if say:
+                    say(f"{comp['title']} ({comp.get('source') or calc.host_of(comp['url'])}): {said}")
+            elif said.startswith("The auction's own page agrees"):
+                agreed += 1
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    if say and (agreed or changed):
+        say(f"Checked {agreed + changed} sale{'s' if agreed + changed != 1 else ''} on the auction's own page: "
+            f"{agreed} agree{'s' if agreed == 1 else ''}, {changed} corrected")
+    return changed
+
+
 def settle_trim(car: dict) -> str:
     """Check the trim against the VIN in NHTSA's public decoder, fixing it when the VIN is plainly more specific.
 
@@ -672,6 +725,7 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
         comps, summary = list(result["comps"]), result["summary"]
         again = sales_of_this_kind(client, model, car, comps, max_searches, progress)
         comps += again["comps"]
+        rows = list(result.get("rows") or [])
         summary = f"{summary} {again['note']}".strip()
         result["used"] = llm.add_used(result.get("used"), again["used"])
         if not for_sale.done():
@@ -698,8 +752,12 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     count = add_counts(count, sale.get("count"))
     note, wrong_box = checked_note(count), wrong_box + count["wrong"]
     leads = calc.set_aside_leads(comps)            # cars that cannot be opened and checked stay out of the numbers
+    fixed = check_sales(comps, tell)               # each sale with an auction page of its own, against that page
     if note:
         tell(note)
+    if fixed:
+        note = (f"{fixed} sale{'s' if fixed != 1 else ''} did not match the auction's own page and now show{'s' if fixed == 1 else ''} "
+                f"what the page says. {note}").strip()
     if dropped:
         note = f"{dropped} car{'s' if dropped != 1 else ''} of a different body style {'were' if dropped != 1 else 'was'} left out. {note}".strip()
     off_trim = sum("different trim" in comp["note"].lower() for comp in comps)
@@ -718,7 +776,8 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     if cost:
         tell(cost)
     note = f"{calc.tidy_note(tidied)} {note}".strip()
-    return {"comps": comps, "summary": " ".join(part for part in (summary, sale["summary"], note, cost) if part).strip(), "used": spent}
+    return {"comps": comps, "summary": " ".join(part for part in (summary, sale["summary"], note, cost) if part).strip(), "used": spent,
+            "rows": rows}
 
 
 def tidy_car(found: dict) -> dict:
@@ -1295,6 +1354,10 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
         found = llm.research_comps(client, model, the_car, max_searches=searches, known=known, progress=progress,
                                    focus=bool(calc.kind_words(the_car, every=True)) and exact_sales(the_car, have) < 3)
     better = calc.upgrade_leads(have, found["comps"])            # a lead whose own page has now turned up takes that page
+    named = calc.take_rows(have, found.get("rows"))              # a copy of a market page's row takes what the page itself says
+    if named:
+        progress.say(f"{named} car{'s' if named != 1 else ''} you had from Classic.com's market page now show{'s' if named == 1 else ''} "
+                     "who sold each one and whether it was an auction, as the page says")
     relisted, cleared = {}, 0
     if refresh or wants_sale:
         now = dt.date.today().strftime("%b %-d")
@@ -1691,10 +1754,14 @@ def handle_stage_requests(progress_slot) -> None:
             comp = have[at]
             comp.update(url=link, link_ok=None, aside="", use=True, vin=comp.get("vin") or calc.find_vin(link) or "",
                         note=re.sub(r"(?i)(listed on classic\.com|from a facebook marketplace list[^.]*)\.?\s*", "", comp["note"]).strip())
+            said = ""
             if comp["status"] == "asking":
                 comp["seen"], comp["seen_on"] = "", ""
+            else:                                    # a sale: read the price off the page just given
+                reader = (llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]]) if ss["api_key"] else None
+                said = check_sale(comp, reader)
             ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": [], "keep": have}
-            ss["notices"] = ["Saved. That car now opens on its own page and is counted."]
+            ss["notices"] = [f"Saved. That car now opens on its own page and is counted. {said}".strip()]
         ss["build_seq"] += 1
     request = ss.pop("_addcomp_request", None)
     if isinstance(request, dict):                  # a sale or a listing the buyer knows of, added on the main screen

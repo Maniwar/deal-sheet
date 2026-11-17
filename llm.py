@@ -25,7 +25,8 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import anthropic
 
-from calc import (kind_words, cite_asks, AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, own_page, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
+from calc import (trim_key, classic_market, classic_rows, display_url, market_comps, market_fits, market_pages, swap_in_rows,
+                  kind_words, cite_asks, AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, own_page, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
                   host_of, offer_basis, plain_date,
                   is_list_page, is_mirror, link_kind, link_pages, listing_site, loose_trim, mark_other_trim, merge_comps, money, normalize_url,
                   to_int)
@@ -194,7 +195,7 @@ _READ_ERRORS = {"url_not_allowed": "the site does not let Claude's reader in eit
                 "unavailable": "Claude's reader was unavailable", "content_too_large": "the page is too large to read"}
 
 
-def open_page(client, model: str, url: str) -> dict:
+def open_page(client, model: str, url: str, page_tokens: int = 9000) -> dict:
     """Have Claude's own page reader open one web page and hand back what it read, unjudged.
 
     The reader runs on Anthropic's side, so it reaches pages this app's own request cannot (a site that turns
@@ -204,9 +205,9 @@ def open_page(client, model: str, url: str) -> dict:
     """
     def tools(mode: str) -> list[dict]:
         if mode == "fresh":
-            return [{"type": FETCH_FRESH, "name": "web_fetch", "max_uses": 1, "max_content_tokens": 9000,
+            return [{"type": FETCH_FRESH, "name": "web_fetch", "max_uses": 1, "max_content_tokens": int(page_tokens),
                      "use_cache": False, "allowed_callers": ["direct"]}]
-        return [{"type": WEB_FETCH_TYPE, "name": "web_fetch", "max_uses": 1, "max_content_tokens": 9000}]
+        return [{"type": WEB_FETCH_TYPE, "name": "web_fetch", "max_uses": 1, "max_content_tokens": int(page_tokens)}]
 
     out = {"text": "", "title": "", "url": url, "at": "", "error": "", "used": {}}
     ask = [{"role": "user", "content": "Open this page with the web_fetch tool, once, then reply with the single word done. "
@@ -1063,6 +1064,14 @@ AUCTION_SITES = [
     ("Bring a Trailer", ["bringatrailer.com"]),
 ]
 
+# PCARMARKET auctions Porsches above all, and its own pages can be searched: for a Porsche it is asked too.
+PORSCHE_SITES = [("PCARMARKET", ["pcarmarket.com"])]
+
+# How much of a market page the app reads when it opens one itself: every row of a long page.
+MARKET_TOKENS = 24000
+MARKET_KEEP = 600                              # seconds a market page the app opened is kept, so a second search does not pay for it again
+_MARKETS: dict[str, tuple] = {}
+
 # How many pages a site's search may open and read whole. Classic.com's market page lists every car with the
 # address of its own page, and that address holds the VIN.
 _SITE_OPENS = {"Classic.com": 2}
@@ -1098,6 +1107,11 @@ _SITE_NOTES = {
         "- If web_fetch is not available, work from the search results in the same way.\n"
         "- Record each car once. Leave a date empty rather than guess it.\n"
         "- 'CMB' figures are Classic.com's own estimates, not sales: never record one.\n"
+    ),
+    "PCARMARKET": (
+        "PCARMARKET's auction pages say how each one ended: 'Sold' with the price, or 'High Bid' with 'Reserve Not "
+        "Met', which is high_bid. A 'Marketplace' listing with a fixed price is a car for sale, or one that has "
+        "gone: record it as asking, never as a sale. Give each auction's own page as its URL.\n"
     ),
     "Cars & Bids": (
         "Cars & Bids pages in the results are often copies made while the auction was still running: they say "
@@ -1168,6 +1182,80 @@ def _run_side_by_side(jobs, progress: Progress | None) -> list:
         return out
 
 
+def _market_rows(client, model: str, car: dict, results: list[dict], known=None, progress: Progress | None = None) -> dict:
+    """The cars on Classic.com's market pages for this car, read off each page's text by the app.
+
+    A market page is one long table: who sold what, when, for how much, at auction or at a dealer's fixed price.
+    The model reads it differently every time, and at times leaves out the newest rows or the seller's name;
+    the app reads every row the same way on every run. The pages read are the ones the search opened, and the
+    whole market (every model year) of each market the search, its results or the car's own list point to:
+    that page is opened here, with one small request, when the search did not open it.
+    Returns {"comps", "pages": the addresses read, "note": a line for the summary, "used"}.
+    """
+    out = {"comps": [], "pages": [], "note": "", "used": {}}
+    opened: dict[str, dict] = {}
+    for result in results:
+        for page in result.get("opened") or []:
+            market = classic_market(page.get("url"))
+            if market and market_fits(car, market):
+                opened.setdefault(normalize_url(market), {**page, "url": market})
+    links = ([page["url"] for page in opened.values()] + [link for result in results for link in result.get("links") or []]
+             + [comp["url"] for result in results for comp in result["comps"] if comp.get("url")] + [str(link) for link in known or []])
+    spent = []
+    for market in market_pages(car, links):
+        key = normalize_url(market)
+        if key in opened:
+            continue
+        kept = _MARKETS.get(key)
+        if kept and time.time() - kept[0] < MARKET_KEEP:       # read a few minutes ago, for this car or its second search
+            opened[key] = kept[1]
+            continue
+        if _FETCH_OFF:
+            continue
+        if progress:
+            progress.say(f"Classic.com: reading the whole market page ({display_url(market)})")
+        try:
+            page = open_page(client, model, market, page_tokens=MARKET_TOKENS)
+        except LLMError as exc:
+            if exc.kind in ("key", "rate"):
+                raise
+            continue
+        spent.append(page["used"])
+        if page["text"]:
+            opened[key] = {"url": market, "at": page["at"], "text": page["text"]}
+            _MARKETS[key] = (time.time(), opened[key])
+        elif progress:
+            progress.say(f"Classic.com: that page could not be opened ({page['error']})")
+    out["used"] = add_used(*spent)
+    rows = []
+    mine = "-".join(trim_key(car.get("trim"), car))
+    for page in opened.values():
+        found = market_comps(classic_rows(page["text"], str(car.get("make") or "")), page["url"])
+        if found:
+            out["pages"].append(page["url"])
+        elif progress:                                 # say what the page looked like, so a change of layout shows
+            words = " ".join(page["text"].split())
+            at = max(0, min((spot for spot in (words.find("Sold"), words.find("$")) if spot >= 0), default=0) - 60)
+            progress.say(f"Classic.com: no cars could be read off {display_url(page['url'])}. Around its first price it says: {words[at:at + 110]}")
+        if not (mine and f"/{mine}/" in urlparse(page["url"]).path.lower()):
+            for row in found:                          # a market for more than this trim: each title says which it is
+                row["trim"] = " ".join(trim_key(row["title"], car))
+        rows += found
+    for row in rows:
+        mark_other_trim(car, row)
+        ease_trim_mark(car, row)
+    out["comps"] = merge_comps(clean_comps(rows))
+    if out["comps"]:
+        sold = [comp for comp in out["comps"] if comp["status"] == "sold"]
+        auction = sum("Auction result" in comp["note"] for comp in sold)
+        n = len(out["comps"])
+        out["note"] = (f"The app read Classic.com's market page itself, row by row: {n} car{'s' if n != 1 else ''}, "
+                       f"{len(sold)} of them sold ({auction} at auction).")
+        if progress:
+            progress.say(f"Classic.com's market page, read by the app: {n} car{'s' if n != 1 else ''}, {len(sold)} sold ({auction} at auction)")
+    return out
+
+
 def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rounds: int = 6,
                    today: str | None = None, known=None, progress: Progress | None = None, focus: bool = False,
                    second: bool = False) -> dict:
@@ -1184,7 +1272,8 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
     """
     today = today or dt.date.today().strftime("%B %d, %Y")
     problem = "The comp research did not finish. Try again, or add comps by hand."
-    sites = [(site, domains) for site, domains in AUCTION_SITES if tuple(domains) not in _UNSEARCHABLE]
+    extra = PORSCHE_SITES if str(car.get("make") or "").strip().lower() == "porsche" else []
+    sites = [(site, domains) for site, domains in AUCTION_SITES + extra if tuple(domains) not in _UNSEARCHABLE]
     if second:
         sites = [(site, domains) for site, domains in sites if site == "Classic.com"]
     closed = [] if second else [site for site, domains in AUCTION_SITES if tuple(domains) in _UNSEARCHABLE]
@@ -1243,6 +1332,9 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
     if not results:
         raise first_error
     comps = merge_comps(*[result["comps"] for result in results])
+    market = _market_rows(client, model, car, results, known, progress)       # the market pages, read by the app itself
+    if market["comps"]:
+        comps = swap_in_rows(comps, market["comps"])
     joined = link_pages(comps, [page for result in results for page in result.get("pages", [])])
     if joined and progress:
         progress.say(f"{joined} sale{'s' if joined != 1 else ''} reported by another site now open{'s' if joined == 1 else ''} on the auction's own page")
@@ -1255,8 +1347,10 @@ def research_comps(client, model: str, car: dict, max_searches: int = 8, max_rou
     if first_error:
         lead += " Run Search for more sales to try the ones that did not finish again."
     last = results[-1]["summary"] if not passes[-1]["error"] else ""
-    return {"comps": comps, "summary": f"{lead} {last}".strip(), "searched": sum(result["searched"] for result in results),
-            "passes": passes, "used": add_used(*[result.get("used") for result in results])}
+    return {"comps": comps, "summary": f"{lead} {market['note']} {last}".replace("  ", " ").strip(),
+            "searched": sum(result["searched"] for result in results), "passes": passes, "markets": market["pages"],
+            "rows": market["comps"],               # the market pages' own rows, for bringing held cars up to date
+            "used": add_used(*[result.get("used") for result in results], market["used"])}
 
 
 # A search limited to this path returns Marketplace ads themselves: one car each, at its own address.
@@ -1702,6 +1796,9 @@ def suggest_offer(client, model: str, car: dict, comps: list[dict]) -> dict:
         "Prices move. When the sales of the last twelve months sit clearly above or below the older ones, the market "
         "has moved: price the car from the recent sales, say so in a reason, and treat an older sale as background, "
         "not as a basis. Never set a recent sale aside because it is far from older ones.\n"
+        "An auction result is a public price anyone can look up. A comp whose note says 'Dealer listing marked "
+        "sold' shows what the dealer last asked, not what was paid: weigh it below an auction result of the same "
+        "date, and do not quote it as a sale price in a reason.\n"
         "The model years of one generation are the same car: use every recent sale of the generation, weighed by "
         "miles, date and options. A sale with special equipment or paint the subject car does not have (a power "
         "kit, paint to sample) says less about it than a sale of a car like it.\n"
@@ -1795,8 +1892,8 @@ def draft_message(client, model: str, car: dict, comps: list[dict], offer_price:
         "car's condition to explain a price.\n"
         "- Write a date plainly ('Nov 2023'), without words like 'Ended'.\n"
         "- Give a sale's link only when it opens that one sale's own page. A comp marked as a link to a page of "
-        "many cars gets no link: name where it is recorded instead (for example 'per Classic.com'). Never give "
-        "the same link twice.\n"
+        "many cars gets no link: name the auction it sold at instead (for example 'on Bring a Trailer'), or where "
+        "it is recorded when no auction is named ('per Classic.com'). Never give the same link twice.\n"
         "- Say the buyer can move quickly and wants an inspection before closing.\n"
         "- For a dealer, ask for the out-the-door number with all fees.\n"
         "- Never use em dashes. Use commas, periods or parentheses.\n"

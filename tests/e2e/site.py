@@ -30,6 +30,9 @@ class H(BaseHTTPRequestHandler):
         if path.startswith("/oos/"): return self.out(car_page("Used 2020 BMW M2 CS", 91000, vin="WBS1J3C03L7H24156", extra='<script type="application/ld+json">{"offers":{"availability":"https://schema.org/OutOfStock"}}</script>'), "text/html")
         if path.startswith("/titleonly/"):       # a dealer page built by scripts: the price is in the title and nowhere else, no VIN, no miles
             return self.out(b'<html><head><title>Used 2019 BMW M2 Competition, Very Low Miles For Sale ($53,400) | Scripted Motors Stock #NP1</title></head><body><div id="app"></div>Vehicles Found:</body></html>', "text/html")
+        if path.startswith("/auction/"):        # an auction's own page: the title still shows the highest bid, the page says what it sold for afterwards
+            return self.out(('<html><head><title>44k-Mile 2015 Porsche 911 Carrera S Cabriolet 7-Speed for sale on BaT Auctions - bid to $86,000 on August 26, 2026 (Lot #259,826) | Bring a Trailer</title></head>'
+                             '<body><h1>44k-Mile 2015 Porsche 911 Carrera S Cabriolet 7-Speed</h1><div>Sold for USD $88,000 on 8/26/26</div><div>Chassis: WP0CB2A98FS155165</div>' + PAD + '</body></html>').encode(), "text/html")
         if path.startswith(("/listing/", "/blocked/")):
             return self.out(car_page("Used 2019 BMW M2 Competition", 54900 if path.endswith("/21") else 58500, vin="WBS2U7C00L7E00000"[:0], gear="6-Speed Manual"), "text/html")
         self.out(b"no", "text/plain", 404)

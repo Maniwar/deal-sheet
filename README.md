@@ -114,6 +114,29 @@ what that car has been selling for and gives you a typical sale price, the comps
   told that prices move: it prices from the last twelve months' sales when those sit clearly
   above or below older ones, and treats special equipment (a power kit, paint to sample) as a
   reason a sale says less about a car without it.
+- **Classic.com's market page is read by the app, row by row.** A market page is one long table:
+  the status, the price, the date, the miles, the town, who sold the car and whether that was an
+  auction or a dealer's fixed price. A model copies a table differently each time, and on real
+  runs it left out the newest rows and the sellers' names. Now the app reads the rows itself from
+  the page's text, so the same page gives the same sales on every run. It also opens the whole
+  market for the car's kind (every model year of the generation) with one small request when the
+  search opened one model year only, and it reads that page again on later searches without
+  searching for it. Cars already held as copies of those rows take what the page says.
+- **An auction result and a dealer's price are told apart.** A result at a named auction on a
+  known day (Bring a Trailer, Aug 22, 2026) is one auction that anyone can look up, so it
+  counts. A dealer's listing that Classic.com marks sold shows what the dealer last asked, not
+  what was paid: its card says so, the offer weighs it below an auction result, the message
+  cites auction results first, and once three checkable sales are in hand it is not counted.
+- **Each auction result can be proven on the auction's own page.** A card that came from
+  Classic.com's table has **Find this auction on Bring a Trailer** (or Cars & Bids, or
+  PCARMARKET): a search of that site for the car and the price. Paste the page's link into the
+  card and the app reads the result off the page itself and puts it on the card: "Checked on the
+  auction's own page: sold for $88,000 on Aug 26, 2026". The page wins when it disagrees with the
+  list, which happens: an auction's headline can go on showing the highest bid after the car
+  sold for more once the auction had closed. Sales that already open on an auction's page are
+  checked the same way when they are found. A price index is never trusted for this: one of
+  them had a $108,000 sale down as $85,000.
+- **PCARMARKET is searched for Porsches**, as its own source next to Classic.com and Cars & Bids.
 - **The message cites only what supports the offer.** A sale above the offer argues the seller's
   case, so the message names only sales at the offer or within a few percent of it: from the last
   twelve months when there are any, since a seller waves away an older, cheaper sale, else from

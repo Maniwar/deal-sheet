@@ -68,6 +68,8 @@ def why_out(comp: dict) -> str:
     if "different trim" in str(comp.get("note") or "").lower():
         return "a different trim"
     if comp.get("aside") == "lead":
+        if calc.DEALER_SOLD in str(comp.get("note") or ""):
+            return "a dealer's last asking price"
         return {"list": "no page of its own to check", "loose": "its link was not confirmed",
                 "none": "no link to check"}.get(calc.proof(comp), "set aside")
     return "switched off"
@@ -223,6 +225,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             delta = f"{money(abs(comp['price'] - ask))} {'under' if comp['price'] < ask else 'over'} ask"
         url = comp.get("url") or ""
         find = calc.marketplace_find(comp)             # a car read from a Marketplace list: the link searches Marketplace for it
+        auction_url, auction_on = calc.auction_find(comp)     # a sale another site reported: a search for the auction's own page
         cards.append({
             "status": comp["status"], "group": group, "price": comp["price"],
             "label": ("Live auction" if group == "live" and str(comp.get("note") or "").lower().startswith("live auction")
@@ -238,6 +241,8 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
             "gearFlag": bool(calc.gearbox_kind(car.get("transmission")) and not gear and str(comp.get("source") or "") != "Added by you"),
             "img": comp.get("img") or "", "vin": comp.get("vin") or "",
             "vinTwice": calc.clean_vin(comp.get("vin")) in twice,
+            "auctionUrl": auction_url, "auctionOn": auction_on,
+            "checked": calc.CHECKED in str(comp.get("note") or ""),
             "ownSale": bool(comp["status"] != "asking" and calc.clean_vin(car.get("vin")) and calc.is_the_car(car, comp)),
             "seen": comp.get("seen") or "", "seenOn": comp.get("seen_on") or "", "seenWhy": comp.get("seen_why") or "",
             "history": comp.get("history") or "", "histFlag": calc.history_flag(comp.get("history")),
