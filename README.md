@@ -107,6 +107,11 @@ what that car has been selling for and gives you a typical sale price, the comps
   matches. When exact matches are scarce it is kept as a guide to the range, not counted, and
   folded away under "Show N not counted" with the reason on each card. **Count it** and **Leave it
   out** move a sale between the two.
+- **A sale nobody can check does not move the offer.** A line read off a list of results, with no
+  page of its own and no VIN, that sits more than about a third above or below the middle of the
+  sales is shown under "not counted" until you confirm it: it is more likely a dealer's asking
+  price than a sale. The offer also prices a car from its whole generation, never from its own
+  model year alone.
 - **What each site gave.** "What the search found" lists every site that was searched with the
   number of cars it gave, or the reason it did not finish, and **Every step of the last search**
   opens the full list of searches that were run.

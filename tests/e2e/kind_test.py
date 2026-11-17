@@ -36,3 +36,25 @@ bad = [(i, got, want) for i, (got, want) in enumerate(cases) if got != want]
 for row in bad:
     print("FAILED", row)
 print(f"kind cases: {len(cases)} failures: {len(bad)}")
+
+# A sale nobody can open or check that sits far from the others is not counted (15 sales from one real search).
+def sale(price, url="https://www.classic.com/m/porsche/911/991/9911/carrera-s/cabriolet-manual/", vin="", aside=""):
+    comp = calc.clean_comp({"status": "sold", "title": "2013 Porsche 911 Carrera S Cabriolet", "price": price, "url": url, "vin": vin,
+                            "source": "Classic.com market", "date": "Apr 4, 2025", "miles": 20000})
+    comp["aside"] = aside
+    return comp
+
+real = [sale(p) for p in (52500, 108000, 110000, 68500, 86000, 70000, 82500, 78500, 77000, 62500, 54101, 59500, 71250, 75000)]
+real.append(sale(64250, url="https://bringatrailer.com/listing/2012-porsche-911-carrera-s-cabriolet-41/", vin="WP0CB2A91CS754100"))
+far = [
+    (calc.set_aside_leads(real), 2),
+    (sorted(c["price"] for c in real if c.get("aside") == "far"), [108000, 110000]),
+    (calc.median([c["price"] for c in real if c["use"]]), 70000),
+    (calc.set_aside_leads([sale(p) for p in (60000, 62000, 64000, 66000)] + [sale(120000, url="https://bringatrailer.com/listing/x-1/", vin="WP0CB2A98ES154077")]), 0),   # its own page and VIN: checkable
+    (calc.set_aside_leads([sale(p) for p in (60000, 62000, 64000, 150000)]), 0),                # too few sales to judge by
+    (calc.set_aside_leads([sale(p) for p in (60000, 62000, 64000, 66000, 68000)] + [sale(120000, aside="mine")]), 0),   # the buyer chose to count it
+]
+bad = [(i, got, want) for i, (got, want) in enumerate(far) if got != want]
+for row in bad:
+    print("FAILED", row)
+print(f"kind and far-sale cases: {len(cases) + len(far)} failures: {len(bad) + len([1 for got, want in cases if got != want])}")

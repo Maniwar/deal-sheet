@@ -965,6 +965,31 @@ def set_aside_leads(comps: list[dict], fresh: list[dict] | None = None) -> int:
                     and (enough or marketplace_find(comp))):
                 comp["use"], comp["aside"] = False, "lead"
                 count += 1
+    return count + set_aside_far(comps, fresh)
+
+
+FAR_LOW, FAR_HIGH = 0.65, 1.35
+
+
+def set_aside_far(comps: list[dict], fresh: list[dict] | None = None) -> int:
+    """Switch off a sale that nobody can open or check and that sits far from the other sales. Returns how many.
+
+    A line read off a list of results, with no page of its own and no VIN, may be a dealer's asking price shown
+    as sold, or a misread. When its price is more than about a third above or below the middle of the sales, it
+    is more likely that than a sale, and one or two of them can move an offer by thousands. It stays in the list,
+    not counted, until the buyer confirms it. With fewer than five sales there is no middle to judge by.
+    """
+    fresh = comps if fresh is None else fresh
+    prices = [comp["price"] for comp in comps if comp_group(comp) == "sold" and comp["use"] and comp["price"]]
+    if len(prices) < 5:
+        return 0
+    middle, count = median(prices), 0
+    for comp in fresh:
+        if (comp_group(comp) == "sold" and comp["use"] and comp.get("aside") != "mine" and is_lead(comp)
+                and not vin_checks_out(clean_vin(comp.get("vin")))
+                and not FAR_LOW * middle <= comp["price"] <= FAR_HIGH * middle):
+            comp["use"], comp["aside"] = False, "far"
+            count += 1
     return count
 
 
@@ -989,7 +1014,7 @@ def upgrade_leads(have: list[dict], found: list[dict]) -> int:
                        date=new["date"] or old["date"], source=new["source"] or old["source"],
                        miles=new["miles"] if new.get("miles") is not None else old.get("miles"),
                        note=re.sub(r"(?i)listed on classic\.com\.?\s*", "", old["note"]).strip())
-            if old.get("aside") == "lead":
+            if old.get("aside") in ("lead", "far"):      # its own page has turned up: it can be checked, so it counts
                 old["use"], old["aside"] = True, ""
             count += 1
             break

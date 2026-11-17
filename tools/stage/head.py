@@ -67,6 +67,8 @@ def why_out(comp: dict) -> str:
         return ""
     if "different trim" in str(comp.get("note") or "").lower():
         return "a different trim"
+    if comp.get("aside") == "far":
+        return "far from the other sales, with no page or VIN to check it by"
     if comp.get("aside") == "lead":
         return {"list": "no page of its own to check", "loose": "its link was not confirmed",
                 "none": "no link to check"}.get(calc.proof(comp), "set aside")
