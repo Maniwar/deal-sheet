@@ -93,9 +93,14 @@ def sales(car: dict, say=None) -> dict:
         tell(f"Bring a Trailer: no page there for the {str(car.get('model') or '').strip()}")
         return out
     best, rows = None, []
+    whole = True
     for title, url, own in picks:                            # several generations of one trim: the one that holds the car's year
         state, html = page(url)
+        if state == "ok" and not calc.bat_whole(html):       # now and then a page arrives without its record: ask once more
+            _PAGES.pop(url, None)
+            state, html = page(url)
         found = calc.bat_results(html) if state == "ok" else []
+        whole = state == "ok" and calc.bat_whole(html)
         fit = calc.bat_year_fit(car, found)
         if found and (best is None or fit > best[0]):
             best, rows = (fit, title, url, own), found
@@ -106,11 +111,16 @@ def sales(car: dict, say=None) -> dict:
     _, title, url, own = best
     comps = calc.bat_comps(rows)
     sold = sum(comp["status"] == "sold" for comp in comps)
-    tell(f"Bring a Trailer: read its own record of the {title.replace(str(car.get('make') or '').strip() + ' ', '', 1)}, "
-         f"{len(rows)} auctions in all, {len(comps)} of them recent ({sold} sold)")
-    out.update(comps=comps, page=url, own_trim=own,
-               note=(f"Bring a Trailer's own record of this model was read directly: {len(comps)} recent auctions ({sold} sold), "
-                     "each opening on its own page."))
+    name = title.replace(str(car.get("make") or "").strip() + " ", "", 1)
+    if whole:
+        tell(f"Bring a Trailer: read its own record of the {name}, {len(rows)} auctions in all, {len(comps)} of them recent ({sold} sold)")
+        note = (f"Bring a Trailer's own record of this model was read directly: {len(comps)} recent auctions ({sold} sold), "
+                "each opening on its own page.")
+    else:                                                    # the page came without its whole record, twice
+        tell(f"Bring a Trailer: its page for the {name} came with its newest {len(rows)} auctions only this time ({sold} sold). Search again for the rest")
+        note = (f"Bring a Trailer's own page for this model was read directly, but it came with its newest {len(rows)} auctions only "
+                f"({sold} sold): search again for the whole record.")
+    out.update(comps=comps, page=url, own_trim=own, note=note)
     return out
 
 
@@ -128,6 +138,6 @@ def details(car: dict, comps: list[dict], say=None, limit: int = 6) -> int:
             break                                            # refused: stop asking
         facts = calc.bat_listing(html) if state == "ok" else {}
         if facts:
-            calc.bat_fill(comp, facts)
+            calc.bat_fill(comp, facts, calc.auction_result(previews._page_text(html)))      # and how the page says the auction ended
             done += 1
     return done

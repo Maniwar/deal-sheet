@@ -123,8 +123,11 @@ what that car has been selling for and gives you a typical sale price, the comps
   the one holding the car's model year), keeps the last three years, takes the miles from the
   title, and tells a manual from an automatic the way the site does (a manual's title names its
   gears). It then opens the few auctions nearest the buyer's car, one at a time, and puts on each
-  the VIN, the miles, the gearbox, the town and the equipment the page lists. Every one of these
-  sales opens on the auction's own page, which is what a seller cannot argue with. The app asks
+  the VIN, the miles, the gearbox, the town and the equipment the page lists, and takes the price
+  from the page's own words: one auction's record and headline showed the last bid, $86,000,
+  where its page says the car sold for $88,000. Every one of these sales opens on the auction's
+  own page, which is what a seller cannot argue with. Now and then a model page arrives with its
+  newest two dozen auctions only: the app asks once more, and says so when that is all it got. The app asks
   slowly on purpose: one request at a time, a second apart as the site asks, each page kept ten
   minutes, about ten requests for a car, and a refusal ends it.
 - **Classic.com: what can and cannot be had from it.** Classic.com keeps its past prices for

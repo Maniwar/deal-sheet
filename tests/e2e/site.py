@@ -39,9 +39,10 @@ def make_page():
     return (f'<html><head><title>Porsche For Sale - BaT Auctions</title></head><body><div data-items="{_html.escape(data)}"></div></body></html>').encode()
 def bat_listing(slug):
     first = slug.startswith("2014")
+    ended = {"2014": "Sold for USD $108,000 on 8/22/26", "2012": "Sold for USD $86,000 on 9/16/26", "2015": "Bid to USD $54,000 on 1/22/26"}.get(slug[:4], "")
     lines = [f'Chassis: <a href="#">{"WP0CB2A96ES154062" if first else "WP0CB2A99CS155039"}</a>', "10k Miles" if first else "29k Miles", "3.8-Liter Flat-Six",
              "Seven-Speed Manual Transaxle", "Dark Blue Metallic Paint" if first else "Agate Gray Metallic Paint", "Sport Chrono Package", "Sport Exhaust System", "Bose Sound System", "Clean Carfax Report"]
-    return ('<html><head><title>Auction | Bring a Trailer</title></head><body><div class="essentials"><h2>BaT Essentials</h2><div><strong>Seller</strong>: <a>someone</a></div>'
+    return (f'<html><head><title>Auction | Bring a Trailer</title></head><body><div class="listing-available-info">{ended}</div><div class="essentials"><h2>BaT Essentials</h2><div><strong>Seller</strong>: <a>someone</a></div>'
             f'<strong>Location</strong>: <a href="#">{"Palm Springs, California 92262" if first else "Cleveland, Ohio 44101"}</a><strong>Listing Details</strong><ul>'
             + "".join(f"<li>{line}</li>" for line in lines) + '</ul><strong>Private Party or Dealer</strong>: ' + ("Private Party" if first else "Dealer") + '</div>' + PAD + '</body></html>').encode()
 

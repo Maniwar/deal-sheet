@@ -521,7 +521,17 @@ LISTING = ('<div class="essentials"><strong>Seller</strong>: <a>x</a><strong>Loc
            '<li>Chassis: <a href="#">WP0CB2A96ES154062</a></li><li>10k Miles</li><li>3.8-Liter Flat-Six</li><li>Seven-Speed Manual Transaxle </li><li>Sport Chrono Package</li>'
            '<li>Heated &amp; Ventilated Seats</li><li>Clean Carfax Report</li></ul><strong>Private Party or Dealer</strong>: Private Party<strong>Lot</strong> #259232</div>')
 facts = calc.bat_listing(LISTING)
-opened = dict(by["b"]); calc.bat_fill(opened, facts)
+opened = dict(by["b"]); calc.bat_fill(opened, facts, {"status": "sold", "price": 108000, "date": "8/22/26"})
+# an auction whose record shows the last bid while its page says what the car sold for afterwards
+later = calc.clean_comp({"status": "sold", "title": "2015 Porsche 911 Carrera S Cabriolet 7-Speed", "price": 86000, "date": "Aug 26, 2026", "source": "Bring a Trailer",
+                         "url": "https://bringatrailer.com/listing/g/", "note": calc.BAT_NOTE, "link_ok": True})
+calc.bat_fill(later, {"place": "Naples, Florida", "vin": "WP0CB2A98FS155165"}, {"status": "sold", "price": 88000, "date": "8/26/26"})
+unsaid = dict(by["f"]); calc.bat_fill(unsaid, {"place": "Reno, Nevada", "vin": "WP0CB2A98FS155165"}, {})          # a page that does not say how it ended
+newest = {"items": [{"title": "44k-Mile 2015 Porsche 911 Carrera S Cabriolet 7-Speed", "url": "https://bringatrailer.com/listing/g/", "current_bid": 86000,
+                     "sold_text": "Sold for USD $88,000 <span> on 8/26/2026 </span>", "timestamp_end": stamp("2026-08-26")},
+                    {"title": "2013 Porsche 911 Carrera S Cabriolet", "url": "https://bringatrailer.com/listing/h/", "current_bid": 62000,
+                     "sold_text": "Bid to USD $62,000 <span> on 9/25/2026 </span>", "timestamp_end": stamp("2026-09-25")}], "stats": {"sold": [], "unsold": []}}
+short_page = "<script>\nvar auctionsCompletedInitialData = " + json.dumps(newest) + ";\nvar x = 1;\n</script>"
 held = calc.clean_comps([{"status": "sold", "title": "2014 Porsche 911 Carrera S Cabriolet (Palm Springs, CA sale)", "price": 108000, "date": "Aug 22, 2026", "use": True, "aside": "mine",
                           "source": "Classic.com market (seller not named)", "url": MARKET, "note": "Listed on Classic.com market page; no VIN shown."}])
 took = calc.upgrade_leads(held, [opened])
@@ -546,6 +556,11 @@ cases += [
              "options": "3.8-Liter Flat-Six, Seven-Speed Manual Transaxle, Sport Chrono Package, Heated & Ventilated Seats"}),
     ((opened["vin"], opened["gear_seen"], opened["note"]), ("WP0CB2A96ES154062", "page", "Checked on the auction's own page: sold for $108,000 on Aug 22, 2026. Palm Springs, California.")),
     ([comp["url"][-2] for comp in calc.bat_closest(CAB, sales)], ["b", "f"]),          # the cabriolets with this gearbox, sales first
+    ((later["price"], later["note"]), (88000, "Checked on the auction's own page: sold for $88,000 on Aug 26, 2026. Naples, Florida.")),
+    ((calc.CHECKED in unsaid["note"], unsaid["note"]), (False, calc.BAT_NOTE + " Reno, Nevada. Not sold: the price is the highest bid.")),
+    (calc.bat_closest(CAB, [unsaid]), []),                                             # it has its VIN: not opened again
+    ((calc.bat_whole(model_page), calc.bat_whole(short_page)), (True, False)),
+    ([(row["price"], row["sold"]) for row in calc.bat_results(short_page)], [(62000, False), (88000, True)]),      # what it sold for, not the last bid
     (calc.bat_closest(CAB, [opened]), []),                                             # one already opened is not opened again
     # a copy of the sale off Classic.com's page takes the auction's own page, and stays the buyer's choice
     ((took, held[0]["url"], held[0]["source"], held[0]["vin"], held[0]["aside"], held[0]["title"]),

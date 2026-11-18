@@ -1662,14 +1662,30 @@ def bat_results(page: str) -> list[dict]:
             seen.add(url)
             rows.append({"title": str(item.get("title") or "").strip(), "price": price, "sold": sold, "url": url,
                          "day": dt.datetime.fromtimestamp(stamp, dt.timezone.utc).date().toordinal(), "words": words.get(url, "")})
-    if not rows:                                       # a page with no chart: the newest auctions only
+    if not rows:                                       # a page sent without its chart: the newest auctions only
         for item in data.get("items") or []:
-            text = re.sub(r"<[^>]+>", " ", str(item.get("sold_text") or "")) if isinstance(item, dict) else ""
-            price, stamp = to_int(item.get("current_bid")) if isinstance(item, dict) else None, to_int(item.get("timestamp_end")) if isinstance(item, dict) else None
-            if price and stamp and item.get("url") and re.search(r"(?i)sold for|bid to", text):
-                rows.append({"title": str(item.get("title") or "").strip(), "price": price, "sold": bool(re.search(r"(?i)sold for", text)), "url": str(item["url"]),
+            if not isinstance(item, dict):
+                continue
+            text = re.sub(r"<[^>]+>", " ", str(item.get("sold_text") or ""))
+            said = re.search(r"(?i)(sold for|bid to)\D{0,12}\$\s?([\d,]+)", text)      # what it sold for, which can be more than the last bid
+            price, stamp = (to_int(said.group(2)) if said else None), to_int(item.get("timestamp_end"))
+            if said and price and stamp and item.get("url"):
+                rows.append({"title": str(item.get("title") or "").strip(), "price": price, "sold": said.group(1).lower() == "sold for", "url": str(item["url"]),
                              "day": dt.datetime.fromtimestamp(stamp, dt.timezone.utc).date().toordinal(), "words": words.get(str(item["url"]), "")})
     return sorted(rows, key=lambda row: -row["day"])
+
+
+def bat_whole(page: str) -> bool:
+    """True when a model page came with its whole record (the chart's data), not just the newest auctions."""
+    found = _BAT_DATA.search(str(page or ""))
+    if not found:
+        return False
+    try:
+        import json as _json
+        stats = _json.loads(found.group(1)).get("stats")
+    except ValueError:
+        return False
+    return isinstance(stats, dict) and bool(stats.get("sold") or stats.get("unsold"))
 
 
 _BAT_GEARS = re.compile(r"\b\d{1,2}-Speed\b", re.I)
@@ -1780,12 +1796,14 @@ def bat_closest(car: dict, comps: list[dict], limit: int = 6) -> list[dict]:
 
     todo = [comp for comp in comps if comp["status"] != "asking" and comp.get("use") and source_name(comp) == BAT_SOURCE and own_page(comp)
             and (host_of(comp["url"]).endswith(hosts) or BAT_NOTE in str(comp.get("note") or "")) and CHECKED not in str(comp.get("note") or "")
+            and not comp.get("vin")                                # one with a VIN has been opened already
             and not other_body(car, comp) and not other_gearbox(car, comp) and near(comp)]
     return sorted(todo, key=lambda comp: (comp["status"] != "sold", -date_key(plain_date(comp.get("date")))))[:limit]
 
 
-def bat_fill(comp: dict, facts: dict) -> None:
-    """Put what an auction's own page says about the car on its comp, and mark the comp as checked there."""
+def bat_fill(comp: dict, facts: dict, result: dict | None = None) -> None:
+    """Put what an auction's own page says on its comp: the car's details, and, when the page states how the
+    auction ended, the price, the status and the date it gives. Only then is the comp marked as checked there."""
     for key in ("vin", "options", "history"):
         if facts.get(key) and not comp.get(key):
             comp[key] = facts[key]
@@ -1793,8 +1811,9 @@ def bat_fill(comp: dict, facts: dict) -> None:
         comp["miles"] = facts["miles"]                 # the page's own figure, not the title's rounding
     if facts.get("gearbox"):
         comp["gearbox"], comp["gear_seen"] = facts["gearbox"], "page"
-    word = "sold for" if comp["status"] == "sold" else "bid to"
-    bits = [f"{CHECKED}: {word} {money(comp['price'])} on {comp['date']}."]
+    checked = bool(result) and "nothing was changed" not in settle_sale(comp, result) and CHECKED in str(comp.get("note") or "")
+    lead = str(comp["note"]).split(". ")[0] + "." if checked else BAT_NOTE
+    bits = [lead]
     if facts.get("place"):
         bits.append(facts["place"] + ".")
     if facts.get("dealer"):
