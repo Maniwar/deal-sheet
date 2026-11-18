@@ -27,8 +27,10 @@ import previews
 BASE = os.environ.get("DEALSHEET_BAT_URL", "https://bringatrailer.com").rstrip("/")
 GAP = float(os.environ.get("DEALSHEET_BAT_GAP", "1.1"))      # seconds between two requests: the site's robots.txt asks for one
 KEEP = 600                                                   # seconds a page is kept
+RECORD_KEEP = 24 * 3600                                      # seconds a model's whole record is kept, for the times its page arrives without it
 PAGE_LIMIT = 3_000_000
 _PAGES: dict[str, tuple[float, str]] = {}
+_RECORDS: dict[str, tuple[float, list]] = {}
 _TURN = threading.Lock()
 _LAST = [0.0]
 
@@ -74,6 +76,8 @@ def page(url: str) -> tuple[str, str]:
 def sales(car: dict, say=None) -> dict:
     """Every finished auction of this car's model on Bring a Trailer, as comps.
 
+    Only the auctions of cars like this one are returned (`calc.bat_fits`): a model's page can hold every trim
+    and generation of the model, and wheels besides.
     Returns {"comps": [...], "note": a line for the summary, "page": the model page read, "own_trim": whether
     that page is for the car's own trim}. Empty comps with a note that says why when the site has no page for
     the make or the model, or turned the app away.
@@ -96,11 +100,21 @@ def sales(car: dict, say=None) -> dict:
     whole = True
     for title, url, own in picks:                            # several generations of one trim: the one that holds the car's year
         state, html = page(url)
-        if state == "ok" and not calc.bat_whole(html):       # now and then a page arrives without its record: ask once more
+        for _ in range(2):                                   # a page often arrives without its record, and with it a moment later:
+            if state != "ok" or calc.bat_whole(html):        # ask again, twice at most, a few seconds apart
+                break
             _PAGES.pop(url, None)
+            time.sleep(GAP * 3)
             state, html = page(url)
         found = calc.bat_results(html) if state == "ok" else []
         whole = state == "ok" and calc.bat_whole(html)
+        if whole:
+            _RECORDS[url] = (time.time(), found)
+        elif found and url in _RECORDS and time.time() - _RECORDS[url][0] < RECORD_KEEP:
+            # the page came with its newest auctions only: add them to the whole record read earlier today
+            newest = {row["url"] for row in found}
+            found = sorted(found + [row for row in _RECORDS[url][1] if row["url"] not in newest], key=lambda row: -row["day"])
+            whole = True
         fit = calc.bat_year_fit(car, found)
         if found and (best is None or fit > best[0]):
             best, rows = (fit, title, url, own), found
@@ -109,17 +123,17 @@ def sales(car: dict, say=None) -> dict:
     if best is None:
         return out
     _, title, url, own = best
-    comps = calc.bat_comps(rows)
+    comps = calc.bat_comps(rows, car=car)                    # only the auctions of cars like this one: its trim, its generation
     sold = sum(comp["status"] == "sold" for comp in comps)
     name = title.replace(str(car.get("make") or "").strip() + " ", "", 1)
     if whole:
-        tell(f"Bring a Trailer: read its own record of the {name}, {len(rows)} auctions in all, {len(comps)} of them recent ({sold} sold)")
-        note = (f"Bring a Trailer's own record of this model was read directly: {len(comps)} recent auctions ({sold} sold), "
-                "each opening on its own page.")
+        tell(f"Bring a Trailer: read its own record of the {name}, {len(rows)} auctions in all, {len(comps)} of them cars like this one ({sold} sold)")
+        note = (f"Bring a Trailer's own record of this model was read directly: {len(rows)} auctions in all, {len(comps)} of them "
+                f"cars like this one ({sold} sold), each opening on its own page.")
     else:                                                    # the page came without its whole record, twice
-        tell(f"Bring a Trailer: its page for the {name} came with its newest {len(rows)} auctions only this time ({sold} sold). Search again for the rest")
+        tell(f"Bring a Trailer: its page for the {name} came with its newest {len(rows)} auctions only this time, {len(comps)} of them cars like this one. Search again for the rest")
         note = (f"Bring a Trailer's own page for this model was read directly, but it came with its newest {len(rows)} auctions only "
-                f"({sold} sold): search again for the whole record.")
+                f"({len(comps)} of them cars like this one, {sold} sold): search again for the whole record.")
     out.update(comps=comps, page=url, own_trim=own, note=note)
     return out
 

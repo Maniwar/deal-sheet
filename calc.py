@@ -1050,7 +1050,38 @@ def tidy_comps(car: dict, comps: list[dict]) -> tuple[list[dict], dict]:
         twice += 1
         if rank(comp) < rank(kept[at[key]]):
             kept[at[key]] = comp
-    return kept, {"own": own, "twice": twice, "other": other, "old": old}
+    def stray(comp: dict) -> bool:                 # read off a model's page that holds other trims and generations too
+        if comp["status"] == "asking" or source_name(comp) != BAT_SOURCE or not own_page(comp) or comp.get("aside") == "mine":
+            return False
+        note = str(comp.get("note") or "")
+        return (BAT_NOTE in note or CHECKED in note) and not bat_fits(car, comp.get("title"))
+
+    strays = sum(stray(comp) for comp in kept)
+    kept = [comp for comp in kept if not stray(comp)]
+    proven = [comp for comp in kept if comp["status"] != "asking" and own_page(comp)
+              and (BAT_NOTE in str(comp.get("note") or "") or CHECKED in str(comp.get("note") or ""))]
+    shadows = {id(comp) for comp in kept if any(_shadow_of(comp, real) for real in proven)}
+    kept = [comp for comp in kept if id(comp) not in shadows]
+    return kept, {"own": own, "twice": twice, "other": other, "old": old, "shadow": len(shadows), "stray": strays}
+
+
+def _shadow_of(copy: dict, real: dict) -> bool:
+    """True when a row copied off Classic.com's market page is the auction that `real` records from the auction's
+    own page: the same model year, ended within three days, a price within 6% and miles that agree. The copy
+    can differ (Classic.com may show the last bid of a car that sold for more afterwards): the page stands."""
+    if copy is real or copy["status"] == "asking" or not classic_market(copy.get("url")):
+        return False
+    if copy.get("aside") == "mine" or str(copy.get("source") or "") == "Added by you":
+        return False
+    if _year_of(copy["title"]) != _year_of(real["title"]):
+        return False
+    mine, theirs = date_key(plain_date(copy.get("date"))), date_key(plain_date(real.get("date")))
+    if not mine or not theirs or abs(mine - theirs) > 3:
+        return False
+    if abs(copy["price"] - real["price"]) > 0.06 * real["price"]:
+        return False
+    a, b = copy.get("miles"), real.get("miles")
+    return a is None or b is None or abs(a - b) <= max(1500, 0.15 * max(a, b))
 
 
 def tidy_note(tidied: dict) -> str:
@@ -1065,6 +1096,13 @@ def tidy_note(tidied: dict) -> str:
     if tidied.get("other"):
         n = tidied["other"]
         parts.append(f"{n} car{'s' if n != 1 else ''} from Classic.com's page for another body style, gearbox or version {'were' if n != 1 else 'was'} removed.")
+    if tidied.get("stray"):
+        n = tidied["stray"]
+        parts.append(f"{n} Bring a Trailer auction{'s' if n != 1 else ''} of another trim or generation {'were' if n != 1 else 'was'} removed: "
+                     "its page for the model holds every version, and these were not this car's.")
+    if tidied.get("shadow"):
+        n = tidied["shadow"]
+        parts.append(f"{n} cop{'ies' if n != 1 else 'y'} of a sale that is here on the auction's own page {'were' if n != 1 else 'was'} removed.")
     if tidied.get("old"):
         n = tidied["old"]
         parts.append(f"{n} listing{'s' if n != 1 else ''} that ended more than a year ago {'were' if n != 1 else 'was'} removed: an old asking price is no sale and says nothing about today.")
@@ -1399,6 +1437,24 @@ def market_comps(rows: list[dict], market: str, old: bool = False, today: int | 
     return out
 
 
+def _rows_by_sale(rows: list[dict]) -> dict:
+    at: dict = {}
+    for row in rows:
+        at.setdefault((_year_of(row["title"]), row["price"]), []).append(row)
+    return at
+
+
+def _row_for(at: dict, comp: dict) -> dict | None:
+    """The market row that is this car: the same model year and price, and the same day when both give one.
+    Two cars of one year can sell for one price years apart, and they are two sales."""
+    mine = date_key(plain_date(comp.get("date")))
+    for row in at.get((_year_of(comp["title"]), comp["price"])) or []:
+        theirs = date_key(plain_date(row.get("date")))
+        if not mine or not theirs or abs(mine - theirs) <= 3:
+            return row
+    return None
+
+
 def swap_in_rows(found: list[dict], rows: list[dict]) -> list[dict]:
     """A search's comps with the market pages' own rows in place of the model's copies of them.
 
@@ -1407,12 +1463,10 @@ def swap_in_rows(found: list[dict], rows: list[dict]) -> list[dict]:
     found on its own page stays, and takes from the page's row what it lacks (who sold it, the date, the
     miles, the gearbox). What is left of the model's is kept: it may have come from a page the app did not read.
     """
-    at = {}
-    for row in rows:
-        at.setdefault((_year_of(row["title"]), row["price"]), row)
+    at = _rows_by_sale(rows)
     kept = []
     for comp in found:
-        row = at.get((_year_of(comp["title"]), comp["price"]))
+        row = _row_for(at, comp)
         if row is None:
             kept.append(comp)
             continue
@@ -1438,12 +1492,10 @@ def take_rows(have: list[dict], rows: list[dict]) -> int:
     gearbox, and the status when the copy had it wrong. Whether it is counted stays as it was. Returns how many
     were brought up to date.
     """
-    at = {}
-    for row in rows or []:
-        at.setdefault((_year_of(row["title"]), row["price"]), row)
+    at = _rows_by_sale(rows or [])
     count = 0
     for comp in have:
-        row = at.get((_year_of(comp["title"]), comp["price"]))
+        row = _row_for(at, comp)
         if row is None or not classic_market(comp.get("url")) or str(comp.get("source") or "") == "Added by you":
             continue
         before = (comp["status"], comp.get("source"), comp.get("note"))
@@ -1693,24 +1745,69 @@ BAT_SOURCE = "Bring a Trailer"
 BAT_NOTE = "From Bring a Trailer's own record of its auctions."
 
 
-def bat_comps(rows: list[dict], years: float = 3.0, today: int | None = None) -> list[dict]:
+BAT_YEARS = 3             # model years either side of the car's that a model page's auctions may be
+
+
+def bat_title(title) -> str:
+    """An auction's title cut back to the car: from the model year on ('15k-Mile 2018 BMW M2' is '2018 BMW M2').
+    '' for a title with no model year, which on a model's page is a set of wheels or a part, not a car."""
+    title = str(title or "")
+    year = re.search(r"\b(?:19|20)\d\d\b", title)
+    return title[year.start():].strip() if year else ""
+
+
+def bat_trim_words(rows: list[dict], car: dict) -> set:
+    """The words that name a trim on a model's page: ones that follow the model in three or more titles
+    ('Competition', 'CS' on the M2's page). A word in one or two titles is a description, not a trim."""
+    seen: dict = {}
+    for row in rows:
+        for word in set(trim_key(bat_title(row.get("title")), car)):
+            seen[word] = seen.get(word, 0) + 1
+    return {word for word, count in seen.items() if count >= 3}
+
+
+def bat_fits(car: dict, title, trims: set | None = None) -> bool:
+    """True when an auction on a model's page is a car like the buyer's: its title has a model year within three
+    of the car's, and names the car's trim.
+
+    Bring a Trailer keeps one page for every M2 it has sold: the first M2, the Competition, the CS, the next
+    generation, and wheels. Only the title tells them apart. For a car with a trim, the words after the model
+    have to be that trim ('2020 BMW M2 CS 6-Speed' for a CS; '2018 BMW M2 6-Speed' names none and is another
+    car). For a car with no trim, the title must not name one of the page's trims (`trims`).
+    """
+    cut = bat_title(title)
+    if not cut:
+        return False
+    mine, theirs = to_int(car.get("year")), to_int(_year_of(cut))
+    if mine and theirs and abs(mine - theirs) > BAT_YEARS:
+        return False
+    want, have = trim_key(car.get("trim"), car), trim_key(cut, car)
+    if want:
+        return bool(have) and _same_trim(want, have)
+    return not (set(have) & (trims or set()))
+
+
+def bat_comps(rows: list[dict], years: float = 3.0, today: int | None = None, car: dict | None = None) -> list[dict]:
     """Bring a Trailer's finished auctions as comps, the newest first: each opens on the auction's own page.
 
-    The miles come from the title ('10k-Mile 2014 ...'), which is then cut back to the car. Bring a Trailer
-    names a manual's gears in the title ('7-Speed'); when some titles on a page do and this one does not, the
-    car is the automatic, and the note says that this is read from the title. Auctions more than `years`
-    old are left out, unless that leaves fewer than three sales.
+    With `car`, only the auctions of cars like it are kept (`bat_fits`): a model's page can hold every trim and
+    generation of the model. The miles come from the title ('10k-Mile 2014 ...'), which is then cut back to
+    the car. Bring a Trailer names a manual's gears in the title ('7-Speed'); when some titles on a page do
+    and this one does not, the car is the automatic, and the note says that this is read from the title.
+    Auctions more than `years` old are left out, unless that leaves fewer than three sales.
     """
     today = today or dt.date.today().toordinal()
+    names_gears = any(_BAT_GEARS.search(row["title"]) for row in rows)
+    trims = bat_trim_words(rows, car) if car else set()
+    rows = [row for row in rows if bat_title(row["title"]) and (not car or bat_fits(car, row["title"], trims))]
     recent = [row for row in rows if today - row["day"] <= years * 365]
     if sum(row["sold"] for row in recent) < 3:
         recent = rows
-    names_gears = any(_BAT_GEARS.search(row["title"]) for row in rows)
     out = []
     for row in recent:
         title = row["title"]
         year = re.search(r"\b(?:19|20)\d\d\b", title)
-        lead, car = (title[:year.start()], title[year.start():]) if year else ("", title)
+        lead, car_title = (title[:year.start()], title[year.start():]) if year else ("", title)
         miles = re.search(r"([\d,.]+)\s?(k)?-(Mile|Kilometer)", lead, re.I)
         count = None
         if miles:
@@ -1723,7 +1820,7 @@ def bat_comps(rows: list[dict], years: float = 3.0, today: int | None = None) ->
         elif not gearbox and names_gears:
             gearbox, note = "automatic", f"{BAT_NOTE} Taken for an automatic: its title names no gears, as a manual's does there."
         when = dt.date.fromordinal(row["day"])
-        out.append({"status": "sold" if row["sold"] else "high_bid", "title": car.strip(), "price": row["price"], "miles": count,
+        out.append({"status": "sold" if row["sold"] else "high_bid", "title": car_title.strip(), "price": row["price"], "miles": count,
                     "date": f"{when.strftime('%b')} {when.day}, {when.year}", "source": BAT_SOURCE, "url": row["url"], "gearbox": gearbox,
                     "note": note if row["sold"] else f"{note} Not sold: the price is the highest bid.", "link_ok": True})
     return out

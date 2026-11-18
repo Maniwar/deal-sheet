@@ -41,7 +41,7 @@ def refresh_modules() -> None:
     new app.py, but modules it imported earlier stay as they were, so new code can meet an
     old showcase.py and fail. Any module whose file is newer than its loaded copy is reloaded.
     """
-    for module in (calc, previews, styles, llm, sheet, showcase, stage):     # calc first: the others import from it
+    for module in (calc, previews, bat, styles, llm, sheet, showcase, stage):     # calc first: the others import from it
         try:
             stamp = os.path.getmtime(module.__file__)
         except (OSError, TypeError):
@@ -520,20 +520,14 @@ def pictured_market(car: dict, have: list[dict], shots: list, text: str, client,
 
 
 def house_sales(car: dict, say=None) -> tuple[list[dict], str]:
-    """Bring a Trailer's own record of this car's model, as comps: (the comps, a line for the summary). On a page
-    kept for more than the car's own trim, each title says which trim it is, and another trim is marked as one.
+    """Bring a Trailer's own record of this car's model, as comps: (the comps, a line for the summary). Only the
+    auctions of cars like this one come back: the same trim, a model year within three of the car's.
     Nothing here can stop a search: any trouble reading the site just means no comps from it."""
     try:
         out = bat.sales(car, say)
     except Exception:
         return [], ""
-    rows = out["comps"]
-    for row in rows:
-        if not out["own_trim"]:
-            row["trim"] = " ".join(calc.trim_key(row["title"], car))
-        calc.mark_other_trim(car, row)
-        calc.ease_trim_mark(car, row)
-    return calc.clean_comps(rows), out["note"]
+    return calc.clean_comps(out["comps"]), out["note"]
 
 
 def house_details(car: dict, comps: list[dict], say=None) -> list[dict]:
@@ -834,7 +828,11 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
         result = llm.research_comps(client, model, car, max_searches=max_searches, progress=progress)
         own, own_note = house.result()
         comps = calc.merge_comps(own, list(result["comps"]))     # the auction's own page wins over another site's copy of the sale
-        summary = f"{own_note} {result['summary']}".strip()
+        found_text = result["summary"]
+        if own_note:                                         # its record was read: the line about not searching it no longer holds
+            found_text = re.sub(r" ?Bring a Trailer cannot be searched from the inside, so its sales come from Classic\.com, "
+                                r"which records them, and from the wider web\.", "", found_text)
+        summary = f"{own_note} {found_text}".strip()
         again = sales_of_this_kind(client, model, car, comps, max_searches, progress)
         comps += again["comps"]
         rows = list(result.get("rows") or [])

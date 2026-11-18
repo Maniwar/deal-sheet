@@ -88,7 +88,7 @@ tidy = [
     (tidied["twice"], 2),
     (calc.vins_on_two_sales(kept), {"WBS1J3C01L7G34827"}),
     ("RAC Performance, $100,220" in calc.tidy_note(tidied) and "2 second copies" in calc.tidy_note(tidied), True),
-    (calc.tidy_comps(me, kept)[1] == {"own": [], "twice": 0, "other": 0, "old": 0}, True),                                                       # nothing more to take out the second time
+    (calc.tidy_comps(me, kept)[1] == {"own": [], "twice": 0, "other": 0, "old": 0, "shadow": 0, "stray": 0}, True),                                                       # nothing more to take out the second time
     ([c["price"] for c in calc.tidy_comps({}, rows[2:4] + [row("asking", 105000, "WBS1J3C01L7H18422", edm, "Edmunds", aside="mine")])[0]], [105000]),   # the buyer's own row is the one kept
 ]
 # rows read off Classic.com's market page: another kind's market goes, an asking price that ended long ago goes,
@@ -109,6 +109,47 @@ tidy += [
     ((took["other"], took["old"]), (1, 1)),
     ([c["source"] for c in left], ["Classic.com", "Classic.com", "Classic.com"]),
     ("for another body style, gearbox or version was removed" in calc.tidy_note(took) and "ended more than a year ago was removed" in calc.tidy_note(took), True),
+]
+# a copy off Classic.com's page of a sale that is here on the auction's own page goes, even where the copy shows
+# the last bid of a car that sold for more afterwards; one from another day, or the buyer's own choice, stays
+auction_page = lambda price, date, miles, year=2015: {"status": "sold", "title": f"{year} Porsche 911 Carrera S Cabriolet 7-Speed", "price": price, "date": date, "miles": miles,
+                                                      "source": "Bring a Trailer", "url": f"https://bringatrailer.com/listing/{year}-porsche-911-carrera-s-cabriolet-{price}/", "note": calc.BAT_NOTE}
+copy_row = lambda status, price, date, miles, year=2015, **more: {"status": status, "title": f"{year} Porsche 911 Carrera S Cabriolet - Manual", "price": price, "date": date, "miles": miles,
+                                                                    "source": "Classic.com", "url": MKT, "note": "Listed on Classic.com.", **more}
+mixed = calc.clean_comps([auction_page(88000, "Aug 26, 2026", 44000), copy_row("high_bid", 86000, "Aug 26, 2026", 44000),
+                          auction_page(78500, "May 2, 2025", 33000, 2013), copy_row("sold", 78500, "May 2, 2025", 33000, 2013), copy_row("sold", 78500, "Jun 13, 2022", 45000, 2013),
+                          copy_row("sold", 88500, "Aug 27, 2026", 44000, aside="mine", use=True), copy_row("sold", 110000, "Jul 2, 2026", 43000, 2014)])
+left, took = calc.tidy_comps(cab_car, mixed)
+tidy += [
+    (took["shadow"], 2),
+    ([(c["status"], c["price"], c["date"]) for c in left if "classic.com" in c["url"]], [("sold", 78500, "Jun 13, 2022"), ("sold", 88500, "Aug 27, 2026"), ("sold", 110000, "Jul 2, 2026")]),
+    ("2 copies of a sale that is here on the auction's own page were removed." in calc.tidy_note(took), True),
+]
+# a market row is a held car only when the day agrees too: two cars of one year sold for one price years apart
+two = calc.clean_comps([copy_row("sold", 78500, "Jun 13, 2022", 45000, 2013, source="Classic.com market (seller not named)")])
+row25 = calc.clean_comps([{"status": "sold", "title": "2013 Porsche 911 Carrera S Cabriolet - Manual", "price": 78500, "date": "May 2, 2025", "miles": 33000, "source": "Classic.com",
+                           "url": MKT, "note": "Listed on Classic.com. Manchester, Connecticut, USA."}])
+tidy += [
+    (calc.take_rows(two, row25), 0),
+    (two[0]["date"], "Jun 13, 2022"),
+    (len(calc.swap_in_rows(two, row25)), 2),
+]
+# auctions saved from Bring a Trailer's page for a model that holds every version: the ones of another trim or
+# generation go when the car is opened, the car's own stay, and so does one the buyer chose to count
+cs_car = {"year": 2020, "make": "BMW", "model": "M2", "trim": "CS", "body": "Coupe", "transmission": "6-speed manual"}
+bat_row = lambda title, price, **more: {"status": "sold", "title": title, "price": price, "date": "Jun 23, 2026", "source": "Bring a Trailer",
+                                        "url": f"https://bringatrailer.com/listing/x-{price}/", "note": calc.BAT_NOTE, **more}
+saved = calc.clean_comps([bat_row("2018 BMW M2 6-Speed", 42250), bat_row("2025 BMW M2 6-Speed", 62000), bat_row("2020 BMW M2 Competition 6-Speed", 51000),
+                          bat_row("2020 BMW M2 CS 6-Speed", 78000), bat_row("2026 BMW M2 CS", 110000), bat_row("2020 BMW M2 CS", 76500, note=calc.CHECKED + ": sold for $76,500 on Sep 15, 2026."),
+                          bat_row("2019 BMW M2 Competition", 46000, aside="mine", use=True),
+                          {"status": "sold", "title": "2020 BMW M2 Competition", "price": 50000, "date": "May 1, 2026", "source": "Cars & Bids", "url": "https://carsandbids.com/auctions/abc/2020-bmw-m2", "note": "Different trim (Competition)."}])
+left, took = calc.tidy_comps(cs_car, saved)
+tidy += [
+    (took["stray"], 4),
+    ([c["price"] for c in left], [78000, 76500, 46000, 50000]),          # another site's row is not this rule's to judge
+    ("4 Bring a Trailer auctions of another trim or generation were removed" in calc.tidy_note(took), True),
+    (calc.tidy_comps(cab_car, calc.clean_comps([bat_row("2014 Porsche 911 Carrera S Cabriolet 7-Speed", 108000), bat_row("2017 Porsche 911 Carrera S Cabriolet 7-Speed", 95000),
+                                                bat_row("2019 Porsche 911 Carrera S Cabriolet", 99000)]))[1]["stray"], 1),     # five model years on
 ]
 bad = [(i, got, want) for i, (got, want) in enumerate(tidy) if got != want]
 for item in bad:

@@ -1269,8 +1269,8 @@ def _market_rows(client, model: str, car: dict, results: list[dict], known=None,
             at = max(0, min((spot for spot in (words.find("Sold"), words.find("$")) if spot >= 0), default=0) - 60)
             progress.say(f"Classic.com: no cars could be read off {display_url(page['url'])}. Around its first price it says: {words[at:at + 110]}")
         if not (mine and f"/{mine}/" in urlparse(page["url"]).path.lower()):
-            for row in found:                          # a market for more than this trim: each title says which it is
-                row["trim"] = " ".join(trim_key(row["title"], car))
+            for row in found:                          # a market for more than this trim: each title says which it is,
+                row["trim"] = " ".join(trim_key(row["title"], car)) or "none named"      # and one that names none is not this trim
         rows += found
     for row in rows:
         mark_other_trim(car, row)

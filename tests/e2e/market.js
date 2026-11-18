@@ -63,7 +63,8 @@ const fs = require('fs');
   const said = (caseText.match(/The app read Classic\.com's market page itself[^.]*\./) || [''])[0];
   log('3 summary', said);
   if (!/7 cars, 5 of them sold \(4 at auction\)/.test(said)) wrong.push('3: the summary does not say what the app read off the page');
-  if (!/Bring a Trailer's own record of this model was read directly: 5 recent auctions \(4 sold\)/.test(caseText)) wrong.push('3: the summary does not say Bring a Trailer\'s record was read');
+  if (!/Bring a Trailer's own record of this model was read directly: 6 auctions in all, 5 of them cars like this one \(4 sold\)/.test(caseText)) wrong.push('3: the summary does not say Bring a Trailer\'s record was read');
+  if (/cannot be searched from the inside/.test(caseText)) wrong.push('3: the summary still says Bring a Trailer cannot be searched, after reading its record');
 
   // 4. the no-sale at $86,000: paste the auction's own link, and the card takes what that page says
   await p.locator('.sheet-tabs .tab[data-tab=comps]').click(); await p.waitForTimeout(1200);

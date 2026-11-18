@@ -568,6 +568,60 @@ cases += [
     ("Sport Chrono Package" in held[0]["options"], True),
 ]
 
+# ---- one page for every version of a model: the first M2, the Competition, the CS, the next generation, wheels.
+# Only the auctions of cars like the buyer's are kept.
+import bat
+M2 = [("15k-Mile 2018 BMW M2", 39750, "2026-11-10"), ("2020 BMW M2 Competition", 42222, "2026-11-05"), ("2018 BMW M2 6-Speed", 42250, "2026-10-30"),
+      ("11k-Mile 2020 BMW M2 Competition 6-Speed", 57000, "2026-10-20"), ("2018 BMW M2 Track Car", 35000, "2026-10-18"), ("2025 BMW M2 6-Speed", 62000, "2026-10-16"),
+      ("No Reserve: 19x9.5 and 20x10.5 BMW Style 930M Wheels", 1125, "2026-10-10"), ("19k-Mile 2021 BMW M2 Competition 6-Speed", 51000, "2026-10-01"),
+      ("Individual Velvet Blue Metallic 2026 BMW M2 CS", 110000, "2026-09-20"), ("3,500-Mile 2020 BMW M2 CS", 76500, "2026-09-15"),
+      ("2020 BMW M2 CS 6-Speed", 78000, "2026-06-23"), ("8k-Mile 2020 BMW M2 CS 6-Speed", 74000, "2026-03-02"), ("2024 BMW M2 6-Speed", 58500, "2026-06-27")]
+m2_rows = [{"title": title, "price": price, "sold": True, "url": f"https://bringatrailer.com/listing/m2-{at}/", "words": "",
+            "day": datetime.datetime.strptime(day, "%Y-%m-%d").toordinal()} for at, (title, price, day) in enumerate(M2)]
+CS = {"year": 2020, "make": "BMW", "model": "M2", "trim": "CS", "body": "Coupe", "transmission": "6-speed manual"}
+titles = lambda car: [comp["title"] for comp in calc.bat_comps(m2_rows, today=NOV17, car=car)]
+cases += [
+    (titles(CS), ["2020 BMW M2 CS", "2020 BMW M2 CS 6-Speed", "2020 BMW M2 CS 6-Speed"]),      # not the first M2, the Competition, the 2026 CS or the wheels
+    (titles({**CS, "trim": "Competition"}), ["2020 BMW M2 Competition", "2020 BMW M2 Competition 6-Speed", "2021 BMW M2 Competition 6-Speed"]),
+    (titles({"year": 2018, "make": "BMW", "model": "M2", "trim": ""}), ["2018 BMW M2", "2018 BMW M2 6-Speed", "2018 BMW M2 Track Car"]),      # no trim: none of the page's trims
+    (calc.bat_trim_words(m2_rows, CS), {"competition", "cs"}),
+    (len(calc.bat_comps(m2_rows, today=NOV17)), 12),                      # with no car to go by, every car on the page (the wheels are no car)
+    ([calc.bat_fits(CS, title) for title in ("2020 BMW M2 CS 6-Speed", "8k-Mile 2020 BMW M2 CS", "2018 BMW M2 6-Speed", "2020 BMW M2 Competition", "2026 BMW M2 CS", "BMW M2 CS Wheels")],
+     [True, True, False, False, False, False]),
+    ([calc.bat_fits(CAB, title) for title in ("10k-Mile 2014 Porsche 911 Carrera S Cabriolet 7-Speed", "2014 Porsche 911 Carrera 4S Cabriolet", "2014 Porsche 911 Carrera Cabriolet", "2019 Porsche 911 Carrera S Coupe")],
+     [True, False, False, False]),
+]
+
+# asking the site: the model page that arrives with its newest auctions only is asked for again, and what was
+# read of the whole record earlier is not thrown away
+def record_page(rows, whole=True):
+    stats = {"sold": [{"amount": str(row["price"]), "timestamp": str(stamp(datetime.date.fromordinal(row["day"]).isoformat())), "title": row["title"], "url": row["url"]} for row in rows], "unsold": []}
+    items = [{"title": row["title"], "url": row["url"], "current_bid": row["price"], "sold_text": f"Sold for USD ${row['price']:,} on 1/1/2026",
+              "timestamp_end": stamp(datetime.date.fromordinal(row["day"]).isoformat())} for row in rows[:4]]
+    return "<script>\nvar auctionsCompletedInitialData = " + json.dumps({"items": items, "stats": stats if whole else False}) + ";\nvar x = 1;\n</script>"
+bmw_make = '<div data-items="' + html.escape(json.dumps([{"title": "BMW M2", "url": "https://bringatrailer.com/bmw/m2/"}], separators=(",", ":")).replace("/", "\\/")) + '"></div>'
+served, asked = {"https://bringatrailer.com/bmw/": bmw_make, "https://bringatrailer.com/bmw/m2/": record_page(m2_rows, whole=False)}, []
+def fake_page(url):
+    asked.append(url)
+    return ("ok", served[url]) if url in served else ("missing", "")
+bat.page, bat.GAP, bat.BASE = fake_page, 0, "https://bringatrailer.com"
+said = []
+short = bat.sales(CS, said.append)
+tries = asked.count("https://bringatrailer.com/bmw/m2/")
+served["https://bringatrailer.com/bmw/m2/"] = record_page(m2_rows)
+whole_read = bat.sales(CS, None)
+served["https://bringatrailer.com/bmw/m2/"] = record_page(m2_rows, whole=False)
+after = bat.sales(CS, None)
+cases += [
+    (tries, 3),                                                           # asked for again, twice
+    (len(short["comps"]), 0),                                             # its newest four auctions hold no CS
+    ("came with its newest 4 auctions only" in short["note"] and "came with its newest 4 auctions only this time" in said[-1], True),
+    ([comp["price"] for comp in whole_read["comps"]], [76500, 78000, 74000]),
+    ("13 auctions in all, 3 of them cars like this one (3 sold)" in whole_read["note"], True),
+    ([comp["price"] for comp in after["comps"]], [76500, 78000, 74000]),  # the short page again: the record read a moment ago still serves
+    (bat.sales({"year": 2020, "make": "Lotus", "model": "Evora", "trim": "GT"}, None)["comps"], []),      # no page for the make
+]
+
 bad = [(i, got, want) for i, (got, want) in enumerate(cases) if got != want]
 for row in bad:
     print("FAILED", row)

@@ -126,8 +126,20 @@ what that car has been selling for and gives you a typical sale price, the comps
   the VIN, the miles, the gearbox, the town and the equipment the page lists, and takes the price
   from the page's own words: one auction's record and headline showed the last bid, $86,000,
   where its page says the car sold for $88,000. Every one of these sales opens on the auction's
-  own page, which is what a seller cannot argue with. Now and then a model page arrives with its
-  newest two dozen auctions only: the app asks once more, and says so when that is all it got. The app asks
+  own page, which is what a seller cannot argue with.
+- **Only auctions of cars like the buyer's are taken from that record.** Bring a Trailer keeps
+  one page for every M2 it has sold: the first M2, the Competition, the CS, the next generation,
+  and sets of wheels. Only the title tells them apart, so the app keeps an auction only when its
+  title has a model year within three of the car's and the words after the model are the car's
+  trim ("2020 BMW M2 CS 6-Speed" for a CS; "2018 BMW M2 6-Speed" names no trim and is another
+  car; a 2026 M2 CS is another generation). For a car with no trim, the title must not name one
+  of the page's trims. Auctions saved before this rule are removed when the car is opened. The
+  first version let a title that named no trim through, which put plain M2s in an M2 CS's list.
+- **A model's page often arrives with its newest two dozen auctions only.** The whole record is
+  there at some hours and not at others. The app asks up to three times a few seconds apart,
+  keeps a whole record for a day once it has read one, adds the newest auctions to it, and says
+  in the summary when the newest are all it got. It reads the public page only: the site's own
+  data address, which would give the rest, is not this app's to call. The app asks
   slowly on purpose: one request at a time, a second apart as the site asks, each page kept ten
   minutes, about ten requests for a car, and a refusal ends it.
 - **Classic.com: what can and cannot be had from it.** Classic.com keeps its past prices for
