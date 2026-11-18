@@ -1081,12 +1081,15 @@ function create(root) {
       (kind === "sold" ? '<label class="fld"><span>Date sold</span><input class="linkbox" name="date" placeholder="Jun 3, 2026"></label>' : "") +
       `<label class="fld${kind === "sold" ? "" : " wide"}"><span>VIN</span><input class="linkbox" name="vin" autocapitalize="characters" spellcheck="false"></label>` +
       '<label class="fld wide"><span>Link</span><input class="linkbox" name="url" inputmode="url" placeholder="https://"></label><button type="submit" class="btn ghost">Add it</button></form></details>';
-    /* Classic.com shows this year's sales to a browser only: the person opens the page, copies it, and the app reads every row */
-    const pastePage = `<details class="byhand pastebox"${S.handOpen === "paste" ? " open" : ""}><summary>Paste Classic.com's page for its newest sales</summary>` +
+    /* Classic.com shows this year's sales to a browser only, and its sold prices cannot be copied as text: the person
+       opens the page, takes a screenshot of the list, and Claude reads every row from the picture */
+    const pastePage = `<details class="byhand pastebox"${S.handOpen === "paste" ? " open" : ""}><summary>Add Classic.com's page for its newest sales</summary>` +
       `<div class="lead-sub">Classic.com shows this year's sales to a browser and turns page readers away, so a search can miss the newest ones. ` +
-      (d.marketUrl ? `<a class="inlink" href="${esc(d.marketUrl)}" target="_blank" rel="noopener">Open its page for this car ${ARROW}</a>, then` : "Open its market page for this car, then") +
-      ` select all, copy, and paste it here. The app reads every row itself: no search, no cost.</div>` +
-      `<form class="pasteform"><textarea class="linkbox pastetext" rows="3" placeholder="Paste the whole page here" aria-label="The page's text"></textarea><button type="submit" class="btn ghost">Read the sales</button></form></details>`;
+      (d.marketUrl ? `<a class="inlink" href="${esc(d.marketUrl)}" target="_blank" rel="noopener">Open its page for this car ${ARROW}</a>,` : "Open its market page for this car,") +
+      ` take a screenshot of the list of cars (a long one is fine) and add it here. Claude reads every row from the picture, sold prices included.</div>` +
+      `<input type="file" class="pagefile" accept="image/*" hidden><div class="optrow"><button type="button" class="btn ghost pagepic">${S.pageShot ? "Change the screenshot" : "Add a screenshot"}</button>` +
+      `${S.pageShot ? `<span class="optthumb"><img src="${esc(S.pageShot)}" alt=""><button type="button" class="optdrop pagedrop" aria-label="Remove the screenshot">×</button></span>` : ""}</div>` +
+      `<form class="pasteform"><textarea class="linkbox pastetext" rows="2" placeholder="Or paste the page's text: cars for sale and ended listings only, since sold prices cannot be copied" aria-label="The page's text"></textarea><button type="submit" class="btn ghost">Read the page</button></form></details>`;
     if (S.tab === "case") {
       h += `<div class="lead-line">${esc(c.headline || "")}</div>${c.sub ? `<div class="lead-sub">${esc(c.sub)}</div>` : ""}`;
       /* the offer follows the car's miles, price and history on its own; this runs it by hand, after comps change */
@@ -1280,12 +1283,25 @@ function create(root) {
       post("addcomp", { ...v, status: f.dataset.kind === "sold" ? "sold" : "asking", at: Date.now() });
     }; });
     el.sheetBody.querySelectorAll(".pastebox").forEach((box) => { box.ontoggle = () => { if (box.open) S.handOpen = "paste"; else if (S.handOpen === "paste") S.handOpen = ""; }; });
+    el.sheetBody.querySelectorAll(".pastebox").forEach((box) => {
+      const keep = () => { const y = el.sheetBody.scrollTop; renderSheet(); el.sheetBody.scrollTop = y; };
+      const take = async (blob) => { try { S.pageShot = await shrink(blob); keep(); } catch (e) { toast("That picture could not be read. Try a PNG or JPG screenshot.", true); } };
+      const pick = box.querySelector(".pagefile"), area = box.querySelector("textarea"), drop = box.querySelector(".pagedrop");
+      if (S.pageText) area.value = S.pageText;
+      area.oninput = () => { S.pageText = area.value; };
+      area.addEventListener("paste", (e) => { const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/")); if (item) { e.preventDefault(); take(item.getAsFile()); } });
+      box.querySelector(".pagepic").onclick = () => pick.click();
+      pick.onchange = () => { if (pick.files[0]) take(pick.files[0]); };
+      if (drop) drop.onclick = () => { S.pageShot = ""; keep(); };
+    });
     el.sheetBody.querySelectorAll(".pasteform").forEach((f) => { f.onsubmit = (e) => {
       e.preventDefault();
       const text = f.querySelector("textarea").value;
-      if (text.trim().length < 80) { toast("Open the page, select all, copy, and paste it here first.", true); return; }
+      if (!S.pageShot && text.trim().length < 80) { toast("Add a screenshot of the page's list of cars first.", true); return; }
+      if (S.pageShot && !S.d.connected) { toast("Connect your key first, so Claude can read the picture.", true); return; }
       const go = f.querySelector("button"); go.disabled = true; go.textContent = "Reading"; S.handOpen = "";
-      post("pastepage", { text: text.slice(0, 200000), at: Date.now() });
+      post("pastepage", { text: text.slice(0, 200000), image: S.pageShot || "", at: Date.now() });
+      S.pageShot = ""; S.pageText = "";
     }; });
     el.sheetBody.querySelectorAll(".more").forEach((b) => { b.onclick = () => again("more", { kind: b.dataset.kind, at: Date.now() }, b.dataset.kind); });
     const verify = el.sheetBody.querySelector(".verify");

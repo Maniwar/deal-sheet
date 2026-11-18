@@ -406,6 +406,79 @@ cases += [
     (calc.proof(known[1]), "auction"),
 ]
 
+# The page copied out of a browser (select all, copy): labels run into values, and the sold prices are not
+# there at all, because the page does not let them be selected.
+COPIED = """bookmark_border
+2013 Porsche 911 Carrera S
+Photos
+33
+2013 Porsche 911 Carrera S
+Original & Highly Original
+6865 mi89k mi
+Manual transmissionManual
+LHD steeringLHD
+
+Indio, California, USA
+For Sale
+$76,029*
+Oct 23, 2026
+Updated 25 days ago
+Desert Private Collection
+verified
+Fixed-price
+
+Contact Seller
+bookmark_border
+2014 Porsche 911 Carrera S
+2014 Porsche 911 Carrera S
+Original & Highly Original
+6865 mi10k mi
+Manual transmissionManual
+LHD steeringLHD
+
+Palm Springs, California, USA
+Sold
+Aug 22, 2026
+2 months ago
+Auction
+
+View Source
+lock
+
+bookmark_border
+2015 Porsche 911 Carrera S
+Original & Highly Original
+6865 mi
+Manual transmissionManual
+LHD steeringLHD
+
+Naples, Florida, USA
+Sold
+Aug 27, 2026
+2 months ago
+Auction
+"""
+copied = calc.classic_rows(COPIED, "Porsche")
+cases += [
+    ([(row["state"], row["price"], row["miles"], row["seller"], row["place"]) for row in copied],
+     [("for sale", 76029, 89000, "Desert Private Collection", "Indio, California, USA")]),     # a sale with no price is no row
+    (calc.unpriced_sales(COPIED), 2),
+    (calc.unpriced_sales(BROWSER), 0),
+    (calc.classic_rows("2015 Porsche 911 Carrera S\n6865 mi\nNaples, Florida, USA\nSold\n$88,000\nAug 27, 2026", "Porsche")[0]["miles"], None),   # the odometer icon alone is no mileage
+]
+
+# a car Claude read off a picture of the page is made to look like one the app read from its text
+shot = [calc.market_copy(calc.clean_comp(row), MARKET) for row in (
+    {"status": "sold", "title": "2013 Porsche 911 Carrera S", "price": 91500, "miles": 31000, "date": "Oct 2, 2026", "note": "Auction result. Austin, Texas."},
+    {"status": "sold", "title": "2015 Porsche 911 Carrera S", "price": 82500, "date": "Jun 16, 2025", "source": "SellYourSportscar.Net", "note": "Dealer listing, fixed price. Ann Arbor, Michigan."},
+    {"status": "asking", "available": "yes", "title": "2013 Porsche 911 Carrera S", "price": 76029, "source": "Desert Private Collection", "note": "Indio, California."})]
+cases += [
+    ((shot[0]["url"], shot[0]["source"], shot[0]["gearbox"], shot[0]["note"]), (MARKET, "Classic.com", "manual", "Listed on Classic.com. Auction result. Austin, Texas.")),
+    (calc.proof(shot[0]), "auction"),
+    (shot[1]["note"], "Listed on Classic.com. " + calc.DEALER_SOLD + " Ann Arbor, Michigan."),
+    ((shot[2]["source"], shot[2]["note"]), ("Desert Private Collection", "Listed on Classic.com. Indio, California.")),
+]
+
 # a model's copy of a row gets the labels the app's own reading gives
 copy_dealer = calc.clean_comp({"status": "sold", "title": "2015 Porsche 911 Carrera S Cabriolet", "price": 82500, "date": "Jun 16, 2025", "source": "SellYourSportscar.Net",
                                "url": MARKET, "note": "Listed on Classic.com market page; Fixed-price."})

@@ -130,12 +130,15 @@ what that car has been selling for and gives you a typical sale price, the comps
   it, drops asking prices that ended more than a year ago, and writes in the summary how old the
   copy is. This year's sales reach the app two ways: the text of the search results, which the
   model copies (the search prompt now spells out a row's layout, the seller and the word
-  Auction), and the page itself, pasted from a browser.
-- **Paste Classic.com's page and the app reads all of it.** The Sold tab has **Paste
-  Classic.com's page for its newest sales**: a link that opens the market page for this car's
-  kind, and a box. Open the page, select all, copy, paste. The app reads every row from the
-  text as a browser shows it, with no search and no request to anyone, adds what is new and
-  brings what it already had up to date. This is the complete, current list.
+  Auction), and a screenshot of the page from a browser.
+- **Add a screenshot of Classic.com's page and its newest sales are read from the picture.** The
+  Sold tab has **Add Classic.com's page for its newest sales**: a link that opens the market page
+  for this car's kind, and a place for a screenshot of its list of cars (a long one is fine).
+  Claude reads every row from the picture in one request, sold prices included, and the app adds
+  what is new and brings what it already had up to date. A picture is needed because Classic.com
+  does not let its sold prices be selected: text copied from the page arrives without them. The
+  box takes pasted text too and reads it with no request to anyone, which gives the cars for
+  sale and the listings that ended, and it says how many sales came without a price.
 - **An auction result and a dealer's price are told apart.** A result at a named auction on a
   known day (Bring a Trailer, Aug 22, 2026) is one auction that anyone can look up, so it
   counts. A dealer's listing that Classic.com marks sold shows what the dealer last asked, not

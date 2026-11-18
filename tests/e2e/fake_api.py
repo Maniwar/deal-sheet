@@ -189,7 +189,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(msg([tool("record_listing", {"year": 2021, "make": "Porsche", "model": "718 Cayman", "trim": "GTS 4.0",
                 "body": "Coupe", "transmission": "6-speed manual", "miles": 15781, "price": 101911, "vin": "WP0AD2A89MS281685",
                 "seller_type": "dealer", "notes": "Stock 69918511.", "exterior": "Racing Yellow", "shape": "coupe", "layout": "mid", "options": ["Sport Chrono Package", "Sport exhaust", "Carbon-ceramic brakes"], "msrp": 104500, "photo_box": [0.0, 0.10, 1.0, 0.40]})]))
-        if "web_search" in names and (self.headers.get("x-api-key", "") or "").endswith("market") and "buy right now" in json.dumps(body["messages"][0]["content"]):
+        if "web_search" in names and (self.headers.get("x-api-key", "") or self.headers.get("authorization", "")).endswith("market") and "buy right now" in json.dumps(body["messages"][0]["content"]):
             return self.send(msg([{"type": "text", "text": "Recording."}, tool("record_comps", {"summary": "No cars for sale found.", "comps": []})]))
         if "web_search" in names and "buy right now" in json.dumps(body["messages"][0]["content"]):
             state["sale_calls"] = state.get("sale_calls", 0) + 1
@@ -393,6 +393,13 @@ class H(BaseHTTPRequestHandler):
                 {"status": "sold", "title": "2021 Porsche 718 Cayman GTS 4.0", "body": "Coupe", "history": "Accident reported on the Carfax", "miles": 21000, "price": 84000, "date": "Apr 22, 2026", "source": "Classic.com", "url": "https://classic.com/veh/2021-porsche-718-cayman-gts-40-wp0ab2a98ls228716-AAA", "note": "6-speed manual."},
                 {"status": "sold", "title": "2021 Porsche 718 Cayman GTS 4.0", "miles": 27000, "price": 86055, "date": "Mar 13, 2025", "source": "Cars & Bids", "url": "https://carsandbids.com/auctions/xyz/2021-porsche-718-cayman-gts-4-0", "note": "PDK."},
                 {"status": "asking", "available": "yes", "title": "2021 Porsche 718 Cayman GTS 4.0", "miles": 9000, "price": 102995, "source": "Dealer", "url": "https://example.com/not-in-results"}]})]))
+        if names == ["record_comps"] and (self.headers.get("x-api-key", "") or self.headers.get("authorization", "")).endswith("market"):
+            # a screenshot of Classic.com's market page from a browser: the sold prices are in the picture
+            LOG.write(f"  page picture: images={len(sizes)} knows_row_layout={'ends with the word Auction or Fixed-price' in json.dumps(body['messages'][0]['content'])}\n"); LOG.flush()
+            return self.send(msg([tool("record_comps", {"summary": "Classic.com's market page.", "comps": [
+                {"status": "sold", "title": "2013 Porsche 911 Carrera S", "price": 91500, "miles": 31000, "date": "Oct 2, 2026", "note": "Auction result. Austin, Texas, USA."},
+                {"status": "sold", "title": "2014 Porsche 911 Carrera S", "price": 108000, "miles": 10000, "date": "Aug 22, 2026", "note": "Auction result. Palm Springs, California, USA."},
+                {"status": "sold", "title": "2015 Porsche 911 Carrera S", "price": 88000, "miles": 44000, "date": "Aug 27, 2026", "note": "Auction result. Naples, Florida, USA."}]})]))
         if names == ["record_comps"]:
             return self.send(msg([tool("record_comps", {"summary": "A pasted market page.", "comps": [
                 {"status": "high_bid", "title": "2021 Porsche 718 Cayman GTS 4.0", "price": 81000, "miles": 20000, "date": "Jun 25, 2025", "photo_box": [0.05, 0.5, 0.95, 0.8]}]})]))

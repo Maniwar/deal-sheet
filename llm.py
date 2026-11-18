@@ -710,6 +710,10 @@ def extract_comps(client, model: str, car: dict, text: str = "", image: bytes | 
         "shows none. Label sold, high_bid (not sold, reserve not met) and asking correctly. Skip "
         "cars of a different model or generation. Put transmission or body differences in the note. "
         "Classic.com shows a placeholder '6865 mi' before the real mileage; use the second figure. "
+        "On a Classic.com market page each car's row ends with the word Auction or Fixed-price: start that car's "
+        "note with 'Auction result.' for an auction and 'Dealer listing, fixed price.' for a fixed price, then the "
+        "town. Give the seller's or the auction site's name as the source when the row shows one. A row with no "
+        "price (a live auction, 'Price Undisclosed') is not a comp: leave it out. "
         "In summary, say in one sentence what the page was."
     )
     if len(content) > 1:

@@ -441,20 +441,19 @@ def sales_of_this_kind(client, model: str, car: dict, comps: list[dict], max_sea
     return {"comps": new, "note": note, "used": more.get("used") or {}}
 
 
-def pasted_market(car: dict, have: list[dict], text: str) -> tuple[list[dict], str]:
-    """Classic.com's market page as the buyer's browser shows it, pasted in: every row read by the app, with no
-    search and no request to anyone. Classic.com shows a browser this year's sales and turns page readers away,
-    so this is the one way to get them all. Cars already held take what the page says (`have` is changed in
-    place); the rest are returned as new comps. Returns (the new comps, what to tell the buyer).
-    """
-    rows = calc.classic_rows(text, str(car.get("make") or ""))
-    if not rows:
-        return [], ("No cars could be read from that text. Open Classic.com's market page for this car, select all, copy, "
-                    "and paste the whole page.")
+def market_of(car: dict, have: list[dict]) -> str:
+    """Classic.com's market page for this car's kind, as far as the cars held point to one: else a search of
+    Classic.com for the car, so a row read off a page still opens somewhere it can be found."""
     held = calc.market_pages(car, [comp["url"] for comp in have if comp.get("url")], limit=1)
     name = " ".join(str(car.get(key) or "").strip() for key in ("year", "make", "model", "trim")).strip()
-    market = held[0] if held else "https://www.classic.com/search/?q=" + quote_plus(name)
-    found = calc.merge_comps(calc.clean_comps(calc.market_comps(rows, market)))
+    return held[0] if held else "https://www.classic.com/search/?q=" + quote_plus(name)
+
+
+def add_market_rows(car: dict, have: list[dict], found: list[dict]) -> tuple[list[dict], str]:
+    """Put the cars read off Classic.com's market page with the ones held: a car already here takes what the
+    page says (`have` is changed in place), the rest are returned as new comps, less any of the other body style
+    or gearbox. Returns (the new comps, what to tell the buyer)."""
+    found = calc.merge_comps(found)
     updated = calc.take_rows(have, found)
     fresh = calc.new_comps(have, found)
     fresh, _ = same_body_only(car, fresh)
@@ -472,6 +471,48 @@ def pasted_market(car: dict, have: list[dict], text: str) -> tuple[list[dict], s
     if wrong:
         said += f" {wrong} with the other gearbox {'were' if wrong != 1 else 'was'} left out."
     return fresh, said
+
+
+NO_COPY = ("Classic.com does not let its sold prices be copied, so {n} sale{s} on the page came without a price. "
+           "Add a screenshot of the page instead: the prices are read from the picture.")
+
+
+def pasted_market(car: dict, have: list[dict], text: str) -> tuple[list[dict], str]:
+    """The text of Classic.com's market page, copied from the buyer's browser and pasted in: every row read by
+    the app, with no search and no request to anyone. A browser's copy holds the cars for sale and the listings
+    that ended; the sold prices cannot be selected on the page, so sales arrive without a price and the buyer
+    is told to add a screenshot for those. Returns (the new comps, what to tell the buyer).
+    """
+    rows = calc.classic_rows(text, str(car.get("make") or ""))
+    hidden = calc.unpriced_sales(text)
+    missing = NO_COPY.format(n=hidden, s="" if hidden == 1 else "s") if hidden else ""
+    if not rows:
+        return [], missing or ("No cars could be read from that text. Open Classic.com's market page for this car and add a "
+                               "screenshot of its list of cars.")
+    fresh, said = add_market_rows(car, have, calc.clean_comps(calc.market_comps(rows, market_of(car, have))))
+    return fresh, f"{said} {missing}".strip()
+
+
+def pictured_market(car: dict, have: list[dict], shots: list, text: str, client, model: str) -> tuple[list[dict], str]:
+    """A screenshot of Classic.com's market page from the buyer's browser, read by Claude: one request, and the
+    one way to get this year's sold prices, which the page shows a browser and nobody else. Each car read is
+    made to look like one the app read from the page's text. Returns (the new comps, what to tell the buyer);
+    a car's photo cut from the picture is kept in the page's state under the comp's `img`.
+    """
+    result = llm.extract_comps(client, model, car, text, images=shots)
+    market, found = market_of(car, have), []
+    for comp in result["comps"]:
+        box, piece = comp.pop("photo_box", None), comp.pop("photo_image", 1)
+        if box and shots:
+            piece = min(max(calc.to_int(piece) or 1, 1), len(shots))
+            cut = previews.crop_fraction(shots[piece - 1][0], box, max_width=560)
+            if cut:
+                comp["img"] = uuid.uuid4().hex[:10]
+                st.session_state["comp_photos"][comp["img"]] = cut
+        found.append(calc.market_copy(comp, market))
+    if not found:
+        return [], "No cars could be read from that picture. Take the screenshot of the list of cars, with their prices in view."
+    return add_market_rows(car, have, found)
 
 
 def check_sale(comp: dict, reader=None) -> str:
@@ -1803,8 +1844,19 @@ def handle_stage_requests(progress_slot) -> None:
     if isinstance(request, dict):                  # Classic.com's market page, copied from the buyer's browser
         entry = ss["garage"].get(ss["active"]) or {}
         have = calc.clean_comps(entry.get("comps") or [])
-        fresh, said = pasted_market(entry.get("car") or {}, have, str(request.get("text") or ""))
-        if said.startswith("No cars"):
+        text, picture = str(request.get("text") or ""), as_bytes(request.get("image"))
+        fresh, said = [], ""
+        if picture and not ss["api_key"]:
+            said = "No cars read: connect your Anthropic API key first, so Claude can read the picture."
+        elif picture:                              # the prices are in the picture: Claude reads them
+            try:
+                fresh, said = pictured_market(entry.get("car") or {}, have, images_for_api(picture, "image/jpeg"), text,
+                                              llm.get_client(ss["api_key"]), llm.MODELS[ss["model_label"]])
+            except llm.LLMError as exc:
+                said = f"No cars read: {exc}"
+        else:
+            fresh, said = pasted_market(entry.get("car") or {}, have, text)
+        if said.startswith(("No cars", "Classic.com does not let")):
             ss["stage_error"] = said
         else:
             ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have}

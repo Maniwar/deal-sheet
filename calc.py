@@ -1271,6 +1271,8 @@ def classic_rows(text: str, make: str = "") -> list[dict]:
     """
     text = str(text or "").replace("\r", "\n")
     text = re.sub(r"[ \t\f\v]+", " ", text)
+    # copied from a browser, a label runs into the value after it: '6865 mi10k mi', 'Manual transmissionManual'
+    text = re.sub(r"\bmi(?=\d)", "mi ", re.sub(r"(transmission|steering)(?=[A-Z])", r"\1 ", text))
     name = re.escape(str(make or "").strip())
     start = re.compile(rf"(?<!\d, )(?<![\d$,.])\b((?:19|20)\d\d) +{name}\b" if name else
                        r"(?<!\d, )(?<![\d$,.])\b((?:19|20)\d\d) +(?=[A-Z][A-Za-z-]+\b)", re.I if name else 0)
@@ -1299,6 +1301,7 @@ def classic_rows(text: str, make: str = "") -> list[dict]:
             continue
         date = _ROW_DATE.search(after) or _ROW_DATE.search(before)
         miles = [found for found in _ROW_MILES.finditer(before)] or [found for found in _ROW_MILES.finditer(after)][:1]
+        miles = [found for found in miles if found.group(0).replace(" ", "") != "6865mi"]      # the page's odometer icon, read as text
         cut = _ROW_TITLE_END.search(part, mark.end() - mark.start())
         title = re.sub(r"[\[\]#*]", "", part[:cut.start() if cut else 90]).strip(" -:|")[:90]
         if re.search(r"\bMarket\b|CLASSIC\.COM", title):  # the page's own heading, not a car
@@ -1449,6 +1452,29 @@ def take_rows(have: list[dict], rows: list[dict]) -> int:
     return count
 
 
+def unpriced_sales(text: str) -> int:
+    """How many cars on a pasted market page are marked sold (or not sold) with no price after the word. Classic.com
+    does not let its sold prices be selected, so a page copied from a browser arrives without them."""
+    return len(re.findall(r"(?m)^ ?(?:Sold|SOLD|Not Sold|NOT SOLD) ?\n(?! ?\$)", str(text or "").replace("\r", "\n")))
+
+
+def market_copy(comp: dict, market: str) -> dict:
+    """A car read off a picture of Classic.com's market page, made to look like one the app read from the page's
+    text: it opens on the market page, says where it was listed, and says whether it was an auction result or a
+    dealer's asking price. The gearbox and body style come from the market when the market is kept for one."""
+    if not comp.get("url"):
+        comp["url"], comp["link_ok"] = market, True
+    note = str(comp.get("note") or "").strip()
+    if classic_market(comp["url"]) and not note.lower().startswith("listed on classic.com"):
+        comp["note"] = f"Listed on Classic.com. {note}".strip()
+    if not names_seller(comp.get("source")) and source_name(comp) not in _AUCTION_HOSTS:
+        comp["source"] = "Classic.com"
+    words = urlparse(str(market or "")).path.lower().replace("-", " ").replace("/", " ")
+    comp["gearbox"] = comp.get("gearbox") or gearbox_kind(words)
+    label_market_copy(comp)
+    return comp
+
+
 def auction_find(comp: dict, car: dict | None = None) -> tuple[str, str]:
     """(a search that finds a sale's own auction page, where it looks), for a sale another site reported and
     whose link does not open on the auction's site: ('', '') otherwise. The search names the car and the price,
@@ -1477,10 +1503,11 @@ def label_market_copy(comp: dict) -> None:
     if comp.get("status") != "sold" or not classic_market(comp.get("url")):
         return
     note = str(comp.get("note") or "")
-    if DEALER_SOLD in note or note.startswith(("Listed on Classic.com. Auction result.", "Auction result.")):
+    if DEALER_SOLD in note or note.startswith("Listed on Classic.com. Auction result."):
         return
     named = f"{source_name(comp)} {comp.get('source') or ''}".lower()
     rest = re.sub(r"(?i)^listed on classic\.com(?: market page)?[.;:]?\s*", "", note)
+    rest = re.sub(r"(?i)^(?:auction result|dealer listing, fixed[- ]price)[.;:]?\s*", "", rest)      # the label the prompts ask for
     at_auction = any(name.lower() in named for name in _AUCTION_HOSTS)
     if re.search(r"(?i)fixed[- ]price|dealer(?:ship)?\b(?! auction)", note) and not at_auction:
         comp["note"] = " ".join(part for part in ("Listed on Classic.com.", DEALER_SOLD, rest) if part)
