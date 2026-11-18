@@ -21,12 +21,13 @@ start_app() {                      # $1 = "store": with the stand-in garage stor
   local store_url="" store_key=""
   if [ "${1:-}" = store ]; then store_url=http://127.0.0.1:8895; store_key=test-publishable-key; curl -s http://127.0.0.1:8895/reset >/dev/null; fi
   (cd "$repo" && DEALSHEET_DB_URL="$store_url" DEALSHEET_DB_KEY="$store_key" DEALSHEET_SYNC_RETRY=3 DEALSHEET_DRAW_WAIT="${2:-}" ANTHROPIC_BASE_URL=http://127.0.0.1:8899 DEALSHEET_RETRY_WAIT=1 DEALSHEET_ALLOW_LOCAL_PREVIEWS=1 \
+     DEALSHEET_BAT_URL=http://127.0.0.1:8898/bat DEALSHEET_BAT_GAP=0 \
      DEALSHEET_VIN_API=http://127.0.0.1:8896/ nohup streamlit run app.py --server.headless true --server.port 8766 \
      --browser.gatherUsageStats false > "$work/streamlit.log" 2>&1 &)
   sleep 6
 }
 
-pkill -f "fake_ap[i].py" 2>/dev/null; pkill -f "fake_d[b].py" 2>/dev/null; sleep 1
+pkill -f "fake_ap[i].py" 2>/dev/null; pkill -f "fake_d[b].py" 2>/dev/null; pkill -f "python3 sit[e].py" 2>/dev/null; sleep 1     # started again, so an edit to one takes effect
 for f in fake_api.py site.py fake_vin.py fake_skfb.py fake_db.py; do
   pgrep -f "$f" >/dev/null || (nohup python3 "$f" > "${f%.py}.out" 2>&1 &)
 done

@@ -200,10 +200,6 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "log": [str(line)[:200] for line in (flags.get("log") or [])][-200:],
         "sources": calc.source_counts(comps) if comps else [],
     }
-    # Classic.com's market page for this car's kind, for the buyer to open in a browser: it shows a browser this
-    # year's sales, which no page reader gets
-    markets = calc.market_pages(car, [comp.get("url") for comp in comps if comp.get("url")], limit=1)
-    market_url = markets[0] if markets else ""
 
     # ---- comps: sold first, then cars for sale now, then auctions with no sale and listings that have gone
     order = {"sold": 0, "live": 1, "high_bid": 2, "ended": 3}
@@ -287,7 +283,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "offer": {"open": offer.get("open"), "target": offer.get("target"), "walk": offer.get("walk_away")},
         "money": {"tax": settings["tax_rate"], "fees": settings["fees"], "apr": settings["apr"],
                   "down": settings["down"], "months": settings["months"]},
-        "axis": axis, "comps": cards, "case": case, "message": str(flags.get("message") or ""), "marketUrl": market_url,
+        "axis": axis, "comps": cards, "case": case, "message": str(flags.get("message") or ""),
         # what a message can honestly cite for the offer on the sheet: sales at or under it, else cars for sale near it
         "backing": (lambda price: {"offer": calc.money(price), "sales": len(calc.cite_sales(car, comps, offer=price)),
                                    "asks": len(calc.cite_asks(car, comps, price))} if price else None)(

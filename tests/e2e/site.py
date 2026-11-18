@@ -7,6 +7,45 @@ def car_page(title, price, vin="", gear="", extra=""):
             f'<body><h1>{title}</h1><div class="price">${price:,}</div>' + (f"<div>VIN: {vin}</div>" if vin else "") +
             (f"<dl><dt>Transmission</dt><dd>{gear}</dd></dl>" if gear else "") + extra + PAD +
             '<select><option>Automatic</option><option>Manual</option></select></body></html>').encode()
+# ---- a stand-in for Bring a Trailer: a make's page naming its model pages, a model page carrying every auction
+# for its chart, and an auction's own page with the car's details
+import calendar, datetime, html as _html, json
+BAT = "http://127.0.0.1:8898/bat"
+def stamp(day): return calendar.timegm(datetime.datetime.strptime(day, "%Y-%m-%d").timetuple()) + 20 * 3600
+def auction(title, amount, day, slug, sold=True):
+    us = datetime.datetime.strptime(day, "%Y-%m-%d")
+    return {"amount": str(amount), "timestamp": str(stamp(day)), "title": title, "url": f"{BAT}/listing/{slug}/", "status": "paid" if sold else "unsold",
+            "titlesub": f"{'Sold for' if sold else 'Bid to'} USD ${amount:,}  on {us.month}/{us.day}/{us.year} "}
+def model_page(title, sold, unsold=()):
+    data = {"base_filter": {"items_type": "model"}, "items": [], "items_total": len(sold) + len(unsold), "stats": {"sold": list(sold), "unsold": list(unsold)}}
+    return (f"<html><head><title>{title} For Sale - BaT Auctions</title></head><body><h1>{title}</h1><script>\nvar auctionsCompletedInitialData = "
+            + json.dumps(data) + ";\nvar other = 1;\n</script></body></html>").encode()
+CAB = "Porsche 911 Carrera S Cabriolet"
+BAT_MODELS = {
+    "991-911": model_page("Porsche 991 911 Carrera S", [
+        auction("14k-Mile 2012 Porsche 911 Carrera S Coupe", 86000, "2026-11-16", "2012-porsche-911-991-carrera-s-coupe-55"),
+        auction(f"34k-Mile 2013 {CAB}", 85900, "2026-10-18", "2013-porsche-911-carrera-s-cabriolet-49"),                # no gears in the title: the automatic
+        auction(f"29k-Mile 2012 {CAB} 7-Speed", 86000, "2026-09-16", "2012-porsche-911-carrera-s-cabriolet-19-2"),
+        auction(f"10k-Mile 2014 {CAB} 7-Speed", 108000, "2026-08-22", "2014-porsche-911-carrera-s-cabriolet-20"),
+        auction(f"2012 {CAB} 7-Speed", 51000, "2021-03-02", "2012-porsche-911-carrera-s-cabriolet-2")],                   # years ago: left out
+        [auction(f"2015 {CAB} 7-Speed", 54000, "2026-01-22", "2015-porsche-911-carrera-s-cabriolet-10", sold=False)]),
+    "997-911": model_page("Porsche 997 911 Carrera S", [auction("2009 Porsche 911 Carrera S Cabriolet 6-Speed", 61000, "2026-07-01", "2009-porsche-911-carrera-s-cabriolet-3")]),
+    "992-911": model_page("Porsche 992 911 Carrera S", [auction("2021 Porsche 911 Carrera S Cabriolet", 121000, "2026-06-01", "2021-porsche-911-carrera-s-cabriolet-8")]),
+}
+def make_page():
+    items = [("Porsche 997 911 Carrera S", "997-911"), ("Porsche 991 911 Carrera S", "991-911"), ("Porsche 992 911 Carrera S", "992-911"),
+             ("Porsche 991 911 Carrera 4S", "991-911-carrera-4s"), ("Porsche 991 911 Parts and Automobilia", "991-911-parts-and-automobilia")]
+    data = json.dumps([{"title": title, "url": f"{BAT}/porsche/{slug}/", "watchers": 0} for title, slug in items], separators=(",", ":")).replace("/", "\\/")
+    return (f'<html><head><title>Porsche For Sale - BaT Auctions</title></head><body><div data-items="{_html.escape(data)}"></div></body></html>').encode()
+def bat_listing(slug):
+    first = slug.startswith("2014")
+    lines = [f'Chassis: <a href="#">{"WP0CB2A96ES154062" if first else "WP0CB2A99CS155039"}</a>', "10k Miles" if first else "29k Miles", "3.8-Liter Flat-Six",
+             "Seven-Speed Manual Transaxle", "Dark Blue Metallic Paint" if first else "Agate Gray Metallic Paint", "Sport Chrono Package", "Sport Exhaust System", "Bose Sound System", "Clean Carfax Report"]
+    return ('<html><head><title>Auction | Bring a Trailer</title></head><body><div class="essentials"><h2>BaT Essentials</h2><div><strong>Seller</strong>: <a>someone</a></div>'
+            f'<strong>Location</strong>: <a href="#">{"Palm Springs, California 92262" if first else "Cleveland, Ohio 44101"}</a><strong>Listing Details</strong><ul>'
+            + "".join(f"<li>{line}</li>" for line in lines) + '</ul><strong>Private Party or Dealer</strong>: ' + ("Private Party" if first else "Dealer") + '</div>' + PAD + '</body></html>').encode()
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def out(self, body, ctype, code=200, headers=None):
@@ -30,6 +69,12 @@ class H(BaseHTTPRequestHandler):
         if path.startswith("/oos/"): return self.out(car_page("Used 2020 BMW M2 CS", 91000, vin="WBS1J3C03L7H24156", extra='<script type="application/ld+json">{"offers":{"availability":"https://schema.org/OutOfStock"}}</script>'), "text/html")
         if path.startswith("/titleonly/"):       # a dealer page built by scripts: the price is in the title and nowhere else, no VIN, no miles
             return self.out(b'<html><head><title>Used 2019 BMW M2 Competition, Very Low Miles For Sale ($53,400) | Scripted Motors Stock #NP1</title></head><body><div id="app"></div>Vehicles Found:</body></html>', "text/html")
+        if path.startswith("/bat/"):             # Bring a Trailer: a make's page, a model's page, an auction's page
+            parts = [part for part in path.split("/")[2:] if part]
+            if parts == ["porsche"]: return self.out(make_page(), "text/html")
+            if len(parts) == 2 and parts[0] == "porsche" and parts[1] in BAT_MODELS: return self.out(BAT_MODELS[parts[1]], "text/html")
+            if len(parts) == 2 and parts[0] == "listing": return self.out(bat_listing(parts[1]), "text/html")
+            return self.out(b"no", "text/plain", 404)
         if path.startswith("/auction/"):        # an auction's own page: the title still shows the highest bid, the page says what it sold for afterwards
             return self.out(('<html><head><title>44k-Mile 2015 Porsche 911 Carrera S Cabriolet 7-Speed for sale on BaT Auctions - bid to $86,000 on August 26, 2026 (Lot #259,826) | Bring a Trailer</title></head>'
                              '<body><h1>44k-Mile 2015 Porsche 911 Carrera S Cabriolet 7-Speed</h1><div>Sold for USD $88,000 on 8/26/26</div><div>Chassis: WP0CB2A98FS155165</div>' + PAD + '</body></html>').encode(), "text/html")

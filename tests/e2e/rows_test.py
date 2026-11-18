@@ -495,6 +495,64 @@ cases += [
     (calc.proof(copy_bare), "list"),
 ]
 
+# ---- Bring a Trailer's own record: a make's page names its model pages, a model page carries every auction,
+# and an auction's page lists the car's details
+import calendar, datetime, html, json
+def stamp(day): return calendar.timegm(datetime.datetime.strptime(day, "%Y-%m-%d").timetuple()) + 20 * 3600
+def auction(title, amount, day, slug): return {"amount": str(amount), "timestamp": str(stamp(day)), "title": title, "url": f"https://bringatrailer.com/listing/{slug}/"}
+names = [("Porsche 997 911 Carrera S", "997-911"), ("Porsche 991 911 Carrera S", "991-911"), ("Porsche 991 911 Carrera 4S", "991-911-carrera-4s"),
+         ("Porsche 991 911 Carrera", "991-911-carrera"), ("Porsche 991 911 Carrera S Endurance Racing Edition", "991-911-carrera-s-endurance-racing-edition"),
+         ("Porsche 991 911 Parts and Automobilia", "991-911-parts-and-automobilia"), ("Porsche 718 Cayman GTS 4.0", "718-cayman-gts-4-0"), ("Porsche 718 Cayman", "718-cayman")]
+make_page = '<div data-items="' + html.escape(json.dumps([{"title": title, "url": f"https://bringatrailer.com/porsche/{slug}/"} for title, slug in names],
+                                                           separators=(",", ":")).replace("/", "\\/")) + '"></div>'
+models = calc.bat_models(make_page)
+record = {"items": [{"url": "https://bringatrailer.com/listing/c/", "excerpt": "This 2013 cabriolet has a <b>seven-speed PDK</b> automatic transaxle."}],
+          "stats": {"sold": [auction("14k-Mile 2012 Porsche 911 Carrera S Coupe", 86000, "2026-11-16", "a"),
+                             auction("10k-Mile 2014 Porsche 911 Carrera S Cabriolet 7-Speed", 108000, "2026-08-22", "b"),
+                             auction("34k-Mile 2013 Porsche 911 Carrera S Cabriolet", 85900, "2026-10-18", "c"),
+                             auction("1,200-Kilometer 2013 Porsche 911 Carrera S Cabriolet", 90000, "2026-05-01", "d"),
+                             auction("2012 Porsche 911 Carrera S Cabriolet 7-Speed", 51000, "2021-03-02", "e")],
+                    "unsold": [auction("2015 Porsche 911 Carrera S Cabriolet 7-Speed", 54000, "2026-01-22", "f")]}}
+model_page = "<script>\nvar auctionsCompletedInitialData = " + json.dumps(record) + ";\nvar x = 1;\n</script>"
+found = calc.bat_results(model_page)
+sales = calc.clean_comps(calc.bat_comps(found, today=NOV17))
+by = {comp["url"][-2]: comp for comp in sales}
+LISTING = ('<div class="essentials"><strong>Seller</strong>: <a>x</a><strong>Location</strong>: <a href="#">Palm Springs, California 92262</a><strong>Listing Details</strong><ul>'
+           '<li>Chassis: <a href="#">WP0CB2A96ES154062</a></li><li>10k Miles</li><li>3.8-Liter Flat-Six</li><li>Seven-Speed Manual Transaxle </li><li>Sport Chrono Package</li>'
+           '<li>Heated &amp; Ventilated Seats</li><li>Clean Carfax Report</li></ul><strong>Private Party or Dealer</strong>: Private Party<strong>Lot</strong> #259232</div>')
+facts = calc.bat_listing(LISTING)
+opened = dict(by["b"]); calc.bat_fill(opened, facts)
+held = calc.clean_comps([{"status": "sold", "title": "2014 Porsche 911 Carrera S Cabriolet (Palm Springs, CA sale)", "price": 108000, "date": "Aug 22, 2026", "use": True, "aside": "mine",
+                          "source": "Classic.com market (seller not named)", "url": MARKET, "note": "Listed on Classic.com market page; no VIN shown."}])
+took = calc.upgrade_leads(held, [opened])
+cases += [
+    (calc.make_slug("Mercedes-Benz"), "mercedes-benz"),
+    (len(models), 8),
+    ([(title, own) for title, url, own in calc.bat_pick(CAB, models)], [("Porsche 991 911 Carrera S", True), ("Porsche 997 911 Carrera S", True)]),      # one trim, two generations
+    (calc.bat_pick(CAB, models)[0][1], "https://bringatrailer.com/porsche/991-911/"),
+    ([title for title, url, own in calc.bat_pick({"make": "Porsche", "model": "718 Cayman", "trim": "GTS 4.0"}, models)], ["Porsche 718 Cayman GTS 4.0"]),
+    ([(title, own) for title, url, own in calc.bat_pick({"make": "Porsche", "model": "718 Cayman", "trim": "GT4"}, models)], [("Porsche 718 Cayman", False)]),   # no page for the trim
+    (calc.bat_pick({"make": "Porsche", "model": "Taycan", "trim": "4S"}, models), []),
+    ((len(found), calc.bat_year_fit(CAB, found), found[0]["price"]), (6, 1, 86000)),
+    (len(sales), 5),                                                       # the one from 2021 is left out
+    ((by["b"]["status"], by["b"]["price"], by["b"]["date"], by["b"]["miles"], by["b"]["gearbox"], by["b"]["title"], by["b"]["source"]),
+     ("sold", 108000, "Aug 22, 2026", 10000, "manual", "2014 Porsche 911 Carrera S Cabriolet 7-Speed", "Bring a Trailer")),
+    ((calc.proof(by["b"]), calc.own_page(by["b"])), ("own", True)),
+    ((by["c"]["gearbox"], "Taken for an automatic" in by["c"]["note"]), ("automatic", False)),      # its own lines say PDK
+    ((by["d"]["gearbox"], by["d"]["miles"], "Taken for an automatic" in by["d"]["note"]), ("automatic", 746, True)),     # no gears in its title
+    ((by["f"]["status"], "Not sold" in by["f"]["note"]), ("high_bid", True)),
+    (calc.bat_results("<html>no data here</html>"), []),
+    (facts, {"place": "Palm Springs, California", "vin": "WP0CB2A96ES154062", "miles": 10000, "gearbox": "manual", "history": "Clean Carfax Report",
+             "options": "3.8-Liter Flat-Six, Seven-Speed Manual Transaxle, Sport Chrono Package, Heated & Ventilated Seats"}),
+    ((opened["vin"], opened["gear_seen"], opened["note"]), ("WP0CB2A96ES154062", "page", "Checked on the auction's own page: sold for $108,000 on Aug 22, 2026. Palm Springs, California.")),
+    ([comp["url"][-2] for comp in calc.bat_closest(CAB, sales)], ["b", "f"]),          # the cabriolets with this gearbox, sales first
+    (calc.bat_closest(CAB, [opened]), []),                                             # one already opened is not opened again
+    # a copy of the sale off Classic.com's page takes the auction's own page, and stays the buyer's choice
+    ((took, held[0]["url"], held[0]["source"], held[0]["vin"], held[0]["aside"], held[0]["title"]),
+     (1, "https://bringatrailer.com/listing/b/", "Bring a Trailer", "WP0CB2A96ES154062", "mine", "2014 Porsche 911 Carrera S Cabriolet 7-Speed")),
+    ("Sport Chrono Package" in held[0]["options"], True),
+]
+
 bad = [(i, got, want) for i, (got, want) in enumerate(cases) if got != want]
 for row in bad:
     print("FAILED", row)

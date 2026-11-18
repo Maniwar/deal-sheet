@@ -22,6 +22,7 @@ from urllib.parse import quote_plus
 import pandas as pd
 import streamlit as st
 
+import bat
 import calc
 import jobs
 import llm
@@ -473,33 +474,35 @@ def add_market_rows(car: dict, have: list[dict], found: list[dict]) -> tuple[lis
     return fresh, said
 
 
-NO_COPY = ("Classic.com does not let its sold prices be copied, so {n} sale{s} on the page came without a price. "
-           "Add a screenshot of the page instead: the prices are read from the picture.")
+NO_COPY = ("Classic.com keeps its past prices for members, so {n} sale{s} on the page came without a price. Bring a Trailer's "
+           "sales are read from its own record, so they are here already. For a sale at another auction, open the auction's "
+           "own page and paste its link on the card.")
 
 
 def pasted_market(car: dict, have: list[dict], text: str) -> tuple[list[dict], str]:
     """The text of Classic.com's market page, copied from the buyer's browser and pasted in: every row read by
     the app, with no search and no request to anyone. A browser's copy holds the cars for sale and the listings
-    that ended; the sold prices cannot be selected on the page, so sales arrive without a price and the buyer
-    is told to add a screenshot for those. Returns (the new comps, what to tell the buyer).
+    that ended. Classic.com keeps its past prices for members (blurred on the page, and not selectable), so
+    sales arrive without a price, and the buyer is told where those come from instead. Returns (the new comps,
+    what to tell the buyer).
     """
     rows = calc.classic_rows(text, str(car.get("make") or ""))
     hidden = calc.unpriced_sales(text)
     missing = NO_COPY.format(n=hidden, s="" if hidden == 1 else "s") if hidden else ""
     if not rows:
-        return [], missing or ("No cars could be read from that text. Open Classic.com's market page for this car and add a "
-                               "screenshot of its list of cars.")
+        return [], missing or "No cars could be read from that text. Add a screenshot of the page's list of cars instead."
     fresh, said = add_market_rows(car, have, calc.clean_comps(calc.market_comps(rows, market_of(car, have))))
     return fresh, f"{said} {missing}".strip()
 
 
 def pictured_market(car: dict, have: list[dict], shots: list, text: str, client, model: str) -> tuple[list[dict], str]:
-    """A screenshot of Classic.com's market page from the buyer's browser, read by Claude: one request, and the
-    one way to get this year's sold prices, which the page shows a browser and nobody else. Each car read is
-    made to look like one the app read from the page's text. Returns (the new comps, what to tell the buyer);
-    a car's photo cut from the picture is kept in the page's state under the comp's `img`.
+    """A screenshot of a page of results from the buyer's browser, read by Claude in one request: a page the app
+    cannot open itself (another auction house's past auctions, a dealer's sold list). A car read off Classic.com's
+    market page is made to look like one the app read from that page's text. Returns (the new comps, what to
+    tell the buyer); a car's photo cut from the picture is kept in the page's state under the comp's `img`.
     """
     result = llm.extract_comps(client, model, car, text, images=shots)
+    classic = "classic.com" in str(result.get("summary") or "").lower()      # only its rows open on its market page
     market, found = market_of(car, have), []
     for comp in result["comps"]:
         box, piece = comp.pop("photo_box", None), comp.pop("photo_image", 1)
@@ -509,10 +512,40 @@ def pictured_market(car: dict, have: list[dict], shots: list, text: str, client,
             if cut:
                 comp["img"] = uuid.uuid4().hex[:10]
                 st.session_state["comp_photos"][comp["img"]] = cut
-        found.append(calc.market_copy(comp, market))
+        found.append(calc.market_copy(comp, market) if classic else comp)
     if not found:
-        return [], "No cars could be read from that picture. Take the screenshot of the list of cars, with their prices in view."
+        return [], ("No cars could be read from that picture. Take the screenshot of the list of cars, with their prices in view. "
+                    "Classic.com blurs past prices unless you are a member.")
     return add_market_rows(car, have, found)
+
+
+def house_sales(car: dict, say=None) -> tuple[list[dict], str]:
+    """Bring a Trailer's own record of this car's model, as comps: (the comps, a line for the summary). On a page
+    kept for more than the car's own trim, each title says which trim it is, and another trim is marked as one.
+    Nothing here can stop a search: any trouble reading the site just means no comps from it."""
+    try:
+        out = bat.sales(car, say)
+    except Exception:
+        return [], ""
+    rows = out["comps"]
+    for row in rows:
+        if not out["own_trim"]:
+            row["trim"] = " ".join(calc.trim_key(row["title"], car))
+        calc.mark_other_trim(car, row)
+        calc.ease_trim_mark(car, row)
+    return calc.clean_comps(rows), out["note"]
+
+
+def house_details(car: dict, comps: list[dict], say=None) -> list[dict]:
+    """Open the nearest Bring a Trailer auctions' own pages for the VIN, the miles, the gearbox and the equipment,
+    then leave out any whose page states the other gearbox. Returns the comps that stay."""
+    try:
+        opened = bat.details(car, comps, say)
+    except Exception:
+        opened = 0
+    if opened:
+        comps, _ = same_gearbox_only(car, comps, say)
+    return comps
 
 
 def check_sale(comp: dict, reader=None) -> str:
@@ -544,7 +577,8 @@ def check_sales(comps: list[dict], say=None, limit: int = 12) -> int:
     The app's own request only: a site that turns it away is left as it is. Returns how many the page changed."""
     hosts = tuple(calc._AUCTION_HOSTS.values())
     todo = [comp for comp in comps if comp["status"] != "asking" and comp["use"] and calc.own_page(comp)
-            and calc.host_of(comp["url"]).endswith(hosts) and calc.CHECKED not in comp["note"]][:limit]
+            and calc.host_of(comp["url"]).endswith(hosts) and calc.CHECKED not in comp["note"]
+            and calc.BAT_NOTE not in comp["note"]][:limit]            # Bring a Trailer's record is its own word, read one page at a time
     if not todo:
         return 0
     pool, changed, agreed = ThreadPoolExecutor(max_workers=6), 0, 0
@@ -793,11 +827,14 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
         cars, count = check_listings(cars, car, tell, reader=(client, model))
         return {**sale, "comps": cars, "count": add_counts(count, {"wrong": wrong}), "off_body": off_body}
 
-    pool = ThreadPoolExecutor(max_workers=1)                 # cars for sale are looked for while the sales are
+    pool = ThreadPoolExecutor(max_workers=2)                 # cars for sale are looked for while the sales are
     for_sale = pool.submit(for_sale_side)
+    house = pool.submit(house_sales, car, tell)              # and Bring a Trailer's own record is read
     try:
         result = llm.research_comps(client, model, car, max_searches=max_searches, progress=progress)
-        comps, summary = list(result["comps"]), result["summary"]
+        own, own_note = house.result()
+        comps = calc.merge_comps(own, list(result["comps"]))     # the auction's own page wins over another site's copy of the sale
+        summary = f"{own_note} {result['summary']}".strip()
         again = sales_of_this_kind(client, model, car, comps, max_searches, progress)
         comps += again["comps"]
         rows = list(result.get("rows") or [])
@@ -826,6 +863,7 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
     comps, count = check_listings(comps, car, tell, only_new=True, reader=(client, model))   # the for-sale cars the sales searches turned up
     count = add_counts(count, sale.get("count"))
     note, wrong_box = checked_note(count), wrong_box + count["wrong"]
+    comps = house_details(car, comps, tell)        # the nearest Bring a Trailer auctions, opened for VIN and equipment
     leads = calc.set_aside_leads(comps)            # cars that cannot be opened and checked stay out of the numbers
     fixed = check_sales(comps, tell)               # each sale with an auction page of its own, against that page
     if note:
@@ -1430,6 +1468,8 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
     else:                                             # with too few sales of the car's own kind, look for exactly that kind
         found = llm.research_comps(client, model, the_car, max_searches=searches, known=known, progress=progress,
                                    focus=bool(calc.kind_words(the_car, every=True)) and exact_sales(the_car, have) < 3)
+        own, own_note = house_sales(the_car, progress.say)       # Bring a Trailer's own record of the model
+        found["comps"] = calc.merge_comps(own, found["comps"])
     better = calc.upgrade_leads(have, found["comps"])            # a lead whose own page has now turned up takes that page
     named = calc.take_rows(have, found.get("rows"))              # a copy of a market page's row takes what the page itself says
     if named:
@@ -1482,6 +1522,10 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
         return {"pending": {"add_comps": fresh, "keep": have, "summary": found["summary"]},
                 "notices": [f"Refreshed: {found_text or 'nothing new this time'}. {note}".strip()]}
     note = ""
+    if not wants_sale:                                           # the nearest auctions' own pages, for VIN and equipment
+        both = house_details(the_car, have + fresh, progress.say)
+        stays = {id(comp) for comp in both}
+        have, fresh = [comp for comp in have if id(comp) in stays], [comp for comp in fresh if id(comp) in stays]
     if wants_sale and fresh:
         progress.say("Opening each new page to see whether the car is still there")
     if wants_sale:
@@ -1498,8 +1542,10 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
         found_text = "Found " + " and ".join(bit for bit in bits if bit) + "."
     else:
         found_text = f"Found {len(fresh)} more sale{'s' if len(fresh) != 1 else ''}."
+        if better:
+            found_text += f" {better} you had now open{'s' if better == 1 else ''} on the auction's own page."
     return {"pending": {"add_comps": fresh, "keep": have},
-            "notices": [(f"{found_text} {note}".strip() if fresh else "The search found nothing new this time.") + (f" {cost}" if cost else "")]}
+            "notices": [(f"{found_text} {note}".strip() if fresh or better or named else "The search found nothing new this time.") + (f" {cost}" if cost else "")]}
 
 
 def offer_work(job, car: dict, comps: list[dict], client, model: str, had_message: bool, buyer: str = "") -> dict:
@@ -1856,7 +1902,7 @@ def handle_stage_requests(progress_slot) -> None:
                 said = f"No cars read: {exc}"
         else:
             fresh, said = pasted_market(entry.get("car") or {}, have, text)
-        if said.startswith(("No cars", "Classic.com does not let")):
+        if said.startswith(("No cars", "Classic.com keeps")):
             ss["stage_error"] = said
         else:
             ss["_pending"] = {**(ss.get("_pending") or {}), "add_comps": fresh, "keep": have}

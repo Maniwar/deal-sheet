@@ -114,31 +114,34 @@ what that car has been selling for and gives you a typical sale price, the comps
   told that prices move: it prices from the last twelve months' sales when those sit clearly
   above or below older ones, and treats special equipment (a power kit, paint to sample) as a
   reason a sale says less about a car without it.
-- **Classic.com's market page is read by the app, row by row.** A market page is one long table:
-  the status, the price, the date, the miles, the town, who sold the car and whether that was an
-  auction or a dealer's fixed price. A model copies a table differently each time, and on real
-  runs it left out the newest rows and the sellers' names. Now the app reads the rows itself from
-  the page's text, so the same page gives the same sales on every run. It also opens the whole
-  market for the car's kind (every model year of the generation) with one small request when the
-  search opened one model year only, and it reads that page again on later searches without
-  searching for it. Cars already held as copies of those rows take what the page says.
-- **What a page reader gets from Classic.com is an old copy, and the app says so.** Classic.com
-  serves its market pages to browsers and turns other readers away (the app's own request gets
-  a 403, and the app does not go around a refusal). Claude's page reader then hands back a copy
-  it saved earlier, which on Nov 17, 2026 was about a year old: complete for older sales, with
-  nothing from this year. The app reads that copy for its history, never takes "for sale" from
-  it, drops asking prices that ended more than a year ago, and writes in the summary how old the
-  copy is. This year's sales reach the app two ways: the text of the search results, which the
-  model copies (the search prompt now spells out a row's layout, the seller and the word
-  Auction), and a screenshot of the page from a browser.
-- **Add a screenshot of Classic.com's page and its newest sales are read from the picture.** The
-  Sold tab has **Add Classic.com's page for its newest sales**: a link that opens the market page
-  for this car's kind, and a place for a screenshot of its list of cars (a long one is fine).
-  Claude reads every row from the picture in one request, sold prices included, and the app adds
-  what is new and brings what it already had up to date. A picture is needed because Classic.com
-  does not let its sold prices be selected: text copied from the page arrives without them. The
-  box takes pasted text too and reads it with no request to anyone, which gives the cars for
-  sale and the listings that ended, and it says how many sales came without a price.
+- **Bring a Trailer's own record is read by the app.** Bring a Trailer keeps a page for each model
+  (the 991 Carrera S, say), and that page carries every auction of the model it has run: the
+  title, the price, the day it ended, whether the car sold, and the address of the auction's own
+  page. The site serves these pages to anyone and its robots.txt allows them, so the app reads
+  them itself (`bat.py`): no search, no model copying a table, and the same answer on every run.
+  It finds the model's page on the make's page (when one trim has a page in several generations,
+  the one holding the car's model year), keeps the last three years, takes the miles from the
+  title, and tells a manual from an automatic the way the site does (a manual's title names its
+  gears). It then opens the few auctions nearest the buyer's car, one at a time, and puts on each
+  the VIN, the miles, the gearbox, the town and the equipment the page lists. Every one of these
+  sales opens on the auction's own page, which is what a seller cannot argue with. The app asks
+  slowly on purpose: one request at a time, a second apart as the site asks, each page kept ten
+  minutes, about ten requests for a car, and a refusal ends it.
+- **Classic.com: what can and cannot be had from it.** Classic.com keeps its past prices for
+  members. On the page a browser shows, sold and ended prices are blurred and cannot be selected;
+  its market pages are refused to other readers (the app's own request gets a 403, and the app
+  does not go around a refusal); and Claude's page reader hands back a copy it saved earlier,
+  which on Nov 17, 2026 was about a year old. The app reads that old copy row by row for its
+  history (the status, price, date, miles, town, seller, and whether it was an auction or a
+  dealer's fixed price), never takes "for sale" from it, drops asking prices that ended more than
+  a year ago, reads only the market kept for the car's own body style and gearbox, and writes in
+  the summary how old the copy is. It is background now: this year's sales come from Bring a
+  Trailer's record and from the searches.
+- **A page the app cannot open can be added as a screenshot.** The Sold tab has **Add sales from a
+  screenshot of a results page**, for Cars & Bids' past auctions, another auction house or a
+  dealer's sold list: Claude reads every row from the picture in one request. Pasted text is read
+  too, with no request, and when it is Classic.com's page the app says how many sales came without
+  a price and why.
 - **An auction result and a dealer's price are told apart.** A result at a named auction on a
   known day (Bring a Trailer, Aug 22, 2026) is one auction that anyone can look up, so it
   counts. A dealer's listing that Classic.com marks sold shows what the dealer last asked, not
@@ -542,7 +545,8 @@ To bundle another model with the app, put a `.glb` in `static/models/`, add it t
 | `previews.py` | Listing pages and photos: link previews and screenshot crops |
 | `llm.py` | Claude calls: read a listing, research comps, suggest an offer, draft a message |
 | `sheet.py` | Builds the PDF and its QR codes |
-| `calc.py` | Money math, comp helpers and the direct-link check |
+| `calc.py` | Money math, comp helpers, the direct-link check, and the reading of Classic.com's and Bring a Trailer's pages |
+| `bat.py` | Asks Bring a Trailer for its own record of a model's auctions, slowly and only where its robots.txt allows |
 | `sync.py` | The shared garage: loads and saves cars in the garage store, and decides which copy of a car stays |
 | `styles.py` | The stylesheet for the Streamlit widgets |
 | `sample_deal.json` | The sample car (2020 911 Carrera S, researched Nov 14, 2026) |

@@ -200,10 +200,6 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "log": [str(line)[:200] for line in (flags.get("log") or [])][-200:],
         "sources": calc.source_counts(comps) if comps else [],
     }
-    # Classic.com's market page for this car's kind, for the buyer to open in a browser: it shows a browser this
-    # year's sales, which no page reader gets
-    markets = calc.market_pages(car, [comp.get("url") for comp in comps if comp.get("url")], limit=1)
-    market_url = markets[0] if markets else ""
 
     # ---- comps: sold first, then cars for sale now, then auctions with no sale and listings that have gone
     order = {"sold": 0, "live": 1, "high_bid": 2, "ended": 3}
@@ -287,7 +283,7 @@ def build_payload(car: dict, comps: list[dict], offer: dict, settings: dict, *, 
         "offer": {"open": offer.get("open"), "target": offer.get("target"), "walk": offer.get("walk_away")},
         "money": {"tax": settings["tax_rate"], "fees": settings["fees"], "apr": settings["apr"],
                   "down": settings["down"], "months": settings["months"]},
-        "axis": axis, "comps": cards, "case": case, "message": str(flags.get("message") or ""), "marketUrl": market_url,
+        "axis": axis, "comps": cards, "case": case, "message": str(flags.get("message") or ""),
         # what a message can honestly cite for the offer on the sheet: sales at or under it, else cars for sale near it
         "backing": (lambda price: {"offer": calc.money(price), "sales": len(calc.cite_sales(car, comps, offer=price)),
                                    "asks": len(calc.cite_asks(car, comps, price))} if price else None)(
@@ -645,7 +641,6 @@ button.opt{cursor:pointer}
 .optbox,.linkbox{width:100%;margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--ink);font:400 16px/1.4 var(--sans)}
 .optbox,.pastetext{resize:vertical}
 .pasteform .btn{margin-top:10px}
-.inlink{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
 .optrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}.optrow .btn{margin-top:0}
 .optthumb{position:relative;width:40px;height:40px;border-radius:9px;overflow:hidden;border:1px solid rgba(255,255,255,.35)}
 .optthumb img{width:100%;height:100%;object-fit:cover;display:block}
@@ -1081,15 +1076,12 @@ function create(root) {
       (kind === "sold" ? '<label class="fld"><span>Date sold</span><input class="linkbox" name="date" placeholder="Jun 3, 2026"></label>' : "") +
       `<label class="fld${kind === "sold" ? "" : " wide"}"><span>VIN</span><input class="linkbox" name="vin" autocapitalize="characters" spellcheck="false"></label>` +
       '<label class="fld wide"><span>Link</span><input class="linkbox" name="url" inputmode="url" placeholder="https://"></label><button type="submit" class="btn ghost">Add it</button></form></details>';
-    /* Classic.com shows this year's sales to a browser only, and its sold prices cannot be copied as text: the person
-       opens the page, takes a screenshot of the list, and Claude reads every row from the picture */
-    const pastePage = `<details class="byhand pastebox"${S.handOpen === "paste" ? " open" : ""}><summary>Add Classic.com's page for its newest sales</summary>` +
-      `<div class="lead-sub">Classic.com shows this year's sales to a browser and turns page readers away, so a search can miss the newest ones. ` +
-      (d.marketUrl ? `<a class="inlink" href="${esc(d.marketUrl)}" target="_blank" rel="noopener">Open its page for this car ${ARROW}</a>,` : "Open its market page for this car,") +
-      ` take a screenshot of the list of cars (a long one is fine) and add it here. Claude reads every row from the picture, sold prices included.</div>` +
+    /* a page of results the app cannot open itself: the person takes a screenshot of it and Claude reads every row */
+    const pastePage = `<details class="byhand pastebox"${S.handOpen === "paste" ? " open" : ""}><summary>Add sales from a screenshot of a results page</summary>` +
+      `<div class="lead-sub">Bring a Trailer's own record is read by the app. For a page it cannot open (Cars &amp; Bids' past auctions, another auction house, a dealer's sold list), take a screenshot of the list (a long one is fine) and add it here: Claude reads every row from the picture. Classic.com will not do: it blurs past prices unless you are a member.</div>` +
       `<input type="file" class="pagefile" accept="image/*" hidden><div class="optrow"><button type="button" class="btn ghost pagepic">${S.pageShot ? "Change the screenshot" : "Add a screenshot"}</button>` +
       `${S.pageShot ? `<span class="optthumb"><img src="${esc(S.pageShot)}" alt=""><button type="button" class="optdrop pagedrop" aria-label="Remove the screenshot">×</button></span>` : ""}</div>` +
-      `<form class="pasteform"><textarea class="linkbox pastetext" rows="2" placeholder="Or paste the page's text: cars for sale and ended listings only, since sold prices cannot be copied" aria-label="The page's text"></textarea><button type="submit" class="btn ghost">Read the page</button></form></details>`;
+      `<form class="pasteform"><textarea class="linkbox pastetext" rows="2" placeholder="Or paste the page's text" aria-label="The page's text"></textarea><button type="submit" class="btn ghost">Read the page</button></form></details>`;
     if (S.tab === "case") {
       h += `<div class="lead-line">${esc(c.headline || "")}</div>${c.sub ? `<div class="lead-sub">${esc(c.sub)}</div>` : ""}`;
       /* the offer follows the car's miles, price and history on its own; this runs it by hand, after comps change */

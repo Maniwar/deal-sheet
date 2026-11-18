@@ -8,6 +8,7 @@ API key is needed:
 | `fake_api.py` | The Anthropic API: searches, opened pages, the offer and the message. Keys ending in `oldfetch`, `nofetch`, `blockfetch`, `nocg`, `noads` and `lists1` play a key with an older page reader, none, one every site turns away, a search tool that cannot be limited to a site, and a second run with changed prices. |
 | `site.py` | Car listing pages: live, sold, redirected, blocked by robots.txt, another car's VIN, and so on. |
 | `fake_vin.py`, `fake_skfb.py` | The VIN decoder and the 3D model search. |
+| `site.py` (`/bat/...`) | Bring a Trailer: a make's page naming its model pages, a model page carrying every auction, an auction's own page. The app is pointed at it with `DEALSHEET_BAT_URL`, so no test asks the real site for anything. |
 | `fake_db.py` | The garage store (the two functions of `tools/garage_store.sql`), kept in memory. Only the `shared` and `cutshort_shared` tests start the app with it. |
 
 `shared.js` plays two devices with one key (the car appears on the second with no search, the newer copy
@@ -22,7 +23,9 @@ the model copies one row of it with no seller named, as real runs do. The app mu
 open the whole market on its own, tell an auction result from a dealer's asking price, offer a search for
 each auction's own page, and take the price from that page when its link is pasted. It then pastes the page's
 text as a browser copies it (the cars for sale are read, the sales arrive without a price and the app says so)
-and adds a screenshot of the page (the sold prices are read from the picture, in one request). `rows_test.py` checks
+and adds a screenshot of a results page (its rows are read from the picture, in one request). Before any of
+that it checks Bring a Trailer's own record: the right model page out of three generations, asked for once,
+its sales on their own pages with VIN and equipment, an automatic, a coupe and a sale from years ago left out. `rows_test.py` checks
 the reading of the page (as the page reader returns it and as a search shows it) and of an auction's page.
 The page layouts in these tests are the four seen on Nov 17, 2026: the live page's text (what a search
 result holds), the page as a browser shows it, the text a browser copies out of it (no sold prices), and the

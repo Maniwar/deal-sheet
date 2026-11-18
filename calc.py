@@ -1126,16 +1126,22 @@ def upgrade_leads(have: list[dict], found: list[dict]) -> int:
         if is_lead(new) or not own_page(new):          # a row of a market page is no page of the car's own
             continue
         for old in have:
-            if (not is_lead(old) or old["status"] != new["status"] or old["price"] != new["price"]
+            if (not (is_lead(old) or classic_market(old.get("url"))) or old["status"] != new["status"] or old["price"] != new["price"]
                     or _year_of(old["title"]) != _year_of(new["title"])):
                 continue
             a, b = date_key(old["date"]), date_key(new["date"])
             if a and b and abs(a - b) > 3:
                 continue
+            auction = BAT_NOTE in str(new.get("note") or "") or CHECKED in str(new.get("note") or "")     # the auction's own record: its words stand
+            for key in ("options", "history", "gear_seen"):
+                if new.get(key) and (auction or not old.get(key)):
+                    old[key] = new[key]
             old.update(url=new["url"], link_ok=new.get("link_ok"), vin=new.get("vin") or old.get("vin") or "",
                        date=new["date"] or old["date"], source=new["source"] or old["source"],
                        miles=new["miles"] if new.get("miles") is not None else old.get("miles"),
-                       note=re.sub(r"(?i)listed on classic\.com\.?\s*", "", old["note"]).strip())
+                       gearbox=new.get("gearbox") or old.get("gearbox") or "",
+                       title=new["title"] if auction else old["title"],
+                       note=new["note"] if auction else re.sub(r"(?i)listed on classic\.com\.?\s*", "", old["note"]).strip())
             if old.get("aside") == "lead":               # its own page has turned up: it can be checked, so it counts
                 old["use"], old["aside"] = True, ""
             count += 1
@@ -1570,6 +1576,232 @@ def settle_sale(comp: dict, result: dict) -> str:
         return f"The auction's own page agrees: {word} {money(comp['price'])}."
     return (f"The auction's own page says {word} {money(comp['price'])}, where the list had "
             f"{'a sale at' if was[0] == 'sold' else 'a high bid of'} {money(was[1])}. The card now shows what the page says.")
+
+
+# ---------------------------------------------------------------- Bring a Trailer's own results, read by the app
+#
+# Bring a Trailer keeps a page for each model (the 991 Carrera S, say), and that page carries every auction of the
+# model it has run: the title, the price, the day it ended, whether it sold, and the address of the auction's own
+# page. It serves these pages to anyone, and its robots.txt allows them. So for the cars it sells, the app reads
+# the auction house's own record: no search, no model copying a table, and every sale opens on the page a
+# seller cannot argue with. The functions here only read text; bat.py does the asking.
+
+_BAT_MODEL = re.compile(r'"title":\s*"([^"]{3,120})",\s*"url":\s*"([^"]+?\\?/[\w-]+\\?/[\w-]+\\?/)"')
+_BAT_DATA = re.compile(r"var auctionsCompletedInitialData\s*=\s*(\{.*?\});\s*\n", re.S)
+_BAT_NOT_CARS = {"parts", "automobilia", "replica", "wheels", "memorabilia", "literature", "engine", "engines", "tribute", "projects"}
+
+
+def make_slug(make) -> str:
+    """A make as Bring a Trailer writes it in an address: 'mercedes-benz', 'land-rover'."""
+    return re.sub(r"[^a-z0-9]+", "-", str(make or "").lower()).strip("-")
+
+
+def _plain_words(text) -> list[str]:
+    words = re.sub(r"[^a-z0-9.+ ]", " ", str(text or "").lower().replace("-", " "))
+    return re.sub(r"\b(\d) s\b", r"\1s", words).split()
+
+
+def bat_models(page: str) -> list[tuple[str, str]]:
+    """Every model page a make's page on Bring a Trailer names: (the model's title, the page's address)."""
+    import html as _html
+    found, seen = [], set()
+    for title, url in _BAT_MODEL.findall(_html.unescape(str(page or ""))):
+        url = url.replace("\\/", "/")
+        if url not in seen:
+            seen.add(url)
+            found.append((title.replace("\\/", "/"), url))
+    return found
+
+
+def bat_pick(car: dict, models: list[tuple[str, str]], limit: int = 4) -> list[tuple[str, str, bool]]:
+    """The model pages that may be this car's, the likeliest first: (title, address, whether the page is for the
+    car's own trim). A page has to name every word of the car's model; one that names its trim as well comes
+    before one that does not, and a page with fewer other words before one with more. Pages left equal (the
+    same trim in four generations) are all returned: only their sales tell which one holds the car's year."""
+    make, model = set(_plain_words(car.get("make"))), _plain_words(car.get("model"))
+    trim = trim_key(car.get("trim"), car)
+    if not model:
+        return []
+    scored = []
+    for title, url in models:
+        words = [word for word in _plain_words(title) if word not in make]
+        if _BAT_NOT_CARS & set(words) or not all(word in words for word in model):
+            continue
+        own = bool(trim) and all(word in words for word in trim)
+        spare = sum(word not in model and word not in trim for word in words)
+        scored.append((0 if own else 1, spare, title, url))
+    scored.sort()
+    if not scored:
+        return []
+    best = scored[0][:2]
+    return [(title, url, rank == 0) for rank, spare, title, url in scored if (rank, spare) == best][:limit]
+
+
+def bat_results(page: str) -> list[dict]:
+    """Every finished auction on a Bring a Trailer model page: {"title", "price", "day" (a day number), "sold",
+    "url", "words" (the listing's first lines, when the page gives them)}. The page holds the whole record for
+    its price chart, and the newest two dozen once more with their descriptions."""
+    found = _BAT_DATA.search(str(page or ""))
+    if not found:
+        return []
+    try:
+        import json as _json
+        data = _json.loads(found.group(1))
+    except ValueError:
+        return []
+    stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+    words = {str(item.get("url") or ""): re.sub(r"<[^>]+>", " ", str(item.get("excerpt") or "")) for item in data.get("items") or [] if isinstance(item, dict)}
+    rows, seen = [], set()
+    for sold, group in ((True, stats.get("sold") or []), (False, stats.get("unsold") or [])):
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            price, stamp, url = to_int(item.get("amount")), to_int(item.get("timestamp")), str(item.get("url") or "")
+            if not price or not stamp or not url or url in seen:
+                continue
+            seen.add(url)
+            rows.append({"title": str(item.get("title") or "").strip(), "price": price, "sold": sold, "url": url,
+                         "day": dt.datetime.fromtimestamp(stamp, dt.timezone.utc).date().toordinal(), "words": words.get(url, "")})
+    if not rows:                                       # a page with no chart: the newest auctions only
+        for item in data.get("items") or []:
+            text = re.sub(r"<[^>]+>", " ", str(item.get("sold_text") or "")) if isinstance(item, dict) else ""
+            price, stamp = to_int(item.get("current_bid")) if isinstance(item, dict) else None, to_int(item.get("timestamp_end")) if isinstance(item, dict) else None
+            if price and stamp and item.get("url") and re.search(r"(?i)sold for|bid to", text):
+                rows.append({"title": str(item.get("title") or "").strip(), "price": price, "sold": bool(re.search(r"(?i)sold for", text)), "url": str(item["url"]),
+                             "day": dt.datetime.fromtimestamp(stamp, dt.timezone.utc).date().toordinal(), "words": words.get(str(item["url"]), "")})
+    return sorted(rows, key=lambda row: -row["day"])
+
+
+_BAT_GEARS = re.compile(r"\b\d{1,2}-Speed\b", re.I)
+BAT_SOURCE = "Bring a Trailer"
+BAT_NOTE = "From Bring a Trailer's own record of its auctions."
+
+
+def bat_comps(rows: list[dict], years: float = 3.0, today: int | None = None) -> list[dict]:
+    """Bring a Trailer's finished auctions as comps, the newest first: each opens on the auction's own page.
+
+    The miles come from the title ('10k-Mile 2014 ...'), which is then cut back to the car. Bring a Trailer
+    names a manual's gears in the title ('7-Speed'); when some titles on a page do and this one does not, the
+    car is the automatic, and the note says that this is read from the title. Auctions more than `years`
+    old are left out, unless that leaves fewer than three sales.
+    """
+    today = today or dt.date.today().toordinal()
+    recent = [row for row in rows if today - row["day"] <= years * 365]
+    if sum(row["sold"] for row in recent) < 3:
+        recent = rows
+    names_gears = any(_BAT_GEARS.search(row["title"]) for row in rows)
+    out = []
+    for row in recent:
+        title = row["title"]
+        year = re.search(r"\b(?:19|20)\d\d\b", title)
+        lead, car = (title[:year.start()], title[year.start():]) if year else ("", title)
+        miles = re.search(r"([\d,.]+)\s?(k)?-(Mile|Kilometer)", lead, re.I)
+        count = None
+        if miles:
+            count = float(miles.group(1).replace(",", "")) * (1000 if miles.group(2) else 1)
+            count = int(round(count * 0.621371)) if miles.group(3).lower().startswith("k") else int(round(count))
+        gearbox = gearbox_in_text(f"{title}. {row.get('words') or ''}")
+        note = BAT_NOTE
+        if not gearbox and _BAT_GEARS.search(title):
+            gearbox = "manual"
+        elif not gearbox and names_gears:
+            gearbox, note = "automatic", f"{BAT_NOTE} Taken for an automatic: its title names no gears, as a manual's does there."
+        when = dt.date.fromordinal(row["day"])
+        out.append({"status": "sold" if row["sold"] else "high_bid", "title": car.strip(), "price": row["price"], "miles": count,
+                    "date": f"{when.strftime('%b')} {when.day}, {when.year}", "source": BAT_SOURCE, "url": row["url"], "gearbox": gearbox,
+                    "note": note if row["sold"] else f"{note} Not sold: the price is the highest bid.", "link_ok": True})
+    return out
+
+
+def bat_year_fit(car: dict, rows: list[dict]) -> int:
+    """How many auctions on a model page are of the car's own model year: which of several generations' pages is the car's."""
+    year = str(car.get("year") or "").strip()
+    return sum(_year_of(row["title"]) == year for row in rows) if year else len(rows)
+
+
+_BAT_ITEM = re.compile(r"<li[^>]*>(.*?)</li>", re.S | re.I)
+
+
+def bat_listing(page: str) -> dict:
+    """What an auction's own page on Bring a Trailer says about the car: {"vin", "miles", "place", "gearbox",
+    "options" (its equipment, as the page lists it), "history", "dealer" (sold by a dealer)}. Each only when found."""
+    import html as _html
+    page = str(page or "")
+    at = page.find('class="essentials"')
+    if at < 0:
+        return {}
+    block = page[at:at + 9000]
+    end = re.search(r"Private Party or Dealer|Lot\s*</|BaT History", block)
+    seller = _html.unescape(_TAG_RE.sub(" ", block[end.start():end.start() + 200])) if end else ""
+    block = block[:end.start()] if end else block
+    facts: dict = {}
+    place = re.search(r"Location</strong>\s*:?\s*(?:<[^>]+>\s*)*([^<]{3,80})", block)
+    if place:
+        facts["place"] = re.sub(r"\s+\d{5}(?:-\d{4})?$", "", _html.unescape(place.group(1)).strip())
+    options = []
+    for raw in _BAT_ITEM.findall(block):
+        line = " ".join(_html.unescape(_TAG_RE.sub(" ", raw)).split())
+        if not line:
+            continue
+        if re.match(r"(?i)chassis", line):
+            facts["vin"] = clean_vin(line.split(":", 1)[-1]) or find_vin(line)
+            continue
+        miles = re.match(r"(?i)(?:~|approximately )?([\d,.]+)\s?(k)?\s+(?:indicated |shown |documented |original |tmu )?(miles|kilometers)\b", line)
+        if miles and "miles" not in facts:
+            count = float(miles.group(1).replace(",", "")) * (1000 if miles.group(2) else 1)
+            facts["miles"] = int(round(count * 0.621371)) if miles.group(3).lower().startswith("k") else int(round(count))
+            continue
+        if re.search(r"(?i)carfax|autocheck|accident|damage|title\b", line) and "history" not in facts:
+            facts["history"] = line
+            continue
+        if not facts.get("gearbox") and gearbox_kind(line) and re.search(r"(?i)transaxle|transmission|gearbox|pdk|tiptronic|dct|manual|automatic", line):
+            facts["gearbox"] = gearbox_kind(line)
+        options.append(line)
+    if options:
+        facts["options"] = ", ".join(options)[:600]
+    if re.search(r"(?i):\s*Dealer", seller):
+        facts["dealer"] = True
+    return {key: value for key, value in facts.items() if value}
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def bat_closest(car: dict, comps: list[dict], limit: int = 6) -> list[dict]:
+    """The Bring a Trailer auctions worth opening for their VIN and equipment: the ones of this car's body style
+    and gearbox as far as their titles say, of a model year near the car's, the newest first. Ones already
+    opened are not opened again."""
+    year = to_int(car.get("year"))
+    hosts = ("bringatrailer.com",)
+
+    def near(comp: dict) -> bool:
+        theirs = to_int(_year_of(comp["title"]))
+        return not year or not theirs or abs(year - theirs) <= 3
+
+    todo = [comp for comp in comps if comp["status"] != "asking" and comp.get("use") and source_name(comp) == BAT_SOURCE and own_page(comp)
+            and (host_of(comp["url"]).endswith(hosts) or BAT_NOTE in str(comp.get("note") or "")) and CHECKED not in str(comp.get("note") or "")
+            and not other_body(car, comp) and not other_gearbox(car, comp) and near(comp)]
+    return sorted(todo, key=lambda comp: (comp["status"] != "sold", -date_key(plain_date(comp.get("date")))))[:limit]
+
+
+def bat_fill(comp: dict, facts: dict) -> None:
+    """Put what an auction's own page says about the car on its comp, and mark the comp as checked there."""
+    for key in ("vin", "options", "history"):
+        if facts.get(key) and not comp.get(key):
+            comp[key] = facts[key]
+    if facts.get("miles") is not None:
+        comp["miles"] = facts["miles"]                 # the page's own figure, not the title's rounding
+    if facts.get("gearbox"):
+        comp["gearbox"], comp["gear_seen"] = facts["gearbox"], "page"
+    word = "sold for" if comp["status"] == "sold" else "bid to"
+    bits = [f"{CHECKED}: {word} {money(comp['price'])} on {comp['date']}."]
+    if facts.get("place"):
+        bits.append(facts["place"] + ".")
+    if facts.get("dealer"):
+        bits.append("Sold by a dealer.")
+    if comp["status"] != "sold":
+        bits.append("Not sold: the price is the highest bid.")
+    comp["note"], comp["link_ok"] = " ".join(bits), True
 
 
 def loose_trim(car: dict) -> bool:

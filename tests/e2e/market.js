@@ -12,6 +12,8 @@ const fs = require('fs');
   p.on('pageerror', e => errs.push(String(e).slice(0, 240)));
   const log = (k, v) => console.log(k + ':', JSON.stringify(v));
   const calls = () => fs.readFileSync('/tmp/e2e/calls.log', 'utf8');
+  const asked = (what) => { try { return (fs.readFileSync('/tmp/e2e/site.log', 'utf8').match(what) || []).length; } catch (e) { return 0; } };
+  const askedBefore = [asked(/\/bat\/porsche\/991-911\//g), asked(/\/bat\/porsche\/99[27]-911\//g)];      // the stand-in site's log runs on from earlier tests
   const toast = () => p.locator('.toast').evaluate((e) => (e.hidden ? '' : e.textContent.replace(/\s+/g, ' '))).catch(() => '');
   const cards = () => p.locator('.sheet-body .card').evaluateAll((els) => els.map((e) => e.innerText.replace(/\s+/g, ' ')).filter(Boolean));
   await p.goto('http://localhost:8766/', { waitUntil: 'domcontentloaded', timeout: 90000 }); await p.waitForTimeout(18000);
@@ -41,16 +43,27 @@ const fs = require('fs');
   // 2. what the app did, in the step log and in the requests
   const text = calls();
   const two = { wholeMarketOpened: /market page read by the app: tokens=24000 whole=True/.test(text), pcarmarketAsked: /only=\['pcarmarket\.com'\]/.test(text),
-    find: await p.locator('.sheet-body .card', { hasText: '$108,000' }).locator('a.c-find').first().evaluate((a) => [a.textContent.trim().slice(0, 40), a.href]).catch(() => null) };
+    find: await p.locator('.sheet-body .card', { hasText: '$110,000' }).locator('a.c-find').first().evaluate((a) => [a.textContent.trim().slice(0, 40), a.href]).catch(() => null) };
   log('2 the app read the page', two);
   if (!two.wholeMarketOpened) wrong.push('2: the app did not open the whole market page itself');
   if (!two.pcarmarketAsked) wrong.push('2: PCARMARKET was not searched for a Porsche');
-  if (!two.find || !/Find this auction on Bring a Trailer/.test(two.find[0]) || !/site%3Abringatrailer\.com/.test(two.find[1]) || !/%24108%2C000/.test(two.find[1])) wrong.push('2: no search for the auction\'s own page on the $108,000 card');
+  if (!two.find || !/Find this auction on Cars & Bids/.test(two.find[0]) || !/site%3Acarsandbids\.com/.test(two.find[1]) || !/%24110%2C000/.test(two.find[1])) wrong.push('2: no search for the auction\'s own page on the $110,000 card');
+  // 2b. Bring a Trailer's own record: its sales open on the auction's own page, and the nearest were opened for VIN and equipment
+  const bat = sold.find((t) => t.includes('$108,000')) || '';
+  const batLink = await p.locator('.sheet-body .card', { hasText: '$108,000' }).locator('a.c-link').first().getAttribute('href').catch(() => '');
+  const record = { card: bat.slice(0, 420), link: batLink, automaticLeftOut: !sold.some((t) => t.includes('$85,900')), coupeLeftOut: !sold.some((t) => /Coupe/.test(t)), oldLeftOut: !sold.some((t) => t.includes('$51,000')),
+    askedOnce: asked(/\/bat\/porsche\/991-911\//g) - askedBefore[0], otherGenerations: asked(/\/bat\/porsche\/99[27]-911\//g) - askedBefore[1] };
+  log('2b Bring a Trailer record', record);
+  if (!/WP0CB2A96ES154062/.test(bat) || !/Checked on the auction's own page: sold for \$108,000 on Aug 22, 2026\. Palm Springs, California/.test(bat) || !/Sport Chrono Package/.test(bat)) wrong.push('2b: the $108,000 sale does not carry the VIN, the town and the equipment from its own page');
+  if (!/\/bat\/listing\/2014-porsche-911-carrera-s-cabriolet-20\/$/.test(batLink || '')) wrong.push('2b: the $108,000 sale does not open on the auction\'s own page');
+  if (!record.automaticLeftOut || !record.coupeLeftOut || !record.oldLeftOut) wrong.push('2b: an automatic, a coupe or a sale from years ago was kept');
+  if (record.askedOnce !== 1) wrong.push('2b: the model page was asked for ' + record.askedOnce + ' times, not once');
   await p.locator('.sheet-tabs .tab[data-tab=case]').click(); await p.waitForTimeout(1200);
   const caseText = (await p.locator('.sheet-body').innerText()).replace(/\s+/g, ' ');
   const said = (caseText.match(/The app read Classic\.com's market page itself[^.]*\./) || [''])[0];
   log('3 summary', said);
   if (!/7 cars, 5 of them sold \(4 at auction\)/.test(said)) wrong.push('3: the summary does not say what the app read off the page');
+  if (!/Bring a Trailer's own record of this model was read directly: 5 recent auctions \(4 sold\)/.test(caseText)) wrong.push('3: the summary does not say Bring a Trailer\'s record was read');
 
   // 4. the no-sale at $86,000: paste the auction's own link, and the card takes what that page says
   await p.locator('.sheet-tabs .tab[data-tab=comps]').click(); await p.waitForTimeout(1200);
@@ -73,16 +86,14 @@ const fs = require('fs');
     'Palm Springs, California, USA', 'Sold', 'Aug 22, 2026', '2 months ago', 'Auction', '', 'View Source', 'lock', '',
     'bookmark_border', '2013 Porsche 911 Carrera S', 'Original & Highly Original', '6865 mi31k mi', 'Manual transmissionManual', 'LHD steeringLHD', '', 'Austin, Texas, USA', 'Sold', 'Oct 2, 2026', '1 month ago', 'Auction'].join('\n');
   const box = p.locator('.sheet-body .pastebox'); await box.locator('summary').click(); await p.waitForTimeout(500);
-  const link = await box.locator('a.inlink').getAttribute('href').catch(() => '');
   await box.locator('textarea').fill(copied); await box.locator('.pasteform button').click();
   let t5 = ''; for (let i = 0; i < 80; i++) { await p.waitForTimeout(400); t5 = await toast(); if (/^Read /.test(t5)) break; }
   await p.waitForTimeout(2500);
   await p.locator('.sheet-tabs .tab[data-tab=sale]').click(); await p.waitForTimeout(1200);
   const forSale = (await cards()).find((c) => c.includes('$76,029')) || '';
-  const five = { link, toast: t5.slice(0, 330), forSale: forSale.slice(0, 160), requestsMade: (calls().match(/^POST /gm) || []).length - requests };
+  const five = { toast: t5.slice(0, 330), forSale: forSale.slice(0, 160), requestsMade: (calls().match(/^POST /gm) || []).length - requests };
   log('5 pasted the text copied from a browser', five);
-  if (!/cabriolet-manual\/$/.test(link || '')) wrong.push('5: the box does not link to the market page for this car');
-  if (!/Read 1 car off the page\. New here: 1 for sale now\./.test(t5) || !/2 sales on the page came without a price/.test(t5) || !/Add a screenshot/.test(t5)) wrong.push('5: the toast does not say what was read and that the sold prices were missing');
+  if (!/Read 1 car off the page\. New here: 1 for sale now\./.test(t5) || !/keeps its past prices for members, so 2 sales on the page came without a price/.test(t5)) wrong.push('5: the toast does not say what was read and that the sold prices were missing');
   if (!/Desert Private Collection/.test(forSale) || !/89,000 mi/.test(forSale)) wrong.push('5: the car for sale is not there with its seller and miles');
   if (five.requestsMade !== 0) wrong.push('5: reading pasted text made a request to the API');
 

@@ -1287,8 +1287,8 @@ def _market_rows(client, model: str, car: dict, results: list[dict], known=None,
     if stale:
         when = dt.date.fromordinal(stale)
         late = (f"Classic.com turns page readers away, so the page came from an old copy: its newest row is from "
-                f"{when.strftime('%b')} {when.day}, {when.year}. Sales after that come from the search results only. To get them all, "
-                "open the page in your browser and paste it in the Sold tab.")
+                f"{when.strftime('%b')} {when.day}, {when.year}. Sales after that come from Bring a Trailer's own record, which the app "
+                "reads directly, and from the search results.")
         out["note"] = f"{out['note']} {late}".strip()
         if progress:
             progress.say(late)
