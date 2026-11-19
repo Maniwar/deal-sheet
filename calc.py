@@ -1051,10 +1051,7 @@ def tidy_comps(car: dict, comps: list[dict]) -> tuple[list[dict], dict]:
         if rank(comp) < rank(kept[at[key]]):
             kept[at[key]] = comp
     def stray(comp: dict) -> bool:                 # read off a model's page that holds other trims and generations too
-        if comp["status"] == "asking" or source_name(comp) != BAT_SOURCE or not own_page(comp) or comp.get("aside") == "mine":
-            return False
-        note = str(comp.get("note") or "")
-        return (BAT_NOTE in note or CHECKED in note) and not bat_fits(car, comp.get("title"))
+        return bat_row(comp) and not bat_fits(car, comp.get("title"))
 
     strays = sum(stray(comp) for comp in kept)
     kept = [comp for comp in kept if not stray(comp)]
@@ -1785,6 +1782,29 @@ def bat_fits(car: dict, title, trims: set | None = None) -> bool:
     if want:
         return bool(have) and _same_trim(want, have)
     return not (set(have) & (trims or set()))
+
+
+def bat_row(comp: dict) -> bool:
+    """An auction that came off Bring a Trailer's page for a whole model, which holds every trim and generation of
+    it: the rows a rule or a second look may take out again. One the buyer chose to keep is not such a row."""
+    if comp["status"] == "asking" or source_name(comp) != BAT_SOURCE or not own_page(comp) or comp.get("aside") == "mine":
+        return False
+    note = str(comp.get("note") or "")
+    return (BAT_NOTE in note or CHECKED in note) and str(comp.get("source") or "") != "Added by you"
+
+
+def kind_verdicts(data, count: int) -> dict[int, str]:
+    """Claude's second look at a list of auctions, as {position in the list: what the auction is instead} for the
+    ones it is sure are another kind of car. Everything else leaves the auction in: a yes, an unsure, a number
+    that is not on the list, and a no that does not say what the auction is."""
+    off = {}
+    for row in (data.get("rows") if isinstance(data, dict) else None) or []:
+        if not isinstance(row, dict):
+            continue
+        n, why = to_int(row.get("n")), " ".join(str(row.get("why") or "").split()).rstrip(". ")
+        if str(row.get("same") or "").strip().lower() == "no" and n and 1 <= n <= count and why:
+            off[n - 1] = why[:90]
+    return off
 
 
 def bat_comps(rows: list[dict], years: float = 3.0, today: int | None = None, car: dict | None = None) -> list[dict]:

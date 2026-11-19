@@ -622,6 +622,29 @@ cases += [
     (bat.sales({"year": 2020, "make": "Lotus", "model": "Evora", "trim": "GT"}, None)["comps"], []),      # no page for the make
 ]
 
+# Claude's second look at the auctions the title rules kept: only a plain no with a reason takes one out
+import llm
+answer = {"rows": [{"n": 1, "same": "no", "why": "an M2 Competition."}, {"n": 2, "same": "yes"}, {"n": 3, "same": "unsure", "why": "no trim named"},
+                   {"n": 4, "same": "no"}, {"n": 9, "same": "no", "why": "not on the list"}, {"n": "5", "same": "No", "why": " the next generation  (G87) "}, "junk"]}
+kept_row = calc.clean_comps([{"status": "sold", "title": "2020 BMW M2 CS 6-Speed", "price": 78000, "source": "Bring a Trailer", "date": "Jun 23, 2026",
+                              "url": "https://bringatrailer.com/listing/2020-bmw-m2-cs-69/", "note": calc.BAT_NOTE}])[0]
+undated = calc.clean_comps([{"status": "sold", "title": "2020 BMW M2 CS 6-Speed", "price": 92000, "source": "Bring a Trailer",
+                             "url": "https://www.classic.com/a/bring-a-trailer-auctions-JknXEWB/lots/2020-bmw-m2-cs-6-speed-4AjAo3n/", "note": "Auction result."}])[0]
+asking = calc.clean_comps([{"status": "asking", "title": "2020 BMW M2 CS", "price": 71800, "source": "Toy Barn", "url": "https://example.com/cs"}])[0]
+block = llm._comps_block([kept_row, undated, asking])
+cases += [
+    (calc.kind_verdicts(answer, 5), {0: "an M2 Competition", 4: "the next generation (G87)"}),
+    (calc.kind_verdicts(None, 5), {}), (calc.kind_verdicts({"rows": "no"}, 5), {}), (calc.kind_verdicts({}, 5), {}),
+    (calc.bat_row(kept_row), True),                                       # off the model's page: the second look may ask about it
+    (calc.bat_row(undated), False),                                       # a copy on another site is not
+    (calc.bat_row({**kept_row, "aside": "mine"}), False),                 # one the buyer chose to keep is never asked about
+    (calc.bat_row({**kept_row, "status": "asking"}), False),
+    ("Jun 23, 2026" in block.splitlines()[0] and "date not known" not in block.splitlines()[0], True),
+    ("date not known" in block.splitlines()[1], True),                    # a sale with no date says so, and the offer treats it as old
+    ("date not known" in block.splitlines()[2], False),                   # a car for sale has no sale date to miss
+    (llm.same_kind(None, "m", CS, []), ({}, {})),                         # nothing to look at: nothing asked
+]
+
 bad = [(i, got, want) for i, (got, want) in enumerate(cases) if got != want]
 for row in bad:
     print("FAILED", row)

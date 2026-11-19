@@ -135,6 +135,19 @@ what that car has been selling for and gives you a typical sale price, the comps
   car; a 2026 M2 CS is another generation). For a car with no trim, the title must not name one
   of the page's trims. Auctions saved before this rule are removed when the car is opened. The
   first version let a title that named no trim through, which put plain M2s in an M2 CS's list.
+- **Claude then takes a second look at what the title rules kept.** Rules read words; they do
+  not know that a 2017 Carrera S is the turbocharged car that replaced the 2014 one, or that a
+  Clubsport is a race car. One small request lists the kept auctions (title, miles, equipment)
+  beside the car and asks, for each, whether it is the same trim, generation and body. Only a
+  plain no with a reason takes an auction out; a yes, an unsure or a muddled answer leaves it
+  in, and so does any trouble asking. Price, miles, colour, options and the gearbox are not its
+  business: the other rules and the offer weigh those. Each auction left out is named in the
+  steps and in the summary with what it is instead. **Search for more sales** gives the same
+  look to Bring a Trailer auctions the car already holds, except any the buyer chose to keep.
+  The cost is counted with the search's tokens.
+- **A sale with no date is treated as an old one.** A sale copied from a list sometimes comes
+  without its date. The offer is told so ("date not known") and to use it as background, never
+  as the basis of a number: a 2023 price read as current had been lifting an M2 CS's offer.
 - **A model's page often arrives with its newest two dozen auctions only.** The whole record is
   there at some hours and not at others. The app asks up to three times a few seconds apart,
   keeps a whole record for a day once it has read one, adds the newest auctions to it, and says

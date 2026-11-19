@@ -403,6 +403,15 @@ class H(BaseHTTPRequestHandler):
         if names == ["record_comps"]:
             return self.send(msg([tool("record_comps", {"summary": "A pasted market page.", "comps": [
                 {"status": "high_bid", "title": "2021 Porsche 718 Cayman GTS 4.0", "price": 81000, "miles": 20000, "date": "Jun 25, 2025", "photo_box": [0.05, 0.5, 0.95, 0.8]}]})]))
+        if names == ["record_same_kind"]:
+            text0 = " ".join(b.get("text", "") for b in body["messages"][0]["content"] if b.get("type") == "text")
+            listed = __import__("re").findall(r"(?m)^(\d+)\. ([^|\n]+)", text0.split("Auctions:")[-1])
+            rows = [{"n": int(n), "same": "no", "why": "the later 991.2, with the turbocharged engine."} if "2017" in title
+                    else {"n": int(n), "same": "unsure" if "2015" in title else "yes"} for n, title in listed]
+            rows.append({"n": 99, "same": "no", "why": "a number that is not on the list"})
+            LOG.write(f"  second look: auctions={len(listed)} effort={effort} car_named={'Car: 2014 Porsche 911' in text0} "
+                      f"rules={'Never answer no over price' in text0} no={[r['n'] for r in rows if r['same'] == 'no']}\n"); LOG.flush()
+            return self.send(msg([tool("record_same_kind", {"rows": rows})]))
         if names == ["record_offer"]:
             state["offer_calls"] += 1
             LOG.write(f"  offer: no_listing_note={'no listing and no asking price' in body['messages'][0]['content'][0]['text']}\n"); LOG.flush()

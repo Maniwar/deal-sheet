@@ -29,7 +29,7 @@ from calc import (label_market_copy, rows_newest, trim_key, classic_market, clas
                   kind_words, cite_asks, AD_SITES, LISTING_SITES, MIRROR_SITES, READ_LIVE, SITE_NAMES, own_page, ad_site, clean_zip, craigslist_search, car_facts, car_title, cite_sales, clean_comps, clean_vin, ease_trim_mark, find_vin, gearbox_kind,
                   host_of, offer_basis, plain_date,
                   is_list_page, is_mirror, link_kind, link_pages, listing_site, loose_trim, mark_other_trim, merge_comps, money, normalize_url,
-                  to_int)
+                  to_int, kind_verdicts)
 
 MODELS = {                                   # the first one is the default
     "Haiku 5.5 (fastest)": "claude-haiku-5-5",
@@ -450,8 +450,9 @@ def _again(run, progress: Progress | None, label: str):
         return run()
 
 
-def _call_tool(client, model: str, tool: dict, content, *, max_tokens: int, effort: str, problem: str) -> dict:
-    """Ask for one call of `tool` and return its input.
+def _call_tool(client, model: str, tool: dict, content, *, max_tokens: int, effort: str, problem: str,
+               used: dict | None = None) -> dict:
+    """Ask for one call of `tool` and return its input. `used`, when given, takes the tokens the call cost.
 
     The tool choice stays automatic (the newer models reject a forced one), so the
     prompt asks for the call. A reply without it is asked again once, more firmly.
@@ -464,6 +465,10 @@ def _call_tool(client, model: str, tool: dict, content, *, max_tokens: int, effo
             ask += " Your last reply did not call it. Do not reply in text."
         response = _create(client, effort=effort, model=model, max_tokens=max_tokens, tools=[tool],
                            messages=[{"role": "user", "content": blocks + [{"type": "text", "text": ask}]}])
+        usage = _field(response, "usage")
+        if used is not None and usage is not None:
+            for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"):
+                used[key] = int(used.get(key) or 0) + int(_field(usage, key) or 0)
         data = _tool_input(response, name)
         if isinstance(data, dict):
             return data
@@ -504,6 +509,8 @@ def _comps_block(comps: list[dict]) -> str:
             bits.append(f"{comp['miles']:,} mi")
         if comp.get("date"):
             bits.append(comp["date"])
+        elif comp["status"] != "asking":
+            bits.append("date not known")
         if comp.get("source"):
             bits.append(comp["source"])
         if comp.get("gearbox"):
@@ -1789,6 +1796,75 @@ def research_for_sale(client, model: str, car: dict, max_searches: int = 6, max_
 
 # ---------- 3. suggest an offer ----------
 
+# ---------- a second look at auctions the title rules kept ----------
+# An auction site keeps one page for every version of a model, and rules that read titles cannot know that a
+# 2017 Carrera S is the turbocharged car that replaced the 2014 one, or that a Clubsport is a race car. Claude can.
+
+KIND_TOOL = {
+    "name": "record_same_kind",
+    "description": "Record, for each numbered auction, whether it is the same kind of car as the buyer's car.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"rows": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "description": "The auction's number in the list."},
+                "same": {"type": "string", "enum": ["yes", "no", "unsure"]},
+                "why": {"type": "string", "description": "For a no only: what the auction is instead, in a few words that "
+                                                           "follow 'it is', such as 'an M2 Competition' or 'a set of wheels'."}},
+            "required": ["n", "same"]}}},
+        "required": ["rows"],
+    },
+}
+KIND_ROWS = 80                                 # auctions looked at in one call: titles are short, so this is a small one
+
+
+def same_kind(client, model: str, car: dict, comps: list[dict]) -> tuple[dict[int, str], dict]:
+    """A second look, by Claude, at auctions the title rules kept as the car's own kind.
+
+    Returns ({position in comps: what the auction is instead}, the tokens it cost): only the ones Claude is sure
+    are another trim, generation or body, or not a car at all. Price, miles, colour, options and the gearbox are
+    not its business here: the other rules and the offer weigh those."""
+    rows = comps[:KIND_ROWS]
+    if not rows:
+        return {}, {}
+    lines = []
+    for index, comp in enumerate(rows, start=1):
+        bits = [f"{index}. {comp['title']}"]
+        if comp.get("miles"):
+            bits.append(f"{comp['miles']:,} mi")
+        if comp.get("options"):
+            bits.append("equipment: " + str(comp["options"])[:240])
+        lines.append(" | ".join(bits))
+    trims = ("- another trim or edition (a base car, a Competition and a CS are three different cars; so are a "
+             "Carrera, a Carrera S and a GTS)\n")
+    if loose_trim(car):
+        trims = ("- another version of the model. The buyer's car names no version, so only an auction whose title "
+                 "names one (a GT, a Sport, an S, a Competition and the like) is another version\n")
+    prompt = (
+        "A buyer is pricing a used car against past auctions. The auctions below come from one auction site's "
+        "page for the model, which holds every version of it: other trims, other generations, other bodies, race "
+        "cars and parts. Rules that read only the titles kept these as the same kind of car as the buyer's. Check "
+        "each one with what you know about this model.\n\n"
+        f"{_car_block(car)}\n\nAuctions:\n" + "\n".join(lines) + "\n\n"
+        "Call record_same_kind with one row for each auction.\n"
+        "Answer no only when the auction is plainly a different kind of car:\n"
+        + trims +
+        "- another generation of the model, or a facelift of the same generation that changed the engine, even "
+        "when the trim name is the same. Go by the model years of each generation\n"
+        "- another body style\n"
+        "- not a whole road car: wheels, an engine, a part, a race or track-only car, a shell or a project\n"
+        "Answer yes when the title and equipment fit the buyer's car, and unsure when they do not say enough. "
+        "Never answer no over price, miles, colour, options, condition, modifications, the seller or the "
+        "transmission: those are weighed elsewhere. For each no, say in a few words what the auction is instead, "
+        "worded to follow 'it is'."
+    )
+    used: dict = {}
+    data = _call_tool(client, model, KIND_TOOL, prompt, max_tokens=6000, effort="low",
+                      problem="Claude did not answer the check of the auctions.", used=used)
+    return kind_verdicts(data, len(rows)), used
+
+
 OFFER_TOOL = {
     "name": "record_offer",
     "description": "Record an offer plan for the buyer.",
@@ -1833,7 +1909,8 @@ def suggest_offer(client, model: str, car: dict, comps: list[dict]) -> dict:
         "Call record_offer.\n"
         "Method: weight completed sales most, high bids as a floor signal, asking prices least. "
         "Recent sales count for more than old ones: a sale more than about two years old shows where the market "
-        "was, not where it is.\n"
+        "was, not where it is. A sale marked 'date not known' cannot be shown to be recent: treat it as an old "
+        "one, as background, and never as the basis of a number.\n"
         "Prices move. When the sales of the last twelve months sit clearly above or below the older ones, the market "
         "has moved: price the car from the recent sales, say so in a reason, and treat an older sale as background, "
         "not as a basis. Never set a recent sale aside because it is far from older ones.\n"

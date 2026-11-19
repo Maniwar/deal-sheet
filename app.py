@@ -519,15 +519,48 @@ def pictured_market(car: dict, have: list[dict], shots: list, text: str, client,
     return add_market_rows(car, have, found)
 
 
-def house_sales(car: dict, say=None) -> tuple[list[dict], str]:
+def house_sales(car: dict, say=None, reader=None, spent: dict | None = None) -> tuple[list[dict], str]:
     """Bring a Trailer's own record of this car's model, as comps: (the comps, a line for the summary). Only the
-    auctions of cars like this one come back: the same trim, a model year within three of the car's.
-    Nothing here can stop a search: any trouble reading the site just means no comps from it."""
+    auctions of cars like this one come back: the same trim, a model year within three of the car's, and, with
+    `reader` (client, model), the ones Claude's second look agrees are the same kind of car. `spent` takes what
+    that look cost. Nothing here can stop a search: any trouble reading the site just means no comps from it."""
     try:
         out = bat.sales(car, say)
     except Exception:
         return [], ""
-    return calc.clean_comps(out["comps"]), out["note"]
+    comps, line = same_kind_only(car, calc.clean_comps(out["comps"]), reader, say, spent)
+    return comps, f"{out['note']} {line}".strip()
+
+
+def same_kind_only(car: dict, comps: list[dict], reader=None, say=None, spent: dict | None = None) -> tuple[list[dict], str]:
+    """Claude's check of the auctions the title rules kept: is each one really this car's trim, generation and
+    body? The rules read titles; Claude knows the model. Returns (the comps that stay, a line for the summary).
+    Each one left out is named through `say`. A car the buyer added or chose to keep is never asked about, and
+    trouble asking leaves every comp where it was."""
+    asked = [comp for comp in comps if comp.get("aside") != "mine" and str(comp.get("source") or "") != "Added by you"]
+    if not (reader and reader[0] and asked):
+        return comps, ""
+    try:
+        off, used = llm.same_kind(reader[0], reader[1], car, asked)
+    except Exception:
+        return comps, ""
+    if spent is not None:
+        spent.update(llm.add_used(spent, used))
+    count = min(len(asked), llm.KIND_ROWS)
+    if not off:
+        return comps, (f"Claude checked {'it' if count == 1 else f'those {count}'} against this car and found no other "
+                       "trim or generation among them.")
+    gone, names = set(), []
+    for index, why in sorted(off.items()):
+        comp = asked[index]
+        gone.add(id(comp))
+        names.append(f"{comp['title']} at {calc.money(comp['price'])} ({why})")
+        if say:
+            say(f"Left out: {comp['title']} at {calc.money(comp['price'])} (Bring a Trailer), Claude's check says it is {why}")
+    more = f", and {len(names) - 4} more" if len(names) > 4 else ""
+    return ([comp for comp in comps if id(comp) not in gone],
+            f"Claude checked {'it' if count == 1 else f'those {count}'} against this car and left out {len(off)} as another kind of car: "
+            f"{'; '.join(names[:4])}{more}.")
 
 
 def house_details(car: dict, comps: list[dict], say=None) -> list[dict]:
@@ -823,7 +856,8 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
 
     pool = ThreadPoolExecutor(max_workers=2)                 # cars for sale are looked for while the sales are
     for_sale = pool.submit(for_sale_side)
-    house = pool.submit(house_sales, car, tell)              # and Bring a Trailer's own record is read
+    spent: dict = {}
+    house = pool.submit(house_sales, car, tell, (client, model), spent)     # and Bring a Trailer's own record is read
     try:
         result = llm.research_comps(client, model, car, max_searches=max_searches, progress=progress)
         own, own_note = house.result()
@@ -837,7 +871,7 @@ def research_market(client, model: str, car: dict, max_searches: int, progress=N
         comps += again["comps"]
         rows = list(result.get("rows") or [])
         summary = f"{summary} {again['note']}".strip()
-        result["used"] = llm.add_used(result.get("used"), again["used"])
+        result["used"] = llm.add_used(result.get("used"), again["used"], spent)
         if not for_sale.done():
             tell(f"{len(comps)} sale{'s' if len(comps) != 1 else ''} and no-sales found. Finishing the search for cars for sale today")
         while not for_sale.done():                           # its lines are drawn from this thread
@@ -1447,6 +1481,7 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
             note = f"{wrong} car{'s' if wrong != 1 else ''} whose page states the other transmission {'were' if wrong != 1 else 'was'} removed. {note}".strip()
         return {"pending": {"add_comps": [], "keep": have}, "notices": [note or "There are no for-sale listings to check yet."]}
     wants_sale, refresh = what == "sale", what == "all"
+    looked_out = 0                                               # auctions already held that Claude's second look takes out
     known = [comp["url"] for comp in have if comp["url"]]
     early = {"live": 0, "gone": 0, "unknown": 0, "wrong": 0}
     if refresh:                                                  # every search again, as for a new car
@@ -1466,8 +1501,14 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
     else:                                             # with too few sales of the car's own kind, look for exactly that kind
         found = llm.research_comps(client, model, the_car, max_searches=searches, known=known, progress=progress,
                                    focus=bool(calc.kind_words(the_car, every=True)) and exact_sales(the_car, have) < 3)
-        own, own_note = house_sales(the_car, progress.say)       # Bring a Trailer's own record of the model
+        spent: dict = {}
+        own, own_note = house_sales(the_car, progress.say, (client, model), spent)    # Bring a Trailer's own record of the model
         found["comps"] = calc.merge_comps(own, found["comps"])
+        held = [comp for comp in have if calc.bat_row(comp)]     # the ones already here get the same second look
+        stays = {id(comp) for comp in same_kind_only(the_car, held, (client, model), progress.say, spent)[0]}
+        looked_out = sum(id(comp) not in stays for comp in held)
+        have = [comp for comp in have if not calc.bat_row(comp) or id(comp) in stays]
+        found["used"] = llm.add_used(found.get("used"), spent)
     better = calc.upgrade_leads(have, found["comps"])            # a lead whose own page has now turned up takes that page
     named = calc.take_rows(have, found.get("rows"))              # a copy of a market page's row takes what the page itself says
     if named:
@@ -1542,8 +1583,11 @@ def more_work(job, kind: str, what: str, the_car: dict, have: list[dict], client
         found_text = f"Found {len(fresh)} more sale{'s' if len(fresh) != 1 else ''}."
         if better:
             found_text += f" {better} you had now open{'s' if better == 1 else ''} on the auction's own page."
+        if looked_out:
+            found_text += (f" {looked_out} you had {'were' if looked_out != 1 else 'was'} left out: Claude's check found "
+                           f"{'them' if looked_out != 1 else 'it'} to be another kind of car.")
     return {"pending": {"add_comps": fresh, "keep": have},
-            "notices": [(f"{found_text} {note}".strip() if fresh or better or named else "The search found nothing new this time.") + (f" {cost}" if cost else "")]}
+            "notices": [(f"{found_text} {note}".strip() if fresh or better or named or looked_out else "The search found nothing new this time.") + (f" {cost}" if cost else "")]}
 
 
 def offer_work(job, car: dict, comps: list[dict], client, model: str, had_message: bool, buyer: str = "") -> dict:

@@ -27,6 +27,7 @@ BAT_MODELS = {
         auction(f"34k-Mile 2013 {CAB}", 85900, "2026-10-18", "2013-porsche-911-carrera-s-cabriolet-49"),                # no gears in the title: the automatic
         auction(f"29k-Mile 2012 {CAB} 7-Speed", 86000, "2026-09-16", "2012-porsche-911-carrera-s-cabriolet-19-2"),
         auction(f"10k-Mile 2014 {CAB} 7-Speed", 108000, "2026-08-22", "2014-porsche-911-carrera-s-cabriolet-20"),
+        auction(f"35k-Mile 2017 {CAB} 7-Speed", 95000, "2026-04-17", "2017-porsche-911-carrera-s-cabriolet-31"),         # the 991.2: right words, another engine
         auction(f"2012 {CAB} 7-Speed", 51000, "2021-03-02", "2012-porsche-911-carrera-s-cabriolet-2")],                   # years ago: left out
         [auction(f"2015 {CAB} 7-Speed", 54000, "2026-01-22", "2015-porsche-911-carrera-s-cabriolet-10", sold=False)]),
     "997-911": model_page("Porsche 997 911 Carrera S", [auction("2009 Porsche 911 Carrera S Cabriolet 6-Speed", 61000, "2026-07-01", "2009-porsche-911-carrera-s-cabriolet-3")]),

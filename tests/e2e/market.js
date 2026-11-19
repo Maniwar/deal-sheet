@@ -63,7 +63,12 @@ const fs = require('fs');
   const said = (caseText.match(/The app read Classic\.com's market page itself[^.]*\./) || [''])[0];
   log('3 summary', said);
   if (!/7 cars, 5 of them sold \(4 at auction\)/.test(said)) wrong.push('3: the summary does not say what the app read off the page');
-  if (!/Bring a Trailer's own record of this model was read directly: 6 auctions in all, 5 of them cars like this one \(4 sold\)/.test(caseText)) wrong.push('3: the summary does not say Bring a Trailer\'s record was read');
+  if (!/Bring a Trailer's own record of this model was read directly: 7 auctions in all, 6 of them cars like this one \(5 sold\)/.test(caseText)) wrong.push('3: the summary does not say Bring a Trailer\'s record was read');
+  // 3b. Claude's second look: the 2017 car has the right words in its title and another engine, so it is left out and named
+  const look = (caseText.match(/Claude checked those \d+ against this car.*?(\)\.|among them\.)/) || [''])[0];
+  log('3b second look', { said: look, gone: !sold.some((t) => t.includes('$95,000')) });
+  if (!/Claude checked those 6 against this car and left out 1 as another kind of car: 2017 Porsche 911 Carrera S Cabriolet 7-Speed at \$95,000 \(the later 991\.2, with the turbocharged engine\)\./.test(look)) wrong.push('3b: the summary does not say what Claude\'s check left out and why');
+  if (sold.some((t) => t.includes('$95,000'))) wrong.push('3b: the 2017 car Claude\'s check left out is still among the sales');
   if (/cannot be searched from the inside/.test(caseText)) wrong.push('3: the summary still says Bring a Trailer cannot be searched, after reading its record');
 
   // 4. the no-sale at $86,000: paste the auction's own link, and the card takes what that page says

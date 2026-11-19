@@ -14,6 +14,7 @@ hands back a plain dictionary.
 from __future__ import annotations
 
 import threading
+import traceback
 import time
 
 import llm
@@ -74,6 +75,7 @@ class Job:
         except llm.LLMError as exc:
             outcome = {"error": str(exc)}
         except Exception as exc:            # whatever went wrong, the screen must hear that the work has ended
+            traceback.print_exc()           # and the log must say what it was
             outcome = {"error": f"That stopped on an unexpected problem ({type(exc).__name__}). Try it again."}
         self.ended = time.time()
         self.outcome = outcome

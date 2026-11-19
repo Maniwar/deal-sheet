@@ -25,7 +25,10 @@ each auction's own page, and take the price from that page when its link is past
 text as a browser copies it (the cars for sale are read, the sales arrive without a price and the app says so)
 and adds a screenshot of a results page (its rows are read from the picture, in one request). Before any of
 that it checks Bring a Trailer's own record: the right model page out of three generations, asked for once,
-its sales on their own pages with VIN and equipment, an automatic, a coupe and a sale from years ago left out. `rows_test.py` checks
+its sales on their own pages with VIN and equipment, an automatic, a coupe and a sale from years ago left out. The record
+also holds a 2017 car with the right words in its title: the stand-in for Claude's second look answers no to it (and no to a
+number that is not on the list, which must be ignored), and the test checks that it is left out and named in the summary.
+A job that stops on an unexpected error now writes the error to the app's log (`/tmp/e2e/streamlit.log`). `rows_test.py` checks
 the reading of the page (as the page reader returns it and as a search shows it) and of an auction's page.
 The page layouts in these tests are the four seen on Nov 17, 2026: the live page's text (what a search
 result holds), the page as a browser shows it, the text a browser copies out of it (no sold prices), and the
